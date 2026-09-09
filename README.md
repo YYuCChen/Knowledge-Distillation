@@ -8,7 +8,7 @@
 
 [下载最新版本](https://github.com/YYuCChen/Knowledge-Distillation/releases/latest) · [开始使用](#开始使用) · [功能与来源](#功能与来源) · [常见问题](#常见问题) · [反馈问题](https://github.com/YYuCChen/Knowledge-Distillation/issues)
 
-> 当前公开版本：**2026.09.09.12**，适用于 **macOS 14 及以上的 Apple Silicon Mac**。Windows 构建与发行正在接续，尚无公开的 Windows 安装包。此仓库用于项目介绍、版本分发和反馈；应用源码目前保持私有。
+> 当前公开版本：**2026.09.09.12**，已提供 **Apple Silicon Mac** 与 **Windows x64** 安装包。Mac 要求 macOS 14 及以上；Windows 已验证环境为 Windows 10 22H2，Windows 11 与 ARM64 尚未验证。此仓库用于项目介绍、版本分发和反馈；应用源码目前保持私有。
 
 ## 目录
 
@@ -145,17 +145,24 @@ AI 可以提出有依据的新联系，你决定它是否有意思、是否还�
 
 打开 [Releases](https://github.com/YYuCChen/Knowledge-Distillation/releases/latest)，下载与你的设备对应的安装附件。
 
-当前 Mac 文件名为：
+| 设备 | 下载 `.12` 安装包 | 体积 |
+|---|---|---|
+| Apple Silicon Mac · macOS 14+ | [macOS arm64 ZIP](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.09.12/KnowledgeDistiller-2026.09.09.12-macOS-arm64.zip) | 约 1.56GB |
+| Windows x64 · 已验证 Windows 10 22H2 | [Windows x64 ZIP](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.09.12/KnowledgeDistiller-2026.09.09.12-Windows-x64.zip) | 约 1.90GB |
 
-```text
-KnowledgeDistiller-2026.09.09.12-macOS-arm64.zip
-```
+**Mac：** 解压后，把「知识蒸馏器.app」放入「应用程序」，再打开。
 
-解压后，把「知识蒸馏器.app」放入「应用程序」，再打开。应用会启动本地服务，并在浏览器中显示界面。基础运行依赖已经打包，使用者无需另行搭建 Python 开发环境。
+**Windows：** 把 ZIP **全部解压**到一个可写文件夹，再双击 `KnowledgeDistiller.exe`。不要直接在压缩包内运行，也不要只复制 EXE、丢掉同目录的运行资源。需要桌面入口时，可使用包内的「创建桌面快捷方式.vbs」。
+
+两个版本都会启动本地服务，并在浏览器中显示界面。基础运行依赖已经打包，使用者无需另行搭建 Python 开发环境。Chrome、Codex、Obsidian 及相应账号需要按所使用的功能自行准备。
+
+Windows 的服务窗口需要保留；关闭服务窗口或点击「退出知识蒸馏器」可停止服务。只关闭浏览器标签不会退出后台，再次双击程序可打开已有服务。
 
 请下载 **Assets 中的应用安装包**。GitHub 自动生成的 `Source code (zip)` 和 `Source code (tar.gz)` 不是应用安装包。
 
 当前 Mac 包采用 ad-hoc 签名，尚未进行 Apple Developer ID 签名与公证。首次打开可能出现系统安全提示。确认文件来自本项目发布页后，请依据 [Apple 官方说明](https://support.apple.com/zh-cn/102445)处理；不需要关闭系统整体安全保护。
+
+Windows EXE 目前未作发行者代码签名，可能出现未知发行者或 SmartScreen 提示。请核对下载来源；如果设备的组织安全策略阻止运行，应由设备管理员处理，不关闭系统防护。具体实测与未验证范围见包内《测试与支持范围.md》。
 
 ### 2. 选择知识保存位置
 
@@ -171,7 +178,8 @@ KnowledgeDistiller-2026.09.09.12-macOS-arm64.zip
 
 | 方案 | 运行方式 | 配置重点 |
 |---|---|---|
-| Qwen3-ASR 1.7B | Apple Silicon Mac 本地组件 | 首次主动下载安装，完成后再保存并启用；后续识别使用本地组件 |
+| Qwen3-ASR 1.7B · Mac | Apple Silicon MLX 本地组件 | 首次主动下载安装，完成后再保存并启用；后续识别使用本地组件 |
+| Qwen3-ASR 1.7B · Windows | Transformers CPU 本地组件 | 首次安装需要网络和额外磁盘，完成后保存并启用；速度与内存占用依机器而异，GPU 加速尚未验证 |
 | 豆包录音文件识别 | 云端服务 | 按应用内教程完成语音服务凭据、TOS 临时文件配置与启用 |
 
 下载 Qwen 组件不会自动替换当前语音方案；安装完成后，需要明确保存并启用。
@@ -220,11 +228,14 @@ KnowledgeDistiller-2026.09.09.12-macOS-arm64.zip
 | 应用数据目录中的原文件副本 | 用户提交的 PDF、EPUB、Markdown 等原始文件副本 |
 | 独立组件目录 | 由用户主动安装的本地语音识别组件等资源 |
 
-当前 Mac 应用数据默认位于：
+应用数据与程序安装位置分离，默认目录如下：
 
-```text
-~/Library/Application Support/Knowledge Distiller/
-```
+| 系统 | 应用数据目录 |
+|---|---|
+| Mac | `~/Library/Application Support/Knowledge Distiller/` |
+| Windows | `%LOCALAPPDATA%\Knowledge Distiller` |
+
+Windows 更换程序文件夹后，仍使用同一用户的数据目录。不要同时用两个不同版本操作同一数据目录。
 
 几件值得了解的事：
 
@@ -244,6 +255,7 @@ KnowledgeDistiller-2026.09.09.12-macOS-arm64.zip
 |---|---|
 | 浏览已有知识、查看主题和新知、本地字面搜索 | 本机 |
 | Mac 平台图片文字识别 | 本机 Apple Vision |
+| Windows 平台图片文字识别 | 本机 Paddle OCR |
 | 已支持文档的解析与本地 OCR | 本机文档处理组件 |
 | 安装完成后的 Qwen 语音识别 | 本机 |
 | 从内容平台取得材料、浏览器登录 | 相应平台与本机浏览器之间 |
@@ -253,7 +265,7 @@ KnowledgeDistiller-2026.09.09.12-macOS-arm64.zip
 
 选择云端处理时，任务所需的材料会交给相应服务处理。平台访问、云模型、语音识别及临时对象存储可能需要自己的账号或额度，费用与限制由对应服务决定；下载安装包不代表附赠这些服务。
 
-Mac 上的相关密钥使用系统钥匙串保存。升级后系统可能再次询问凭证访问权限，请本人核对并处理系统授权窗口。
+Mac 上的相关密钥使用系统钥匙串保存。升级后系统可能再次询问凭证访问权限，请本人核对并处理系统授权窗口。Windows 凭据由当前用户的 DPAPI 加密保存，复制凭据文件到另一台电脑或另一用户不能代替重新配置。
 
 ## 安装与版本更新
 
@@ -280,6 +292,17 @@ Mac 上的相关密钥使用系统钥匙串保存。升级后系统可能再次�
 4. 打开新版，在「设置 → 版本更新」确认版本。
 
 升级通常只替换应用程序；不要把删除数据目录或删除 Vault 当作升级步骤。涉及数据结构变更的后续版本，请同时阅读对应的发行说明。
+
+### Windows 如何更新
+
+Windows 的「版本更新」页显示实际版本和官方下载入口。当前尚不支持应用内下载、安装，因此请从发布页下载新版 ZIP：
+
+1. 等正在处理的任务结束，退出旧版服务；只关闭网页不算退出。
+2. 备份应用数据目录与自己的 Vault。
+3. 将新 ZIP 全部解压到新的文件夹，双击其中的 `KnowledgeDistiller.exe`。
+4. 确认版本、数据与笔记正常后，再清理旧程序文件夹，并更新需要使用的快捷方式。
+
+保留 `%LOCALAPPDATA%\Knowledge Distiller` 和已有 Vault，不要同时启动两个不同版本。Mac 的 Sparkle 与 `appcast.xml` 不作为 Windows 更新源。
 
 ## 项目是怎样走到这里的
 
@@ -309,7 +332,7 @@ Mac 上的相关密钥使用系统钥匙串保存。升级后系统可能再次�
 
 飞书投递、引导式配置、完整安装包和版本更新陆续接入。2026 年 9 月 9 日，`.12` Mac 版本通过本机升级与公开下载验证，开始通过 GitHub Releases 分发。
 
-目前，Windows 端正接续已有工程进行构建与发行准备。它需要自己的平台适配与运行验收，Mac 已发布并不代表 Windows 已完成。
+Windows 端随后接续已有工程，完成本平台适配、冻结构建与验收，并发布了同版本的 x64 ZIP。现在 Mac 与 Windows 安装包都可从同一个 GitHub Release 获取；两个平台的更新方式与验证范围分别说明。
 
 ## 技术组成
 
@@ -322,12 +345,13 @@ Mac 上的相关密钥使用系统钥匙串保存。升级后系统可能再次�
 | 知识输出 | Markdown、Obsidian | 来源型知识的长期持有与深读 |
 | 来源获取 | 按平台组织的适配器、浏览器连接及相关工具 | 恢复支持范围内的正文与媒体材料 |
 | 文档处理 | Docling、RapidOCR 及其运行资源 | PDF / EPUB 解析、本地文档 OCR 与结构定位 |
-| Mac 图片 OCR | Apple Vision | 识别平台图片中的文字 |
-| 本地语音 | Qwen3-ASR、Apple Silicon MLX 组件 | 选装后的本地语音识别 |
+| 平台图片 OCR | Mac 使用 Apple Vision；Windows 使用 Paddle | 识别平台图片中的文字 |
+| 本地语音 | Qwen3-ASR；Mac 使用 MLX，Windows 使用 Transformers CPU | 选装后的本地语音识别 |
 | 模型接入 | 本机 Codex、API 与云端 ASR 配置 | 执行明确任务所需的生成与语音处理 |
 | Mac 分发 | PyInstaller、Sparkle、Ed25519 验签 | 打包运行环境、验证和应用更新 |
+| Windows 分发 | 含运行依赖的 x64 ZIP、本地 EXE 启动入口 | 解压运行，通过官方下载入口手动升级 |
 
-这里的分工也解释了安装包的体积：Mac 基础包包含运行依赖与文档处理所需资源，当前 `.12` ZIP 约 **1.56GB**。Qwen 的运行组件与权重作为独立选装项，不随每次应用更新重新安装。
+这里的分工也解释了安装包的体积：基础包包含运行依赖与文档处理所需资源，当前 `.12` Mac ZIP 约 **1.56GB**，Windows ZIP 约 **1.90GB**。Qwen 的运行组件与权重作为独立选装项，已有可用安装在升级时继续保留。
 
 ## 当前状态与接下来的方向
 
@@ -339,11 +363,14 @@ Mac 上的相关密钥使用系统钥匙串保存。升级后系统可能再次�
 | 本地知识处理、主题、新知与 Obsidian 来源型笔记 | 已实现，持续打磨真实使用体验 |
 | 飞书链接与文本投递、必要待办 | 已接入，首次使用需要完成自己的机器人配置 |
 | Mac 版本检查、签名下载与安装 | 已接通并完成公开下载、隔离升级及本机升级验证 |
-| Windows 安装包 | 构建与发行接续中，尚未公开发布 |
-| Windows 应用内更新 | 需要独立的 Windows 实现与验收 |
+| Windows x64 安装包 | 已公开发布 `.12`；已验证 Windows 10 22H2 |
+| Windows 更新 | 提供实际版本与官方下载入口；应用内下载和安装尚未支持 |
+| Windows 11、Windows ARM64 | 尚未验证；当前发布的 Windows 包为 x64 |
 | Intel Mac、Linux 原生安装包 | 当前未提供 |
 
-下一步优先推进 Windows 分发、更多真实设备上的安装体验，以及来源连接、恢复流程与阅读质量的持续改进。
+Windows 验证范围依据发行包内《Windows使用说明.md》《测试与支持范围.md》：已记录最终 ZIP 解压、启动、单实例、退出重启和合成数据升级等结果；另一台干净 Windows、Windows 11、ARM64、其他 CPU/GPU 加速、长音频质量及真实账号飞书/B站等在线全链仍未验证。
+
+下一步优先推进更多真实设备上的安装体验、Windows 应用内更新，以及来源连接、恢复流程与阅读质量的持续改进。
 
 更远一些，项目还在探索面向具体目的的处理方式、持续同题成果、主题组织和知识演化的表达。这些仍是需要讨论、验证的产品方向，没有作为当前能力或确定交付日期承诺。
 
@@ -389,7 +416,7 @@ Mac 上的相关密钥使用系统钥匙串保存。升级后系统可能再次�
 
 ### Windows 用户现在应该下载哪个文件？
 
-当前还没有公开 Windows 安装包。Mac 的 `.app` 和 arm64 ZIP 不能在 Windows 运行；源码与开发交接包也不等同于安装包。Windows 正式产物会在完成构建与验收后添加到发布页。
+请下载 [KnowledgeDistiller-2026.09.09.12-Windows-x64.zip](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.09.12/KnowledgeDistiller-2026.09.09.12-Windows-x64.zip)，全部解压后运行 `KnowledgeDistiller.exe`。当前验证环境为 Windows 10 22H2；Windows 11 和 ARM64 尚未验证。Mac ZIP、源码 ZIP 与开发交接包都不能替代 Windows 安装包。
 
 ### 这个项目已经开源了吗？
 
