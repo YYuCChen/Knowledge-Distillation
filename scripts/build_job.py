@@ -217,7 +217,8 @@ def status_without_lock(job):
     return json.loads((job / 'status.json').read_text(encoding='utf-8')) if (job / 'status.json').exists() else {}
 
 
-def submit(job, request, retry=False):
+def submit(job, request, retry=False, *, supervised=False):
+    """Launch a worker; supervised jobs remain subject to the caller/CI host."""
     job.mkdir(parents=True, exist_ok=True)
     with locked(job / 'submit.lock', timeout=20):
         path = job / 'request.json'
@@ -227,11 +228,13 @@ def submit(job, request, retry=False):
         old = checked_success(job, status(job), request)
         if old['status'] in {'running', 'succeeded'}: return old
         if old['status'] != 'not-started' and not retry: return old
-        flags = (0x00000008 | 0x00000200 | 0x01000000) if os.name == 'nt' else 0
+        flags = (0x00000008 | 0x00000200) if os.name == 'nt' else 0
+        if os.name == 'nt' and not supervised:
+            flags |= 0x01000000  # CREATE_BREAKAWAY_FROM_JOB; never silently fall back
         with (job / 'worker.log').open('ab') as log:
             subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'run', str(job)] + (['--retry'] if retry else []),
                              stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
-                             creationflags=flags, start_new_session=os.name != 'nt')
+                             creationflags=flags, start_new_session=os.name != 'nt' and not supervised)
         for _ in range(100):
             new = status(job)
             if new.get('attempt', 0) > old.get('attempt', 0): return new
@@ -245,9 +248,11 @@ def main():
     parser.add_argument('job', type=Path)
     parser.add_argument('--request', type=Path)
     parser.add_argument('--retry', action='store_true')
+    parser.add_argument('--supervised', action='store_true',
+                        help='Keep submitted workers under the calling host; they may end with its job')
     args = parser.parse_args()
     if args.action == 'run': run(args.job, args.retry)
-    elif args.action == 'submit': print(json.dumps(submit(args.job, json.loads(args.request.read_text(encoding='utf-8')), args.retry)))
+    elif args.action == 'submit': print(json.dumps(submit(args.job, json.loads(args.request.read_text(encoding='utf-8')), args.retry, supervised=args.supervised)))
     elif args.action == 'status': print(json.dumps(status(args.job)))
     else:
         print(json.dumps(cancel(args.job)))

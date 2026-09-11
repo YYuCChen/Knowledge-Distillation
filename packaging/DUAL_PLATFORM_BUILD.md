@@ -20,3 +20,10 @@
 此脚本只生成候选。正式发布或替换安装包需要单独授权，并分别记录两端的真实验收结果。候选构建成功不代表公开发行已完成，也不证明历史发布包与当前源码逐字节一致。
 
 配置示例见 `dual-build-config.example.json`。复制到仓库外，填写实际工具、缓存、签名配置和经核实的主机信息；不要把私钥内容或私人配置放入源码。
+
+## 受宿主监督的构建作业
+
+托管 CI 可能禁止 Windows `CREATE_BREAKAWAY_FROM_JOB`。这类环境可显式使用
+`scripts/build_job.py submit <job> --request <request.json> --supervised`，让 worker
+保留在宿主作业内；宿主结束时它可能一同结束，不能宣称能跨 SSH/CI 退出持续运行。
+默认双主机构建仍要求独立后台 worker，权限不足会明确失败，不静默降级。

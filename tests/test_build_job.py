@@ -67,7 +67,7 @@ def test_status_does_not_hide_unexpected_lock_error(tmp_path, monkeypatch):
 def test_duplicate_submit_and_completed_reuse(tmp_path):
     job, request = prepare(tmp_path, 'import time; time.sleep(.2)')
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        states = list(pool.map(lambda _: build_job.submit(job, request), range(2)))
+        states = list(pool.map(lambda _: build_job.submit(job, request, supervised=True), range(2)))
     assert all(state['attempt'] == 1 for state in states)
     completed = wait_state(job, lambda state: state['status'] == 'succeeded')
     assert build_job.submit(job, request) == completed
@@ -105,7 +105,7 @@ def test_success_artifact_hash_is_checked_before_reuse_and_retry_rebuilds(tmp_pa
     state = build_job.submit(job, request)
     assert state['status'] == 'invalid-artifacts'
     assert len(list(job.glob('attempt-*'))) == 1
-    started = build_job.submit(job, request, retry=True)
+    started = build_job.submit(job, request, retry=True, supervised=True)
     assert started['attempt'] == 2
     done = wait_state(job, lambda state: state['status'] == 'succeeded')
     assert done['attempt'] == 2
@@ -225,3 +225,34 @@ def test_windows_transient_reader_sharing_retries_atomic_replace(tmp_path, monke
     build_job.write_json(target, {'status': 'running'})
     assert len(calls) == 2
     assert json.loads(target.read_text())['status'] == 'running'
+
+
+def test_supervised_launch_keeps_host_ownership(tmp_path, monkeypatch):
+    job, request = prepare(tmp_path)
+    original = build_job.subprocess.Popen
+    launches = []
+    def capture(*args, **kwargs):
+        launches.append(kwargs.copy())
+        return original(*args, **kwargs)
+    monkeypatch.setattr(build_job.subprocess, 'Popen', capture)
+    build_job.submit(job, request, supervised=True)
+    assert wait_state(job, lambda state: state['status'] == 'succeeded')['attempt'] == 1
+    assert len(launches) == 1
+    assert not launches[0]['start_new_session']
+    assert not launches[0]['creationflags'] & 0x01000000
+
+
+def test_default_launch_denial_is_not_silently_changed_to_supervised(tmp_path, monkeypatch):
+    job, request = prepare(tmp_path)
+    launches = []
+    def denied(*args, **kwargs):
+        launches.append(kwargs)
+        raise PermissionError('host rejects worker launch')
+    monkeypatch.setattr(build_job.subprocess, 'Popen', denied)
+    with pytest.raises(PermissionError, match='host rejects'):
+        build_job.submit(job, request)
+    assert len(launches) == 1
+    if os.name == 'nt':
+        assert launches[0]['creationflags'] & 0x01000000
+    else:
+        assert launches[0]['start_new_session']
