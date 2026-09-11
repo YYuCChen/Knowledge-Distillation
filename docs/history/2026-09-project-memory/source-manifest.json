@@ -1,0 +1,134 @@
+{
+  "date": "2026-09-12",
+  "scope": "仅列本次已经审阅并公开的源材料；不是全部历史或真实知识数据的备份清单。",
+  "sources": [
+    {
+      "source_document": "KNOWLEDGE_CONSTITUTION.md",
+      "source_sha256": "c15b3e476d074236d57efef4aaf55ed8aee4ecdd21158356505d409694831eb6",
+      "public_document": "docs/history/2026-09-project-memory/knowledge-constitution.md",
+      "public_sha256": "7a52d4593fd1d3efd3037173ad54be3fc30fac2fb81f2b40f7d8154b7e3064af",
+      "treatment": "完整正文＋归档说明；如有删改见 note",
+      "note": "保留完整原文。第6、7节是早期单素材 MVP 的阶段边界，已不等同 V1.1 能力清单；认知原则的具体应用以现行知识语义及明确新裁决为准。"
+    },
+    {
+      "source_document": "KNOWLEDGE_DERIVATION_CONTRACT.md",
+      "source_sha256": "8f4cbbc9e019b10a6a1e0c2627df48ab7a98ab0c73cce3c0af831c9ca5ce26fa",
+      "public_document": "docs/history/2026-09-project-memory/knowledge-derivation.md",
+      "public_sha256": "dfaad67420b77c5e97da114269a91f9f95c65374ecc72961304f1a354c321522",
+      "treatment": "完整正文＋归档说明；如有删改见 note",
+      "note": "保留完整原文。单条抖音口播与“尚未进入主题/整理”的表述属于早期阶段；不得据此撤销后来已实现的多平台、主题和整理能力。"
+    },
+    {
+      "source_document": "KNOWLEDGE_ORGANIZATION_AND_GROWTH_DECISION_LOG.md",
+      "source_sha256": "0c3750e9cbdd60e609bab3e0ffb1b981e322f890255951776a5ad2401dd64a8f",
+      "public_document": "docs/history/2026-09-project-memory/organization-decisions.md",
+      "public_sha256": "f1c943f4861bfdf7d5d8d930abc854065966c2bc6d177b826e1fe151bde69015",
+      "treatment": "完整正文＋归档说明；如有删改见 note",
+      "note": "保留完整原文及 ORG-001～048 编号。ORG-042 的 Obsidian 方向已被后来决定替代；正文“当前有效决策”是原台账标题，不代表48项均已对最新源码重新验收。所提其他旧合同名为历史索引，并非仓库中承诺存在的文件。"
+    },
+    {
+      "source_document": "LOCAL_WEB_USER_DESIGN_INPUT_EXTRACT.md",
+      "source_sha256": "f751c3e3cc1c5379624f17f9b6e84364f80f30f0c098480857d719bb9bf26bc8",
+      "public_document": "docs/history/2026-09-project-memory/design-intent-20260825.md",
+      "public_sha256": "3b16c5b1680847e113f0c77fca4eecd94f7c9da829a51758dc28ba5fdf71210c",
+      "treatment": "完整正文＋归档说明；如有删改见 note",
+      "note": "保留完整原文。暖白/黏土色、旧顶层导航、旧控件数字是当时专题记录，不能覆盖现行界面与后续用户纠偏。来源文件名用于追溯旧档，不是当前实现证明。"
+    },
+    {
+      "source_document": "远期构想原文-产品规格第13节.md",
+      "source_sha256": "f7cb04ed262bddfdbb18ec8c25f0daea7e395b32cf54ca568c44b6ce03875c72",
+      "public_document": "docs/history/2026-09-project-memory/initial-future-directions.md",
+      "public_sha256": "68df0c7835d8dac64ffbd4e3ce66f00dc381d5080ea3135a02c76c9785cfb195",
+      "treatment": "完整构想正文；来源说明与链接调整",
+      "note": "§11 为旧规格章节；当前取消同题综合的边界见现行产品范围。"
+    },
+    {
+      "source_document": "DISCUSSION.md",
+      "source_sha256": "6f09ec4c519dfd7c70c581576f2eeee9585a269dcbc7e63111016eb27fcc3a87",
+      "public_document": "docs/history/2026-09-project-memory/four-directions-discussion.md",
+      "public_sha256": "157de5cbd95a58a39d9112b1ec242f6f29eef839106cdbe991902fac86765c4d",
+      "treatment": "完整正文＋归档说明；如有删改见 note",
+      "note": "保留四个方向的完整分析、候选方案、取舍与验证建议；调整引用，移除末尾本机附件/操作现场摘要和作息措辞。所有建议仍为讨论稿。"
+    },
+    {
+      "source_document": "远期产品构想深度讨论（可见记录导出）",
+      "source_sha256": "1ed87b3238c75c469d5ca22b80b861f0da0cacabd7fa45983e463ffd9cea7569",
+      "public_document": "docs/history/2026-09-project-memory/future-discussion.md",
+      "public_sha256": "58789dcf468fa46dd0c3bc70003ba53c82dc0d2370489d75521d62fcaa202b9c",
+      "treatment": "提取4段可见产品讨论；保留角色",
+      "note": "去除会话/附件元数据、私人交流开头、替换本机链接；未补写不可见历史。"
+    },
+    {
+      "source_document": "专题阶段结论.md",
+      "source_sha256": "cc7c8e0ea90b4e5f71f53f19999ef5c489f07d574e7058cc09a7794bdad38c6c",
+      "public_document": "docs/history/2026-09-project-memory/obsidian-reading.md",
+      "public_sha256": "9f5967a9a368c7d16632a467887b52264f0945c577916ea0f39f55406e6978df",
+      "treatment": "完整正文＋归档说明；如有删改见 note",
+      "note": "保留设计偏好、证据边界、媒体方向和未完成验收。替换真实预览文件/配置路径与任务接续句；不包含实际知识样本。"
+    },
+    {
+      "source_document": "V1_PRODUCT_SPEC.md",
+      "source_sha256": "913855be2935fe135009ad7834d6f2d0a5c3e70b01bc491544a09174ca729569",
+      "public_document": "docs/history/2026-09-project-memory/windows-delta-request.md",
+      "public_sha256": "951ea78850b4d76f9048aa6d654387f89b1180f4633401ad153a38ca55412478",
+      "treatment": "单条原文摘录",
+      "note": "其余§14含被替代授权、签名环境和旧实现状态，不整段公开。"
+    },
+    {
+      "source_document": "调研报告.md",
+      "source_sha256": "1998d67a1d150bbad6449d5aa84caa4e13262f42a7f163c63df0c5fbf4750d57",
+      "public_document": "docs/research/2026-09-11-knowledge-to-tools/report.md",
+      "public_sha256": "e3eb448ed4b8161fc18002d0bc3d5957ed841884d51e9ec170934664f6dccbb0",
+      "treatment": "完整报告；归档说明与相对链接调整",
+      "note": "来源清单末尾更新存放状态；保留原有证据深度、版本与研究局限。"
+    },
+    {
+      "source_document": "来源与证据清单.md",
+      "source_sha256": "c4f09b40eb1f436d2a631ad83b05d0b850896ac5eb045693aba90e3318c997cf",
+      "public_document": "docs/research/2026-09-11-knowledge-to-tools/sources.md",
+      "public_sha256": "2e236dc392d030b502c8b3a1f321fa5269a919cde161b0bab74a40e72f46f786",
+      "treatment": "完整报告；归档说明与相对链接调整",
+      "note": "来源清单末尾更新存放状态；保留原有证据深度、版本与研究局限。"
+    },
+    {
+      "source_document": "远期构想与待决事项.md",
+      "source_sha256": "ba9159c1e2f1fb815cd1609ed0e851e0e010c86a30244c3782e7305491fa929d",
+      "public_document": "docs/roadmap/exploration.md",
+      "public_sha256": "855e395e478a91f1cf7df55f98cf34ea07633fd4ea418a35a519e69fa79498d3",
+      "treatment": "整理合并；不是逐字完整原文",
+      "note": "保留意图、状态与验收边界；不公开本机操作现场、真实任务内容和配置。"
+    },
+    {
+      "source_document": "下一版优化待办.md",
+      "source_sha256": "fd0e77b0d9e5d5d9f890350f8048e28da20932ed0944112f014f52758963a069",
+      "public_document": "docs/roadmap/next-version.md",
+      "public_sha256": "b912ea508066ea823a60cbb6e3e4271946f03ee0c21e50e08ddfc9828688eca4",
+      "treatment": "整理合并；不是逐字完整原文",
+      "note": "保留意图、状态与验收边界；不公开本机操作现场、真实任务内容和配置。"
+    },
+    {
+      "source_document": "接续记录.md",
+      "source_sha256": "dd47b6baa40e5488ea4ca6b5db296fb5abff8e74841f34c7d5f0c312a39f1b76",
+      "public_document": "docs/history/2026-09-project-memory/design-handoff.md",
+      "public_sha256": "d97763a1fa14c43d64cebcc1c0ff70c6b94bc28ec978ffec040af0adb6ac8d19",
+      "treatment": "整理合并；不是逐字完整原文",
+      "note": "保留意图、状态与验收边界；不公开本机操作现场、真实任务内容和配置。"
+    },
+    {
+      "source_document": "覆盖与差异.md",
+      "source_sha256": "e73d3d7538d6a6c567339680b9d7bad3900a0d77c76ecb39d5c3c799573dcf3e",
+      "public_document": "docs/history/2026-09-project-memory/design-handoff.md",
+      "public_sha256": "d97763a1fa14c43d64cebcc1c0ff70c6b94bc28ec978ffec040af0adb6ac8d19",
+      "treatment": "整理合并；不是逐字完整原文",
+      "note": "保留意图、状态与验收边界；不公开本机操作现场、真实任务内容和配置。"
+    },
+    {
+      "source_document": "审阅与维护.md",
+      "source_sha256": "422e8656e468f97f777c68ae1e2bacdf4ba3d3662154eed0fd242a9e246d0ece",
+      "public_document": "docs/history/2026-09-project-memory/design-handoff.md",
+      "public_sha256": "d97763a1fa14c43d64cebcc1c0ff70c6b94bc28ec978ffec040af0adb6ac8d19",
+      "treatment": "整理合并；不是逐字完整原文",
+      "note": "保留意图、状态与验收边界；不公开本机操作现场、真实任务内容和配置。"
+    }
+  ]
+}
