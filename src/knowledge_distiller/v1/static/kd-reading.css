@@ -1,0 +1,44 @@
+/* Knowledge Distiller reading style. Scoped to cssclasses: kd-reading.
+   Disable this snippet in Obsidian to keep the native Markdown presentation. */
+.kd-reading {
+  --file-line-width:640px;
+  --font-text: 'KD Reading Serif','Songti SC',serif;
+  --font-text-size:17px;
+  --line-height-normal:1.9;
+  font-family:var(--font-text);font-size:17px;line-height:1.9;letter-spacing:.6px;
+  text-align:left;
+}
+.theme-light .kd-reading {--text-normal:#282c32;--text-muted:#525a64;--text-faint:#69727d;--link-color:#345e7b;--link-color-hover:#21465f;--background-primary:#fff;background:#fff;color:#282c32;}
+.kd-reading .markdown-preview-sizer {max-width:640px;margin-inline:auto;}
+.kd-reading h1 {font:600 28px/1.55 var(--font-text);letter-spacing:1.2px;margin-bottom:24px;overflow-wrap:anywhere;}
+.kd-reading h2 {font:600 20px/1.65 var(--font-text);border-top:1px solid var(--background-modifier-border);padding-top:24px;margin-top:44px;margin-bottom:20px;}
+.kd-reading h3 {font:600 18px/1.8 var(--font-text);border-top:1px solid var(--background-modifier-border);padding-top:24px;margin-top:36px;}
+.kd-reading p {margin:0 0 16px;}
+.kd-reading .kd-source-meta {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:24px;margin:24px 0;font:400 13px/1.9 'PingFang SC',sans-serif;letter-spacing:0;color:var(--text-muted);}
+.kd-reading .kd-source-meta-left,.kd-reading .kd-source-meta-right {display:flex;flex-direction:column;gap:5px;min-width:0;overflow-wrap:anywhere;}
+.kd-reading .kd-source-meta-right {text-align:right;align-items:flex-end;}
+.kd-reading .callout[data-callout='quote'] {--callout-color:105,114,125;background:transparent;border:0;border-left:2px solid var(--background-modifier-border);border-radius:0;font-size:15px;line-height:1.65;letter-spacing:.3px;margin:12px 0 28px;}
+.kd-reading .callout[data-callout='quote'] p {margin:0 0 7px;}
+.kd-reading .callout[data-callout='quote'] .callout-title {font:500 13px/1.65 'PingFang SC',sans-serif;}
+.kd-reading .callout[data-callout='kd-source'] {background:var(--background-secondary);border:0;border-radius:0;padding:24px;margin-top:16px;font:500 17px/1.9 var(--font-text);color:var(--text-normal);}
+.theme-light .kd-reading .callout[data-callout='kd-source'] {background:#f2f4f5;}
+.kd-reading .callout[data-callout='kd-source'] > .callout-title {display:none;}
+.kd-reading .callout[data-callout='kd-source'] > .callout-content {overflow-wrap:anywhere;}
+.kd-reading .callout[data-callout='kd-source'] pre {white-space:pre-wrap;}
+@media(max-width:600px) {
+  .kd-reading .kd-source-meta {column-gap:12px;grid-template-columns:minmax(0,1fr) minmax(0,1fr);}
+  .kd-reading .callout[data-callout='kd-source'] {padding:16px;}
+  .kd-reading h1 {font-size:25px;}
+}
+
+.kd-reading .metadata-container,.kd-reading .inline-title {display:none !important;}
+
+.kd-reading .callout[data-callout='kd-source'] {margin:0;padding-block:8px;}
+.kd-reading .callout[data-callout='kd-source'] .callout-content > p:last-child {margin-bottom:0;}
+
+/* Evidence disclosure: solid when collapsed, hollow when expanded. */
+.kd-reading .callout[data-callout='quote'] > .callout-title > .callout-icon {display:none;}
+
+.kd-reading .callout[data-callout='quote'] > .callout-title > .callout-fold {display:none;}
+.kd-reading .callout[data-callout='quote'] > .callout-title::before {content:'';display:inline-block;box-sizing:border-box;width:5px;height:5px;flex:0 0 5px;border:1px solid currentColor;border-radius:50%;background:transparent;margin-right:5px;align-self:center;}
+.kd-reading .callout[data-callout='quote'].is-collapsed > .callout-title::before {background:currentColor;}

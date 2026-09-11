@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}新知 · 知识蒸馏器{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='topics.css') }}"><link rel="stylesheet" href="{{ url_for('static', filename='insights.css') }}">{% endblock %}
+{% block content %}
+<main class="page-width insight-page" data-insight-state="{{ state }}">
+  <header class="topbar"><span></span><a href="{{ url_for('settings.page', return_to=request.full_path) }}">设置{% if update is defined %}<img data-update-attention src="{{ url_for('static', filename='icons/update-attention.svg') }}" alt="有新版更新说明" {% if not update.attention %}hidden{% endif %}>{% endif %}</a></header>
+  <nav class="main-nav" aria-label="主要页面"><a href="{{ url_for('topics.index') }}">主题</a><a href="{{ url_for('home') }}">首页</a><strong aria-current="page">新知</strong></nav>
+  <header class="topic-heading"><h1>认知暗涌</h1><p data-insight-count>{% if not error %}{% if state=='interesting' %}回顾过去 {% elif state=='rethink' %}有 {% endif %}{{ items|length }} {{ '条值得看看' if state=='pending' else ('条灵感' if state=='interesting' else '条新知可以再琢磨一下') }}{% endif %}</p></header>
+  <nav class="insight-filters" aria-label="新知筛选">{% for key,label in [('pending','新整理'),('interesting','有意思'),('rethink','再想想')] %}<a href="{{ url_for('insights.index', state=key) }}" {% if key==state %}aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}</nav>
+  <div class="insight-scroll" data-scroll-area>
+    {% if error %}<p role="alert">{{ error }}</p>{% endif %}
+    {% for item in items %}{% set number = loop.index %}{% include "insight_card.html" %}{% endfor %}
+    <p class="topic-empty" data-empty {% if items or error %}hidden{% endif %}>{{ '暂无待判断的新知。已判断的内容可在“有意思”或“再想想”中查看。' if state=='pending' else ('还没有标记为有意思的新知。' if state=='interesting' else '暂时没有需要再想一想的新知。') }}</p>
+  </div>
+</main>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='insights.js') }}" defer></script>{% endblock %}

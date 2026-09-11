@@ -1,0 +1,44 @@
+{% extends "collection_base.html" %}
+{% block title %}确认内容范围 · 知识蒸馏器{% endblock %}
+{% block collection_content %}
+<section class="section collection-page">
+  <h2>确认内容范围</h2>
+  {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+  {% if preview %}
+    {% if not preview.scopes %}
+    <div class="scope-panel"><h3>{{ preview.profile_title }}</h3><p class="scope-note">选择这次要处理的内容。主页全部内容包含未归入合集的作品；所有合集只处理作者当前列出的合集。</p>
+    <form action="{{ url_for('collections.select') }}" method="post" data-scope-form>
+      <input type="hidden" name="token" value="{{ preview.token }}">
+      <fieldset class="scope-options"><legend>处理范围</legend>
+        <label><input type="radio" name="mode" value="full_profile" required> 主页全部内容<span>包含未归类作品</span></label>
+        <label><input type="radio" name="mode" value="all_collections" {% if not preview.choices %}disabled{% endif %}> 所有合集<span>{{ preview.choices|length }} 个独立合集，不含未归类作品</span></label>
+        <label><input type="radio" name="mode" value="selected" {% if not preview.choices %}disabled{% endif %}> 选择合集</label>
+      </fieldset>
+      <div class="scope-choices">{% for choice in preview.choices %}<label><input type="checkbox" name="collection" value="{{ choice.key }}" {% if choice.member_count is defined and choice.member_count == 0 %}data-empty="true"{% endif %} disabled> {{ choice.title }}{% if choice.member_count is defined and choice.member_count == 0 %}（暂无内容）{% endif %}</label>{% endfor %}</div>
+      <div class="scope-actions"><button type="submit" class="scope-primary">预览范围</button></div>
+    </form></div>
+    {% else %}
+    <p class="scope-note">{% if preview.scopes[0].capture_nonce %}请核对以下链接范围。确认时会检查范围和连接状态；素材内容以实际采集并核对后的结果为准。{% else %}请核对以下范围。确认时会再次检查；范围或内容有变化时，会请你重新确认。{% endif %}</p>
+    {% if preview.empty_collections %}<p class="scope-note">以下合集目前没有内容，本次不创建任务：{% for choice in preview.empty_collections %}{{ choice.title }}{% if not loop.last %}、{% endif %}{% endfor %}。</p>{% endif %}
+    {% for scope in preview.scopes %}
+    <article class="scope-panel">
+      <h3>{{ scope.title }}</h3>
+      <p class="scope-note">{{ {'full_profile':'主页全部内容（含未归类作品）','creator_collection':'作者合集','same_topic':'同题内容','bilibili_range':'B 站内容范围'}[scope.kind] }} · 共 {{ scope.members|length }} 条</p>
+      {% set unsupported = scope.members|rejectattr('supported')|list|length %}
+      {% if unsupported %}<p class="scope-warning">{{ unsupported }} 条暂不支持，会保留在本次范围中。其余内容可以独立收录。</p>{% endif %}
+      <details class="scope-members"><summary>查看 {{ scope.members|length }} 条内容</summary><ol>{% for member in scope.members %}<li><a href="{{ member.url if member.url is defined else 'https://www.douyin.com/video/' ~ member.item_id }}" target="_blank" rel="noreferrer" title="{{ member.title }}">{{ member.title or '作品 ' ~ member.item_id }}</a><span>{{ '可处理' if member.supported else '暂不支持' }}</span></li>{% endfor %}</ol></details>
+    </article>
+    {% endfor %}
+    <form action="{{ url_for('collections.confirm') }}" method="post" data-scope-form>
+      <input type="hidden" name="token" value="{{ preview.token }}">
+      {% for scope in preview.scopes %}<input type="hidden" name="signature" value="{{ scope.signature }}">{% endfor %}
+      {% if preview.scopes|selectattr('kind','equalto','same_topic')|list %}<label class="same-topic"><input type="checkbox" name="same_topic" value="yes" required> 我确认这些作品属于同一话题</label>{% endif %}
+      <p class="scope-note">{% if preview.scopes|selectattr('kind','equalto','same_topic')|list %}同题素材保留在一组中，每条独立蒸馏；成功结果分别保存。{% elif preview.scopes|selectattr('kind','equalto','bilibili_range')|list %}所选范围的成员分别蒸馏；单条失败不抹掉其他已成功的结果。{% else %}每个合集独立处理，单条失败不会抹掉其他已成功的结果。全部成员成功后才生成集合综合。{% endif %}</p>
+      <div class="scope-actions"><button type="submit" class="scope-primary">确认范围并开始</button></div>
+    </form>
+    {% endif %}
+    <form action="{{ url_for('collections.dismiss') }}" method="post" class="scope-dismiss"><input type="hidden" name="token" value="{{ preview.token }}"><button class="scope-secondary">取消，返回首页</button></form>
+  {% else %}<a href="{{ url_for('home') }}">返回首页重新投递</a>{% endif %}
+</section>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static',filename='collections.js') }}"></script>{% endblock %}

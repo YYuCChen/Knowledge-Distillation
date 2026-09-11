@@ -1,0 +1,94 @@
+/* Figma 106:195. Missing sizes/states inherit the same action palette.
+   Hover preserves geometry; the small-secondary variant's growth is not applied
+   to live layouts. A subtle inset ring provides feedback without moving text. */
+:is(.primary-button, .primary-small, .intake-actions button, .insight-primary, .scope-primary) {
+  --action-bg: var(--action-primary);
+  --action-fg: var(--page);
+  --action-down: var(--action-primary-pressed);
+}
+:is(.secondary-button, .secondary-small, .original-link,
+    .insight-actions button, .scope-secondary, .upload, .failure-actions a) {
+  --action-bg: var(--soft);
+  --action-fg: var(--action-text);
+  --action-down: var(--action-secondary-pressed);
+}
+.insight-actions .insight-primary {
+  --action-bg: var(--action-primary);
+  --action-fg: var(--page);
+  --action-down: var(--action-primary-pressed);
+}
+:is(.outline-button, .outline-choice, .source-actions button, .source-actions a,
+    .knowledge-actions .source-link, .point-source a, .point-origin button,
+    .insight-sources a, .topic-search button, .card-chevron) {
+  --action-bg: transparent;
+  --action-fg: var(--action-text);
+  --action-down: var(--action-secondary-pressed);
+}
+:is(.primary-button, .secondary-button, .outline-button, .primary-small, .secondary-small,
+    .outline-choice, .intake-actions button, .organization-section button,
+    .insight-actions button, .scope-primary, .scope-secondary, .upload,
+    .knowledge-actions a, .knowledge-actions button.source-link, .source-actions button,
+    .source-actions a, .point-source a, .point-origin button, .insight-sources a,
+    .topic-search button, .card-chevron, .failure-actions a) {
+  background-color: var(--action-bg, transparent);
+  color: var(--action-fg, var(--action-text));
+  border-radius: 6px;
+  transition: background-color 100ms ease, box-shadow 100ms ease;
+}
+:is(button, .upload, .knowledge-actions a, .source-actions a, .point-source a,
+    .insight-sources a, .failure-actions a):not(:disabled):not([aria-disabled="true"]):not(.card-chevron):hover {
+  box-shadow: inset 0 0 0 1px rgb(77 76 72 / 18%);
+}
+:is(.source-actions button, .source-actions a, .knowledge-actions .source-link,
+    .point-source a, .point-origin button, .insight-sources a, .topic-search button,
+    .source-link):not(:disabled):hover {
+  background-color: var(--soft);
+}
+.todo-list .source-actions :is(button, a):not(:disabled):not([aria-disabled="true"]):hover {
+  background-color: transparent;
+  box-shadow: none;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+:is(button, .upload, .knowledge-actions a, .source-actions a, .point-source a,
+    .insight-sources a, .failure-actions a):not(:disabled):not([aria-disabled="true"]):not(.card-chevron):active {
+  background-color: var(--action-down, var(--action-secondary-pressed));
+  box-shadow: none;
+}
+:is(button, .knowledge-actions .is-disabled, .handoff-disabled, .unavailable-source):disabled,
+:is(.knowledge-actions .is-disabled, .handoff-disabled, .unavailable-source, [aria-disabled="true"]) {
+  background: var(--action-disabled);
+  border-color: var(--action-disabled);
+  color: var(--page);
+  opacity: 1;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+:is(.handoff-disabled, .unavailable-source) { border-radius: 6px; padding: 6px 7px; flex-shrink: 0; }
+:is(a, button, summary, input, textarea, select):focus-visible {
+  outline: 2px solid var(--line);
+  outline-offset: 3px;
+}
+:is(.main-nav a, .topbar a, .topic-back, .topic-search a):hover { color: #141413; text-decoration: underline; text-underline-offset: 4px; }
+:is(.main-nav a, .topbar a, .topic-back, .topic-search a):active { color: var(--action-primary-pressed); }
+:is(.topic-card):hover { background-color: rgb(231 229 221 / 24%); }
+:is(.topic-card, .knowledge-card summary, .topic-point summary, .insight-card summary, .group-heading, .model-row):active { background-color: var(--action-secondary-pressed); }
+.insight-filters a:not([aria-current]):hover { background: var(--action-secondary-pressed); border-radius: 4px; }
+.insight-filters a:active { box-shadow: inset 0 0 0 1px var(--line); }
+
+/* Existing native alerts/confirmations extended from the 640px column,
+   Source confirmation card, 16px spacing and Medium action roles. */
+.app-dialog { width: min(480px, calc(100vw - 32px)); max-height: calc(100dvh - 64px); padding: 24px; color: var(--text); background: var(--card); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 12px 40px rgb(20 20 19 / 12%); }
+.app-dialog::backdrop { background: rgb(20 20 19 / 20%); }
+.app-dialog h2 { margin: 0 0 16px; font: 600 16px/normal "Noto Serif SC", serif; letter-spacing: 1.6px; }
+.app-dialog p { margin: 0; font: 400 12px/22px "Noto Sans SC", sans-serif; letter-spacing: .6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.app-dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+.app-dialog-actions button { padding: 6px 10px; font-size: 12px; line-height: 16px; letter-spacing: .6px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+.model-row:active .secondary-button { background: var(--action-secondary-pressed); }
+
+/* The field containers carry focus; their inner controls do not add a second frame. */
+.intake textarea:focus-visible, .topic-search input:focus-visible, .insight-body textarea:focus-visible { outline: none; box-shadow: none; }
+:is(.primary-button, .primary-small, .intake-actions button, .insight-actions .insight-primary, .scope-primary):not(:disabled):not([aria-disabled="true"]):not(.card-chevron):hover { box-shadow: inset 0 0 0 1px var(--line); }
+:is(.primary-button, .primary-small, .intake-actions button, .insight-actions .insight-primary, .scope-primary):not(:disabled):not([aria-disabled="true"]):not(.card-chevron):active { box-shadow: none; }

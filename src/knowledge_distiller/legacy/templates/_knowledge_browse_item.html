@@ -1,0 +1,29 @@
+<article class="knowledge-browse-item">
+  <details class="knowledge-browse-details">
+    <summary aria-label="展开查看《{{ item.title }}》的核心观点">
+      <span class="knowledge-browse-order" aria-hidden="true">{{ item.position }}</span>
+      <span class="knowledge-browse-copy">
+        <strong>{{ item.title }}</strong>
+        <span class="knowledge-browse-summary">{{ item.summary }}</span>
+        <span class="knowledge-browse-meta">
+          {% if item.source_line %}
+            <span>来源：{{ item.source_line }}</span><span aria-hidden="true"> · </span>
+          {% endif %}
+          <time datetime="{{ item.published_at }}">{{ item.display_time }}</time>
+        </span>
+      </span>
+      <svg class="knowledge-browse-chevron" aria-hidden="true" viewBox="0 0 20 20">
+        <path d="m4 7 6 6 6-6"/>
+      </svg>
+    </summary>
+    <div class="knowledge-browse-core">
+      <h2>核心观点</h2>
+      <ol>
+        {% for statement in item.core_point_statements %}<li>{{ statement }}</li>{% endfor %}
+      </ol>
+    </div>
+  </details>
+  {% if item.obsidian_uri %}
+    <a class="library-obsidian-action" href="{{ item.obsidian_uri }}">在 Obsidian 中打开</a>
+  {% endif %}
+</article>

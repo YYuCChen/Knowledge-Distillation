@@ -1,0 +1,41 @@
+.collection-page { width: 100%; min-width: 0; }
+.collection-page h2 { overflow-wrap: anywhere; }
+.scope-panel { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 16px; margin: 10px 0; }
+.scope-panel h3, .collection-card h3, .collection-combined h3 { font: 600 14px/normal "Noto Serif SC",serif; letter-spacing: 1.4px; margin: 0; overflow-wrap: anywhere; }
+.scope-note, .scope-warning, .collection-return { font: 400 11px/1.8 "Noto Sans SC",sans-serif; letter-spacing: .5px; color: var(--secondary); margin: 8px 0; }
+.scope-warning { color: var(--danger); }
+.scope-options { border: 0; padding: 0; margin: 16px 0 8px; }
+.scope-options legend { font: 600 12px/1.8 "Noto Serif SC",serif; margin-bottom: 8px; }
+.scope-options label, .scope-choices label { display: block; font-size: 12px; line-height: 2; margin: 8px 0; }
+.scope-options label span { display: block; margin-left: 24px; color: var(--muted); font-size: 10px; }
+.scope-choices { padding-left: 24px; }
+.scope-choices:has(input:disabled) { color: var(--muted); }
+.scope-options input, .scope-choices input, .same-topic input { accent-color: var(--ink); margin-right: 6px; }
+.scope-actions { display: flex; justify-content: flex-end; gap: 10px; margin: 12px 0; }
+.scope-primary, .scope-secondary { border: 0; border-radius: 6px; padding: 7px 14px; font: 400 14px/17px "Noto Sans SC",sans-serif; letter-spacing: .7px; cursor: pointer; }
+.scope-primary { color: var(--page); background: var(--action-primary); }
+.scope-secondary { color: var(--text); background: var(--soft); }
+.scope-dismiss { text-align: right; margin: 8px 0; }
+.same-topic { display: block; font-size: 12px; margin: 12px 0; }
+.scope-members summary, .collection-combined summary { cursor: pointer; font-size: 11px; color: var(--secondary); padding: 8px 0; }
+.scope-members ol { padding-left: 24px; margin: 0; }
+.scope-members li { display: list-item; font-size: 11px; line-height: 2; border-top: 1px solid var(--soft); padding: 5px 0; }
+.scope-members li a { display: inline-block; width: calc(100% - 78px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: top; color: var(--text); }
+.scope-members li span { display: inline-block; width: 70px; text-align: right; color: var(--muted); }
+.collection-card { display: grid; grid-template-columns: 64px minmax(0,1fr) 64px; border-top: 1px solid var(--line); min-height: 96px; padding: 16px 0; box-sizing: border-box; }
+.collection-card h3 a { color: inherit; text-decoration: none; }
+.collection-card p { color: var(--secondary); font-size: 10px; line-height: 1.7; margin: 4px 0; }
+.collection-number { text-align: center; font: 500 14px/1.7 "Noto Sans SC",sans-serif; }
+.collection-open { display: flex; justify-content: center; padding-top: 5px; }
+.collection-open img { width: 8px; height: 8px; }
+.collection-ledger { list-style: none; padding: 0; margin: 0; }
+.collection-ledger li { display: grid; grid-template-columns: 40px minmax(0,1fr) 70px; align-items: start; gap: 10px; padding: 12px 0; border-top: 1px solid var(--line); font-size: 11px; line-height: 1.8; }
+.collection-ledger li a { color: var(--text); overflow-wrap: anywhere; }
+.collection-ledger li > span:last-child { text-align: right; color: var(--secondary); }
+.collection-item-action { display: block; margin-top: 4px; }
+.collection-combined article { border-top: 1px solid var(--line); padding: 16px 0; }
+.collection-combined p { font: var(--reading-body-font); letter-spacing: var(--reading-body-spacing); color: var(--text); overflow-wrap: anywhere; }
+.collection-subtitle { color: var(--secondary); }
+.collection-abstract { max-width: 510px; }
+.collection-evidence { padding: 12px 0; font-size: 11px; }
+.collection-evidence blockquote { white-space: pre-wrap; border-left: 2px solid var(--line); margin: 10px 0; padding-left: 12px; overflow-wrap: anywhere; }

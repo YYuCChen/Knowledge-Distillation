@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>认知暗涌 · 知识蒸馏器</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="page-shell candidate-shell">
+  <section class="workspace candidate-workspace" aria-labelledby="page-title">
+    <nav class="primary-nav" aria-label="主要导航">
+      <a href="{{ url_for('index') }}">投递</a>
+      <a href="{{ url_for('knowledge_library') }}">知识库</a>
+      <a href="{{ url_for('knowledge_accepted_insights') }}">新知</a>
+      <a href="{{ url_for('knowledge_insight_candidates') }}" aria-current="page">认知暗涌</a>
+    </nav>
+    <header class="candidate-header">
+      <p class="candidate-eyebrow">新知</p>
+      <h1 id="page-title">认知暗涌</h1>
+      {% if candidates %}<p>{{ candidates|length }} 条值得看看。展开一条，再决定现在留下还是先放一放。</p>
+      {% else %}<p>这里承接 AI 在已有知识之间发现、等待你判断的新认识。</p>{% endif %}
+    </header>
+
+    {% if read_error %}
+      <section class="library-state library-error" role="alert">
+        <h2>候选暂时无法读取</h2>
+        <p>已有正式结果没有被修改，请稍后重试。</p>
+      </section>
+    {% elif judgment_error %}
+      <section class="library-state{% if judgment_error == 'unreadable' %} library-error{% endif %}" role="alert">
+        {% if judgment_error == "conflict" %}
+          <h2>这版候选已经有另一份判断</h2>
+          <p>这个具体版本已经记录了不同的判断或批注，原记录没有被覆盖。</p>
+        {% elif judgment_error == "not_established" %}
+          <h2>这版候选尚未正式成立</h2>
+          <p>本次判断没有被记录。可返回认知暗涌查看当前仍可判断的候选。</p>
+        {% elif judgment_error == "not_found" %}
+          <h2>这版候选不存在</h2>
+          <p>本次判断没有被记录。它可能已经不在当前正式候选中。</p>
+        {% else %}
+          <h2>这版候选当前无法安全判断</h2>
+          <p>本次操作没有完成，已有判断和新知资产没有被修改。</p>
+        {% endif %}
+        <p><a href="{{ url_for('knowledge_insight_candidates') }}">返回认知暗涌</a></p>
+      </section>
+    {% else %}
+      {% if judgment_notice == "rethink" %}
+        <section class="candidate-notice" role="status">这条候选已从认知暗涌中安静收起。</section>
+      {% endif %}
+      {% if unreadable_count %}
+        <section class="library-warning" role="status">有 {{ unreadable_count }} 条候选记录当前不完整，已安全略过。</section>
+      {% endif %}
+      {% if candidates %}
+        <ol class="candidate-list">
+          {% for candidate in candidates %}
+            <li>
+              <details class="candidate-card">
+                <summary class="candidate-summary">
+                  <span class="candidate-kind">AI 衍生候选 · 第 {{ candidate.version_no }} 版</span>
+                  <span class="candidate-claim">{{ candidate.payload.claim }}</span>
+                  <span class="candidate-reasons" aria-label="连接理由">
+                    {% for reason in candidate.payload.connection_reasons %}<span>{{ reason }}</span>{% endfor %}
+                  </span>
+                  <span class="candidate-expand-hint">展开看看</span>
+                </summary>
+                <div class="candidate-body">
+                  <section aria-labelledby="candidate-discussion-{{ candidate.insight_version_id }}">
+                    <h2 id="candidate-discussion-{{ candidate.insight_version_id }}">短论述</h2>
+                    <p>{{ candidate.payload.short_discussion }}</p>
+                  </section>
+                  {% if candidate.payload.limitations %}
+                    <section aria-labelledby="candidate-limitations-{{ candidate.insight_version_id }}">
+                      <h2 id="candidate-limitations-{{ candidate.insight_version_id }}">边界与限制</h2>
+                      <ul class="candidate-limitations">
+                        {% for limitation in candidate.payload.limitations %}<li>{{ limitation.text }}</li>{% endfor %}
+                      </ul>
+                    </section>
+                  {% endif %}
+                  <form class="candidate-judgment-form" action="{{ url_for('judge_knowledge_insight_candidate', version_id=candidate.insight_version_id) }}" method="post">
+                    <label for="annotation-{{ candidate.insight_version_id }}">可选个人批注</label>
+                    <textarea id="annotation-{{ candidate.insight_version_id }}" name="annotation" rows="3" placeholder="可以写下为什么此刻想留下或先放一放；不填写也可以。"></textarea>
+                    <div class="candidate-actions">
+                      <button type="submit" name="decision" value="rethink" class="candidate-action candidate-action-rethink">再想想</button>
+                      <button type="submit" name="decision" value="interesting" class="candidate-action candidate-action-interesting">有点意思</button>
+                    </div>
+                  </form>
+                </div>
+              </details>
+            </li>
+          {% endfor %}
+        </ol>
+      {% else %}
+        <section class="library-state library-state-quiet">
+          <h2>暂时没有待判断的新知候选</h2>
+          <p>完成新的知识整理后，合资格候选会出现在这里。</p>
+        </section>
+      {% endif %}
+    {% endif %}
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>知识整理 · 知识蒸馏器</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="page-shell organization-shell">
+  <section class="workspace organization-workspace" aria-labelledby="page-title">
+    <nav class="primary-nav" aria-label="主要导航">
+      <a href="{{ url_for('index') }}">投递</a>
+      <a href="{{ url_for('knowledge_library') }}">知识库</a>
+      <a href="{{ url_for('knowledge_insight_candidates') }}">新知候选</a>
+    </nav>
+
+    {% if read_error %}
+      <section class="organization-feedback organization-failure" role="alert">
+        <h1 id="page-title">整理结果暂时无法读取</h1>
+        <p>正式知识和已有整理结果没有被修改，请稍后重试。</p>
+      </section>
+    {% elif event.status.value == "succeeded" %}
+      <section class="organization-feedback organization-success" role="status">
+        <p class="organization-kicker">本轮整理完成</p>
+        <h1 id="page-title">{{ event.success.n }} 份新知识已整理</h1>
+        <p>全部正式机制、资格检查与整体提交均已完成。</p>
+        {% if event.success.m or event.success.k %}
+          <ul class="organization-metrics">
+            {% if event.success.m %}<li>{{ event.success.m }} 个主题发生实质变化</li>{% endif %}
+            {% if event.success.k %}<li>{{ event.success.k }} 条新知候选等待查看</li>{% endif %}
+          </ul>
+        {% endif %}
+        <div class="organization-followups">
+          {% if event.success.k %}<a href="{{ url_for('knowledge_insight_candidates') }}">查看新知候选</a>{% endif %}
+          <a href="{{ url_for('knowledge_library') }}">返回知识库</a>
+        </div>
+      </section>
+    {% elif event.status.value == "running" %}
+      <section class="organization-feedback" role="status">
+        {% if event_driver_active %}
+          <p class="organization-kicker">本轮正在运行</p>
+          <h1 id="page-title">正在整理，请等待</h1>
+          <p>正式规划仍在进行。刷新此页可以查看最新终态，无需重复发起。</p>
+        {% else %}
+          <p class="organization-kicker">上次运行已中断</p>
+          <h1 id="page-title">整理可以继续</h1>
+          <p>中断没有留下部分正式结果。再次明确发起整理会复用这一轮并重新执行。</p>
+          <form action="{{ url_for('start_knowledge_organization') }}" method="post">
+            <input type="hidden" name="intent" value="start">
+            <button type="submit">继续整理</button>
+          </form>
+        {% endif %}
+      </section>
+    {% else %}
+      <section class="organization-feedback organization-failure" role="alert">
+        <p class="organization-kicker">本轮未完成</p>
+        {% if event.failure_code.value == "topic_baseline_changed" %}
+          <h1 id="page-title">主题基线已经变化</h1>
+          <p>为了避免覆盖较新的主题结果，这一轮没有提交任何整理产物。请重新发起整理。</p>
+        {% else %}
+          <h1 id="page-title">这次整理没有完成</h1>
+          <p>正式知识和原有主题、关系、新知候选都没有被部分覆盖。运行条件恢复后可以重新整理。</p>
+        {% endif %}
+        <form action="{{ url_for('start_knowledge_organization') }}" method="post">
+          <input type="hidden" name="intent" value="start">
+          <button type="submit" class="secondary-action">重新整理</button>
+        </form>
+      </section>
+    {% endif %}
+  </section>
+</main>
+</body>
+</html>

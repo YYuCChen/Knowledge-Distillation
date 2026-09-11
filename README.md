@@ -51,10 +51,26 @@ V1.1 优化了长内容疑点核对与保存速度、候选解释布局、飞书
 ### 关于项目
 
 - 从个人使用需求出发，持续打磨来源质量、阅读、整理与桌面体验；当前不提供团队协作、跨设备自动同步或通用知识库聊天。
-- 此仓库用于介绍、发行与反馈，应用源码目前私有。第三方组件、模型与资源遵循各自许可，请保留随包声明。
+- 此仓库现在同时用于源码、发行与反馈。源码快照按 Apache-2.0 发布；第三方组件、模型与资源遵循各自许可，请保留随包声明。源码快照与已经发布的安装包不承诺逐字节对应，具体发行范围以 Releases 为准。
 - 欢迎在 [Issues](https://github.com/YYuCChen/Knowledge-Distillation/issues) 留下使用场景与问题，附上版本、系统和复现步骤；请先移除密钥、Cookie、私人材料等敏感信息。
 
 ---
+
+## 源码开发
+
+源码面向希望理解、测试或继续改进项目的开发者。当前快照主要在 macOS 上开发和验证；发行包仍以上方 Releases 中的实际平台说明为准。
+
+~~~bash
+git clone https://github.com/YYuCChen/Knowledge-Distillation.git
+cd Knowledge-Distillation
+uv venv
+uv pip install --python .venv/bin/python -e '.[test]'
+PYTHONPATH=src .venv/bin/python -m pytest -p no:cacheprovider
+~~~
+
+要求 Python 3.11.4 或更高版本。完整来源采集、OCR、语音和桌面打包功能还需要项目依赖中列出的系统组件、浏览器登录态或用户自己的服务凭据；源码不会提供任何账号、Cookie、API Key、数据库或 Vault。
+
+开发时请使用独立的测试数据目录，不要把个人 SQLite、Obsidian Vault、浏览器资料、模型缓存或凭据复制到仓库。提交 Issue 或日志前，也请先移除来源文本、账号标识、Cookie、路径和其他私人信息。安全问题请参阅 [SECURITY.md](SECURITY.md)。
 
 ## 深入了解这个项目
 

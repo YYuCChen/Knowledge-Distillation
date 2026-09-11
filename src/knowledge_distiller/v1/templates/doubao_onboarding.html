@@ -1,0 +1,75 @@
+{% set asr = settings.asr %}
+{% set ready = asr.api_key_saved and asr.tos_saved %}
+<div class="doubao-onboarding" data-setup-wizard data-storage-key="doubao" data-max-step="{{ 4 if ready else 3 if asr.api_key_saved else 2 }}" data-default-step="{{ 4 if ready else 3 if asr.api_key_saved else 1 }}">
+  <p class="feishu-step-progress" data-setup-progress aria-live="polite"></p>
+  <h3>配置豆包语音识别</h3>
+  <p class="doubao-guide-link"><a href="{{ url_for('static', filename='guides/doubao-asr.html') }}" target="_blank" rel="noopener">查看完整图文教程：语音识别、TOS 与大模型的区别 ↗</a></p>
+  <section data-setup-step="1">
+    <h4>开通录音文件识别服务</h4>
+    <p>用自己的火山引擎账号登录「豆包语音」控制台，按页面要求完成账号认证，开通「豆包录音文件识别模型 2.0」。</p>
+    <p>云端识别和文件存储可能产生费用，开通前查看控制台的额度与计费说明。</p>
+    <details class="feishu-step-help"><summary>找不到对应服务？</summary><p>选择录音文件识别 2.0（服务标识 volc.seedasr.auc），不是语音合成、流式识别或极速版。若无法开通，先确认账号认证和服务权限。</p><a href="https://www.volcengine.com/docs/6561/1354868" target="_blank" rel="noopener noreferrer">官方录音文件识别说明</a></details>
+    <div class="feishu-form-actions"><a href="https://console.volcengine.com/speech/app" target="_blank" rel="noopener noreferrer">打开豆包语音控制台</a><button type="button" class="secondary-button" data-setup-next="2">已开通，配置密钥</button></div>
+  </section>
+  <section data-setup-step="2">
+    <h4>保存豆包语音 API Key</h4>
+    <p>在豆包语音控制台的「API Key 管理」创建密钥，复制到下方。这里使用语音服务的密钥，不是火山方舟大模型的 API Key，也不是 TOS 的访问密钥。</p>
+    {% if asr.api_key_saved %}<p>语音 API Key 已保存。</p><details><summary>更换语音密钥</summary>{% endif %}
+    <form action="{{ url_for('settings.save_asr_key') }}" method="post">
+      <input type="hidden" name="return_to" value="{{ return_to }}">
+      <label>豆包语音 API Key<input type="password" name="api_key" autocomplete="new-password" required placeholder="仅保存在本机凭据目录，不会回显"></label>
+      <div class="feishu-form-actions"><a href="https://console.volcengine.com/speech/new/setting/apikeys?projectName=default" target="_blank" rel="noopener noreferrer">打开语音 API Key 管理</a><button class="secondary-button">保存并继续</button></div>
+    </form>
+    {% if asr.api_key_saved %}</details><div class="feishu-form-actions"><span></span><button type="button" class="secondary-button" data-setup-next="3">使用已保存密钥，继续</button></div>{% endif %}
+  </section>
+  <section data-setup-step="3">
+    <h4>配置临时音频存储</h4>
+    {% set discovery = asr.storage_discovery|default({}) %}
+    <p>{{ '选择用于音频处理的存储桶，地域会自动带出。' if discovery else '粘贴火山引擎的存储访问密钥，程序会读取桶名称和地域，直接选择即可。' }}</p>
+    <details class="feishu-step-help"><summary>存储密钥在哪里？</summary><p>在火山引擎控制台右上角账号菜单中打开「API 访问密钥」，创建或复制同一组 Access Key ID 和 Secret Access Key。它们与上一步的语音 API Key 不同。</p><a href="https://www.volcengine.com/docs/6291/65568" target="_blank" rel="noopener noreferrer">查看官方图文操作说明</a></details>
+    {% if asr.tos_saved %}<p>当前已保存：{{ asr.bucket }} · {{ asr.region }}。</p><div class="feishu-form-actions"><span></span><button type="button" class="secondary-button" data-setup-next="4">使用这个存储桶，继续</button></div><details><summary>重新选择存储桶</summary>{% endif %}
+    {% if discovery %}
+      {% if discovery.buckets %}
+      <form action="{{ url_for('settings.select_asr_storage') }}" method="post">
+        <input type="hidden" name="discovery_id" value="{{ discovery.id }}">
+        <input type="hidden" name="return_to" value="{{ return_to }}">
+        <label>选择存储桶<select name="bucket" required><option value="">请选择</option>{% for bucket in discovery.buckets %}<option value="{{ bucket.name }}">{{ bucket.name }} · {{ bucket.region }}</option>{% endfor %}</select></label>
+        <div class="feishu-form-actions"><button class="setup-refresh" form="refresh-storage" data-busy-label="正在读取…">刷新列表</button><button class="secondary-button">使用所选桶并继续</button></div>
+      </form>
+      {% else %}<p>还没有读到存储桶。先创建一个「私有」桶，然后重新读取。</p>{% endif %}
+      <form id="refresh-storage" action="{{ url_for('settings.discover_asr_storage') }}" method="post" data-discover-storage><input type="hidden" name="return_to" value="{{ return_to }}">{% if not discovery.buckets %}<button class="secondary-button" data-busy-label="正在读取…">重新读取存储桶</button>{% endif %}</form>
+      <details><summary>使用另一组存储密钥</summary>
+    {% endif %}
+    <form action="{{ url_for('settings.discover_asr_storage') }}" method="post" data-discover-storage>
+      <input type="hidden" name="return_to" value="{{ return_to }}">
+      <label>Access Key ID<input type="password" name="access_key" autocomplete="new-password" required placeholder="粘贴存储访问密钥 ID"></label>
+      <label>Secret Access Key<input type="password" name="secret_key" autocomplete="new-password" required placeholder="粘贴同一组密钥的 Secret"></label>
+      <p class="setup-note">这一步只读取存储桶列表，不创建资源、不上传音频、不调用语音识别。</p>
+      <div class="feishu-form-actions"><a href="https://console.volcengine.com/iam/keymanage" target="_blank" rel="noopener noreferrer">获取存储访问密钥</a><button class="secondary-button" data-busy-label="正在读取…">读取我的存储桶</button></div>
+    </form>
+    {% if discovery %}</details>{% endif %}
+    <details class="feishu-step-help" {% if discovery and not discovery.buckets %}open{% endif %}><summary>还没有存储桶？</summary><p>打开存储控制台，选择「创建桶」，填写一个未被占用的桶名称，访问权限保持「私有」。记住这个名称，创建后回到本页重新读取并选择它。无需开放公共读取。</p><a href="https://www.volcengine.com/docs/6349/74830" target="_blank" rel="noopener noreferrer">查看官方创建桶图文说明</a> · <a href="https://console.volcengine.com/tos" target="_blank" rel="noopener noreferrer">打开 TOS 创建桶</a></details>
+    <details class="feishu-step-help" {% if request.args.get('asr_manual') == '1' %}open{% endif %}><summary>无法读取列表，手动填写</summary>
+    <p>只有指定桶权限、没有列举全部桶权限时，可直接填写已获授权的桶。密钥需具备该桶内对象的读取、上传、删除权限；多版本桶还需要删除对应对象版本的权限。</p>
+    <form action="{{ url_for('settings.save_asr_tos') }}" method="post">
+      <input type="hidden" name="return_to" value="{{ return_to }}">
+      <label>地域（Region）<input name="region" value="{{ request.args.get('asr_region', asr.region) }}" required placeholder="复制桶所属地域代码，例如 cn-beijing"></label>
+      <label>存储桶名称（Bucket）<input name="bucket" value="{{ request.args.get('asr_bucket', asr.bucket) }}" required placeholder="填写桶名称，不是网址"></label>
+      <label>Access Key ID<input type="password" name="access_key" autocomplete="new-password" required placeholder="存储访问密钥 ID"></label>
+      <label>Secret Access Key<input type="password" name="secret_key" autocomplete="new-password" required placeholder="同一组访问密钥的 Secret"></label>
+      <div class="feishu-form-actions"><a href="https://console.volcengine.com/tos" target="_blank" rel="noopener noreferrer">打开 TOS 控制台</a><button class="secondary-button">保存存储配置并继续</button></div>
+    </form>
+    </details>
+    {% if asr.tos_saved %}</details>{% endif %}
+  </section>
+  <section data-setup-step="4">
+    <h4>检查配置并启用</h4>
+    <p>已完成的配置保存在本机；关闭后回来可以继续，不必重新获取密钥。</p>
+    <ul><li>语音 API Key：{{ '已保存' if asr.api_key_saved else '未保存' }}</li><li>音频存储：{{ asr.bucket or '未配置' }}{% if asr.region %} · {{ asr.region }}{% endif %}</li></ul>
+    {% if asr.provider_id == 'doubao' and asr.state == 'configured' %}<p role="status">豆包语音已启用。可以返回首页投递一段短音频或视频，验证真实识别。</p>{% else %}<p>点击启用后，后续音视频将使用豆包语音识别。前面的保存操作仅暂存配置，不会更换当前模型。</p>{% endif %}
+    <p>启用只检查本机配置。首次处理会上传音频并调用云端识别，可能产生识别及存储用量；若认证、额度或桶权限有问题，任务和设置页会显示具体原因。</p>
+    <details class="feishu-step-help"><summary>首次识别失败怎么办？</summary><p>语音认证失败：检查第 1 步的服务开通状态和第 2 步的语音 API Key。TOS 拒绝访问：核对第 3 步的地域、桶名称和密钥权限。修改后重新启用，再重试原任务。</p></details>
+    <div class="feishu-form-actions"><a href="{{ url_for('home') }}">返回首页</a><button id="doubao-enable" form="asr-form" class="secondary-button" {% if not ready %}disabled{% endif %}>{{ '重新检查并启用' if asr.provider_id == 'doubao' else '检查配置并启用' }}</button></div>
+  </section>
+  <button type="button" class="feishu-step-back" data-setup-back hidden>返回上一步</button>
+</div>

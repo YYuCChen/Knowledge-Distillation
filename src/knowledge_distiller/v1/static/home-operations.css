@@ -1,0 +1,165 @@
+.topbar-status {
+  width: max-content;
+  min-width: 84px;
+  height: 40px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.app-state {
+  width: 100%;
+  min-height: 17px;
+  display: flex;
+  align-items: center;
+  color: var(--text);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  line-height: normal;
+}
+
+.activity-dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 5px;
+  margin-inline: 6px;
+  border-radius: 50%;
+  background: #20b759;
+}
+.activity-dot.is-active { background: #4386c6; }
+.activity-dot.is-error { background: var(--warning); }
+
+.queue-state {
+  width: 100%;
+  color: var(--ink);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.intake {
+  width: 100%;
+  height: 110px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  overflow: hidden;
+  border: 2px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+}
+
+.intake textarea {
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+  padding: 10px;
+  display: block;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: var(--ink);
+  font-size: 10px;
+  line-height: normal;
+  letter-spacing: 0.5px;
+}
+
+.intake textarea::placeholder {
+  color: #4d4c48;
+  opacity: 1;
+}
+
+.intake-actions {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.intake-actions button {
+  padding: 7.5px 14.5px;
+  border: 0;
+  border-radius: 6px;
+  background: #141413;
+  color: var(--page);
+  font-size: 14px;
+  line-height: 17px;
+  letter-spacing: 0.7px;
+}
+
+.intake-actions button:disabled {
+  cursor: wait;
+  opacity: 1;
+}
+
+.upload {
+  position: relative;
+  flex-shrink: 0;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--soft);
+}
+
+.upload input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.upload:focus-within { outline: 2px solid var(--line); outline-offset: 2px; }
+[data-source-filename] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+
+.upload img {
+  width: 10px;
+  height: 10px;
+}
+
+.form-error {
+  margin: 0 auto 0 10px;
+  min-width: 0;
+  color: var(--danger);
+  font-size: 11px;
+}
+
+.home-page { padding-bottom: 96px; }
+.home-page .organization-section {
+  position: fixed;
+  bottom: 0;
+  width: min(640px, calc(100vw - 32px));
+  min-height: 56px;
+  padding: 0 8px 0 0;
+  border-top: 1px solid var(--line);
+  background: var(--page);
+  z-index: 10;
+}
+.organization-description { display: flex; align-items: center; gap: 10px; font: 400 10px/16px "Noto Sans SC", sans-serif; color: #4d4c48; letter-spacing: .5px; }
+.organization-icon { width: 64px; display: flex; justify-content: center; }
+.organization-icon img { width: 15px; height: 15px; }
+.organization-section form { margin: 0; }
+.organization-section button { padding: 7.5px 14.5px; border: 0; border-radius: 6px; background: var(--soft); color: #4d4c48; font: 400 14px/normal "Noto Sans SC", sans-serif; letter-spacing: .7px; }
+
+.organization-feedback {
+  margin: 0 auto 0 10px;
+  min-width: 0;
+  color: var(--danger);
+  font: 400 11px/1.5 "Noto Sans SC", sans-serif;
+}
+.form-error + .organization-feedback { display: none; }
+.intake-actions > button { flex-shrink: 0; }
+
+.intake-actions label:has(select) { display: flex; align-items: center; gap: 6px; color: var(--muted); font: 400 11px/1.5 "Noto Sans SC", sans-serif; }
+.intake-actions select { color: var(--text); background: var(--page); border: 1px solid var(--line); border-radius: 4px; padding: 3px; font: inherit; max-width: 180px; }

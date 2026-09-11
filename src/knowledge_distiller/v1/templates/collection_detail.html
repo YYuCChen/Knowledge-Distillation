@@ -1,0 +1,17 @@
+{% extends "collection_base.html" %}
+{% block title %}{{ collection.title }} · 知识蒸馏器{% endblock %}
+{% block collection_content %}
+<div id="home-results" class="collection-page" {% if collection.state in ['queued','working'] %}data-live-status{% endif %}>
+<section class="section"><h2>{{ collection.title }}</h2><p class="scope-note">{{ collection.label }} · 共 {{ collection.total }} 条 · 已收录 {{ collection.counts.succeeded }} 条</p>
+{% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+{% if collection.error %}<p class="scope-warning">{{ collection.error }}</p>{% endif %}
+{% if collection.state=='partial' %}<p class="scope-warning">部分成员未完成。已成功的知识保留。</p>{% endif %}
+{% if collection.state=='cancelled' %}<p class="scope-note">已停止后续处理，范围与已有结果保留。</p>{% endif %}
+<div class="scope-actions">
+{% if collection.state in ['queued','working','waiting_user'] %}<form action="{{ url_for('collections.command',operation=collection.operation_id,action='cancel') }}" method="post"><input type="hidden" name="revision" value="{{ collection.revision }}"><button class="scope-secondary">{{ '正在停止' if collection.cancel_requested else '停止后续处理' }}</button></form>{% elif collection.state in ['partial','failed','cancelled'] %}<form action="{{ url_for('collections.command',operation=collection.operation_id,action='resume') }}" method="post"><input type="hidden" name="revision" value="{{ collection.revision }}"><button class="scope-primary">{{ '重试综合' if collection.consequence=='complete' and collection.kind!='same_topic' else '继续未完成内容' }}</button></form>{% endif %}
+</div></section>
+<section class="section"><h2>本次内容</h2><ol class="collection-ledger">{% for member in collection.members %}<li><span class="collection-number">{{ loop.index }}</span><div><a href="{{ member.url }}" target="_blank" rel="noreferrer">{{ member.title }}</a>{% if member.error %}<p class="scope-note">{{ member.error }}</p>{% endif %}{% if member.state in ['waiting_user','succeeded'] or member.confirmation_json %}<a class="collection-item-action" href="{{ url_for('home',item=member.item_id) }}">{{ '查看知识' if member.state=='succeeded' else '处理来源疑点' }}</a>{% endif %}</div><span>{{ member.label }}</span></li>{% endfor %}</ol></section>
+{% if collection.result %}<section class="section collection-combined"><h2>集合综合</h2><h3>{{ collection.result.title }}</h3><p class="collection-subtitle">{{ collection.result.subtitle }}</p><p class="collection-abstract">{{ collection.result.summary }}</p>{% for point in collection.result.points %}<article><h3>{{ point.statement }}</h3><p>{{ point.argument }}</p><details><summary>查看来源依据</summary>{% for ref in point.supports %}<div class="collection-evidence"><a href="{{ url_for('home',item=ref.item_id) }}">查看对应的来源知识</a>{% for evidence in ref.evidence %}<blockquote>{{ evidence.text }}</blockquote>{% endfor %}<a href="{{ ref.source_url }}" target="_blank" rel="noreferrer">打开原始作品</a></div>{% endfor %}</details></article>{% endfor %}</section>{% endif %}
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static',filename='home.js') }}"></script>{% endblock %}

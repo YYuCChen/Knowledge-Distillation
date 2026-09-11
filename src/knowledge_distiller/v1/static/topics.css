@@ -1,0 +1,74 @@
+.topic-page { min-height: 100dvh; display: flex; flex-direction: column; gap: 10px; padding-bottom: 64px; }
+.topic-page > :not(.topic-scroll) { flex-shrink: 0; }
+.topic-page .topbar { width: 100%; }
+.main-nav a { color: inherit; text-decoration: none; }
+.topic-page .main-nav { height: 22px; }
+.topic-page .main-nav strong { height: 22px; }
+.topic-heading h1 { margin: 0; color: #141413; font: 600 32px/normal "Noto Serif SC", serif; letter-spacing: 3.2px; overflow-wrap: anywhere; }
+.topic-heading p { margin: 0; padding: 6px 0; color: #4d4c48; font-size: 10px; letter-spacing: .5px; }
+.topic-search { height: 40px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: var(--card); border: 1.5px solid var(--soft); border-radius: 6px; }
+.topic-search button { border: 0; padding: 0; display: flex; background: transparent; }
+.topic-search img { width: 16px; height: 16px; }
+.topic-search input { min-width: 0; width: 100%; border: 0; outline: none; background: transparent; font-size: 14px; line-height: 22px; color: var(--text); padding: 0; }
+.topic-search:focus-within { border-color: var(--line); outline: none; }
+.topic-search input::placeholder { color: #afb8c2; }
+.topic-search a { color: var(--text); line-height: 22px; text-decoration: none; white-space: nowrap; font-size: 11px; }
+.topic-scroll { min-height: 0; overflow: visible; }
+.topic-card { width: calc(100% - 2px); display: grid; grid-template-columns: 64px minmax(0,1fr) 64px; border-bottom: 1px solid var(--line); text-decoration: none; color: var(--text); }
+.topic-number { padding-top: 21px; text-align: center; font-size: 14px; font-weight: 500; }
+.topic-card-content { min-width: 0; padding: 16px 0 30px; }
+.topic-card h2 { margin: 0 0 9px; font: 600 18px/normal "Noto Serif SC",serif; letter-spacing: 1.8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topic-scope { margin: 0; font: 500 12px/normal "Noto Serif SC",serif; color: #6b6a65; letter-spacing: .6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topic-note { display: flex; justify-content: space-between; gap: 8px; margin-top: 14px; color: #4d4c48; font-size: 11px; line-height: 16px; }
+.topic-note time { font-size: 10px; letter-spacing: .5px; }
+.topic-chevron { width: 8px; height: 8px; justify-self: center; margin-top: 24px; }
+.topic-empty { padding: 26px 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.topic-back { display: flex; align-items: center; gap: 10px; }
+.topic-back img { width: 8px; height: 8px; }
+.topic-nav-space { height: 22px; }
+.topic-heading .detail-scope { font: 500 12px/normal "Noto Serif SC",serif; letter-spacing: .6px; padding: 8px 0 0; overflow-wrap: anywhere; }
+.topic-detail-note { display: flex; flex-direction: column; gap: 4px; align-items: end; margin-top: 8px; color: #4d4c48; font-size: 11px; line-height: 16px; }
+.topic-detail-note time { font-size: 10px; letter-spacing: .5px; }
+.topic-point { color: var(--text); width: calc(100% - 2px); border-bottom: 1px solid var(--line); }
+.topic-point[open] { background: var(--card); }
+.topic-point summary { display: grid; grid-template-columns: 64px minmax(0,1fr) 64px; cursor: pointer; list-style: none; padding-top: 32px; padding-bottom: 32px; }
+.topic-point summary::-webkit-details-marker { display: none; }
+.point-number { font-size: 14px; font-weight: 500; text-align: center; padding-top: 2px; }
+.topic-point summary strong { font: var(--reading-statement-font); letter-spacing: var(--reading-statement-spacing); overflow-wrap: anywhere; padding-right: 55px; }
+
+.point-chevron { width: 8px; height: 8px; margin-top: 5px; justify-self: center; }
+.topic-point[open] .point-chevron { transform: rotate(90deg); }
+.topic-point[open] summary { padding-bottom: 16px; }
+.point-body { margin: 0 64px; padding-bottom: 16px; }
+.point-argument { border: 1px solid #4d4c48; border-radius: 6px; background: var(--page); padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.quote-label { display: flex; align-items: center; gap: 10px; font: 500 12px "Noto Serif SC",serif; letter-spacing: .6px; }
+.quote-label img { width: 14px; height: 14px; }
+.point-argument p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: var(--reading-body-font); letter-spacing: var(--reading-body-spacing); }
+.point-source { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 11px; line-height: 16px; }
+.point-source > span:first-child { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.point-source a,.handoff-disabled { display: flex; align-items: center; gap: 2px; flex-shrink: 0; color: #4d4c48; font-size: 10px; text-decoration: none; padding: 6px 7px; white-space: nowrap; }
+.point-source a img { width: 8px; height: 10px; }
+.handoff-disabled { opacity: .5; }
+.point-origin { display: block; text-align: right; margin-top: 16px; color: #4d4c48; text-decoration: none; font: 500 10px/normal "Noto Serif SC",serif; letter-spacing: .5px; overflow-wrap: anywhere; }
+.point-origin button { background: transparent; border: 0; padding: 0; color: inherit; font: inherit; text-align: right; }
+.search-group { margin: 12px 0 0; font: 600 14px/normal "Noto Serif SC",serif; color: var(--text); letter-spacing: 1.4px; }
+@media (max-width: 720px) {
+  .topic-card,.topic-point summary { grid-template-columns: 36px minmax(0,1fr) 28px; }
+  .point-body { margin-inline: 36px 28px; }
+  .topic-point summary strong { padding-right: 0; }
+  .point-source { flex-wrap: wrap; }
+  .topic-heading h1 { font-size: 26px; }
+}
+
+.search-insight h2 { white-space: normal; font-size: 14px; }
+.search-insight p { font: 500 12px/1.8 "Noto Serif SC",serif; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.search-insight .topic-card-content { padding: 32px 0; }
+.search-insight h2 { margin: 0; font-size: 14px; line-height: normal; letter-spacing: .7px; }
+.search-insight .topic-number { padding-top: 34px; }
+.search-insight .topic-chevron { margin-top: 37px; }
+
+.topic-heading > p:not(.detail-scope) { line-height: 12px; }
+.topic-search + .topic-scroll > .topic-empty { padding: 0; line-height: 24px; color: #141413; }
+.point-argument p { color: var(--ink); }
+.point-source a, .handoff-disabled { letter-spacing: .5px; line-height: 12px; }

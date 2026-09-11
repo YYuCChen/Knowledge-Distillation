@@ -1,0 +1,30 @@
+<details class="topic-point" data-point="{{ point.knowledge_result_id }}:{{ point.point_id }}">
+  <summary>
+    <span class="point-number">{{ point_number }}</span>
+    <strong>{{ point.statement }}</strong>
+    <img class="point-chevron" src="{{ url_for('static', filename='icons/topic-chevron.svg') }}" alt="">
+  </summary>
+  <div class="point-body">
+    <div class="point-argument">
+      <div class="quote-label"><img src="{{ url_for('static', filename='icons/topic-quote.svg') }}" alt=""></div>
+      <p>{{ point.argument }}</p>
+      <div class="point-source">
+        <span title="{{ point.source_label }}">{{ point.source_label }}</span>
+        {% if point.obsidian_url %}
+          <a href="{{ point.obsidian_url }}"><img src="{{ url_for('static', filename='icons/obsidian.svg') }}" alt="">阅读原文</a>
+        {% else %}
+          <span class="handoff-disabled" title="请确认归档文件存在且对应 Vault 已在 Obsidian 中打开">阅读原文</span>
+        {% endif %}
+      </div>
+    </div>
+    {% if point.file_source %}
+      <form class="point-origin" data-open-source method="post" action="{{ url_for('open_source_file', item_id=point.item_id) }}">
+        <button type="submit">见《{{ point.title }}》</button>
+      </form>
+    {% elif point.source_url %}
+      <a class="point-origin" href="{{ point.source_url }}" target="_blank" rel="noreferrer">见《{{ point.title }}》</a>
+    {% else %}
+      <span class="point-origin" title="直接文本的完整原文保存在来源归档中">见《{{ point.title }}》</span>
+    {% endif %}
+  </div>
+</details>

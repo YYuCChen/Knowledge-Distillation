@@ -1,0 +1,21 @@
+{% set qwen_active = settings.asr.provider_id == 'qwen' and settings.asr.state == 'configured' %}
+<div id="qwen-component" class="qwen-setup" data-status-url="{{ url_for('settings.qwen_component_status') }}" data-busy="{{ component.busy|tojson }}" data-active="{{ qwen_active|tojson }}">
+  <p class="qwen-step" id="qwen-step"></p>
+  <h3 id="qwen-heading">安装本地语音识别</h3>
+  <p id="qwen-component-status" role="status">{{ component.label }}</p>
+  <p id="qwen-install-info">首次联网下载运行组件和模型，需数 GB 空间；安装后在本机转写，无需账号或 API Key。</p>
+  <p id="qwen-disk" class="qwen-secondary">{% if component.free_bytes is defined and component.free_bytes is not none %}当前磁盘可用 {{ '%.1f'|format(component.free_bytes / 1073741824) }} GB{% endif %}</p>
+  <div id="qwen-download-progress" hidden><progress id="qwen-progress-bar" max="100" aria-label="当前下载阶段进度"></progress><span id="qwen-progress-text"></span></div>
+  <p id="qwen-install-detail" role="status">{{ component.detail|default('') }}</p>
+  <p id="qwen-next-hint"></p>
+  <details class="qwen-help"><summary>安装与使用说明</summary><p>目前支持 Apple Silicon Mac。首次安装需能访问 GitHub、PyPI 和 Hugging Face；请保持程序运行。退出后可继续安装，已有可用文件和缓存会复用。</p><p>识别会使用本机内存和算力；首次加载可能稍慢。新安装完成前会用内置短音频进行离线自检，不读取你的素材、不生成知识。启用后可再投递自己的素材验证使用效果。</p></details>
+  <div class="qwen-actions">
+    <a id="qwen-first-use" href="{{ url_for('home') }}" hidden>去首页投递短音视频</a>
+    <form id="qwen-install-form" action="{{ url_for('settings.install_qwen') }}" method="post">
+      <input type="hidden" name="return_to" value="{{ return_to }}">
+      <button id="qwen-install" class="secondary-button" {% if component.ready or component.state == 'unsupported' %}hidden{% endif %} {% if not component.can_install %}disabled{% endif %}>{{ '继续安装' if component.state in ['interrupted','failed'] else '下载并安装 Qwen' }}</button>
+    </form>
+    <button id="asr-save" form="asr-form" class="secondary-button" {% if not component.ready or qwen_active %}hidden{% endif %} {% if not component.ready %}disabled{% endif %}>启用 Qwen</button>
+  </div>
+  <script id="qwen-initial-status" type="application/json">{{ component|tojson }}</script>
+</div>

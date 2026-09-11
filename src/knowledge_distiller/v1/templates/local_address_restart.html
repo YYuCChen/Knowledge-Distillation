@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}正在重新启动 · 知识蒸馏器{% endblock %}
+{% block content %}
+<main class="settings-page narrow-page">
+  <h1>地址已保存</h1>
+  <p>知识蒸馏器正在重新启动。新地址是：</p>
+  <p><a id="local-address-target" href="{{ target_url }}">{{ target_url }}</a></p>
+  <p id="restart-status" role="status">服务就绪后会自动打开；若浏览器没有跳转，请点击上面的地址。</p>
+</main>
+<script>
+(() => {
+  const target = document.getElementById('local-address-target').href;
+  const started = Date.now();
+  async function ready() {
+    try {
+      await fetch(target, {mode:'no-cors', cache:'no-store'});
+      location.replace(target);
+    } catch (_) {
+      if (Date.now() - started < 30000) setTimeout(ready, 500);
+      else document.getElementById('restart-status').textContent = '自动打开未完成，请点击上面的新地址。';
+    }
+  }
+  setTimeout(ready, 1200);
+})();
+</script>
+{% endblock %}

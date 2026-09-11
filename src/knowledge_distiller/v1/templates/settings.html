@@ -1,0 +1,287 @@
+{% extends "base.html" %}
+
+{% block title %}设置 · 知识蒸馏器{% endblock %}
+
+{% block styles %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='settings.css') }}">
+{% endblock %}
+
+{% block topbar %}
+  <header class="topbar page-width settings-topbar">
+    <a href="{{ return_to }}" class="back-link">
+      <img
+        src="{{ url_for('static', filename='icons/chevron-back.svg') }}"
+        alt=""
+      >
+      返回
+    </a>
+  </header>
+{% endblock %}
+
+{% block content %}
+  <main class="page-width settings-page">
+    <nav class="main-nav" aria-label="主要页面">
+      <a href="{{ url_for('topics.index') }}">主题</a>
+      <a href="{{ url_for('home') }}">首页</a>
+      <a href="{{ url_for('insights.index') }}">新知</a>
+    </nav>
+
+    <header class="settings-heading">
+      <h1>设置</h1>
+      <p class="settings-message {% if message_error %}is-error{% endif %}">
+        {{ message or "连接来源、模型与知识保存位置。" }}
+      </p>
+      {% if settings.cleanup_residue_count %}<p class="settings-message is-error">{{ settings.cleanup_residue_count }} 条临时素材尚未清理成功，程序会重试；已有来源和知识不受影响。</p>{% endif %}
+    </header>
+
+    <details class="setting-group" {% if open_group == 'social' %}open{% endif %}>
+      <summary class="group-heading">
+        <span class="group-number">1</span>
+        <strong>社媒连接</strong>
+        <img src="{{ url_for('static', filename='icons/chevron-down.svg') }}" alt="">
+      </summary>
+      <details class="connection-help">
+        <summary>小红书 / 知乎首次连接说明</summary>
+        <ol>
+          <li>在日常使用的 Chrome 中登录小红书或知乎。</li>
+          <li>在同一个 Chrome 个人资料中，启用 OpenCLI Browser Bridge 扩展。</li>
+          <li>回到下方对应平台，点击“配置登录”。应用会自动启动连接组件，无需安装命令行。</li>
+        </ol>
+        <details class="connection-troubleshooting"><summary>扩展没有连接？</summary><p>扩展显示 Reconnect 时，点击重连，再回到这里配置登录。若使用多个 Chrome 个人资料，请暂时只保留目标个人资料的扩展连接。</p></details>
+      </details>
+      {% for platform in settings.platforms %}
+        <div class="setting-row media-row">
+          <span class="state-dot {{ platform.state }}" aria-hidden="true"></span>
+          <strong>{{ platform.label }}</strong>
+          <span class="status-text">
+            {{ {
+              'connected': '已登录',
+              'relogin_required': '需重新登录',
+              'unconfigured': '未配置'
+            }[platform.state] }}
+          </span>
+          <span class="account-label">{{ platform.account_label or "" }}</span>
+          <span class="row-actions">
+            {% if platform.pending_login %}
+              <form action="{{ url_for('settings.connect_' + platform.key) }}" method="post">
+                <input type="hidden" name="return_to" value="{{ return_to }}">
+                <button class="primary-button">完成登录</button>
+              </form>
+              <form action="{{ url_for('settings.cancel_login', platform=platform.key) }}" method="post">
+                <button class="outline-button">取消登录</button>
+              </form>
+            {% elif platform.available and platform.state == 'connected' %}
+              <form action="{{ url_for('settings.clear_' + platform.key) }}" method="post">
+            <input type="hidden" name="return_to" value="{{ return_to }}">
+                <button class="outline-button">清除配置</button>
+              </form>
+              <form action="{{ url_for('settings.connect_' + platform.key) }}" method="post">
+            <input type="hidden" name="return_to" value="{{ return_to }}">
+                <button class="secondary-button">{{ '重新连接' if platform.key in ['zhihu', 'xiaohongshu'] else '替换配置' }}</button>
+              </form>
+            {% elif platform.available %}
+              <form action="{{ url_for('settings.connect_' + platform.key) }}" method="post">
+            <input type="hidden" name="return_to" value="{{ return_to }}">
+                <button class="primary-button">
+                  {{ "重新登录" if platform.state == "relogin_required" else "配置登录" }}
+                </button>
+              </form>
+            {% else %}
+              <button class="primary-button" disabled>配置登录</button>
+            {% endif %}
+          </span>
+        </div>
+      {% endfor %}
+    </details>
+
+    <details class="setting-group" {% if open_group == 'models' %}open{% endif %}>
+      <summary class="group-heading">
+        <span class="group-number">2</span>
+        <strong>模型配置</strong>
+        <img src="{{ url_for('static', filename='icons/chevron-down.svg') }}" alt="">
+      </summary>
+
+      <details class="model-setting" {% if open_group == 'models' and (message_error or message == '本机 Codex 已连接，可选择模型。' or draft_llm) %}open{% endif %}>
+        <summary class="setting-row model-row">
+          <span class="state-dot {{ settings.llm.state }}" aria-hidden="true"></span>
+          <strong>LLM</strong>
+          <span>{{ settings.llm.provider }}</span>
+          <span class="model-name">{{ settings.llm.model }}{% if settings.llm.effort %} · {{ settings.llm.effort }}{% endif %}{% if settings.llm.service_tier == "fast" %} · Fast{% endif %}</span>
+          <span class="status-text">
+            {{ {'configured': '已配置', 'unavailable': '不可用', 'unconfigured': '未配置'}[settings.llm.state] }}
+          </span>
+          <span class="row-actions">
+            <span class="secondary-button">
+              {{ {'configured': '更换模型', 'unavailable': '重新配置', 'unconfigured': '配置模型'}[settings.llm.state] }}
+            </span>
+          </span>
+        </summary>
+        <form id="codex-connect" action="{{ url_for('settings.connect_codex') }}" method="post">
+          <input type="hidden" name="return_to" value="{{ return_to }}">
+        </form>
+        <form id="llm-form" data-api-key-saved="{{ settings.llm.api_key_saved|default(false)|tojson }}" data-active-effort="{{ settings.llm.effort }}" class="model-form" action="{{ url_for('settings.save_llm') }}" method="post">
+          <input type="hidden" name="return_to" value="{{ return_to }}">
+          <label class="model-provider">模型方案
+            <select name="provider" id="llm-provider">
+              <option value="codex" {% if draft_llm != 'openai' and (settings.llm.provider_id == 'codex' or settings.llm.state == 'unconfigured') %}selected{% endif %}>Codex · ChatGPT 订阅</option>
+              <option value="openai" {% if draft_llm == 'openai' or (settings.llm.provider_id == 'openai' and settings.llm.state != 'unconfigured') %}selected{% endif %}>OpenAI API</option>
+            </select>
+          </label>
+          <label id="llm-picker-row">型号
+            <select id="llm-model-picker">
+              {% for model in settings.llm.codex_models %}<option value="{{ model.model }}">{{ model.label }}</option>{% endfor %}
+              <option value="__custom__">自定义型号…</option>
+            </select>
+          </label>
+          <label id="llm-custom-row">模型 ID<input name="model" id="llm-model" value="{{ settings.llm.model }}" required autocomplete="off"></label>
+          <label id="llm-effort-row" hidden>推理强度<select name="effort" id="llm-effort"></select></label>
+          <label id="llm-speed-row" hidden>运行速度<select name="service_tier" id="llm-speed">
+            <option value="">标准</option>
+            <option value="fast" {% if settings.llm.service_tier == 'fast' %}selected{% endif %}>Fast · 更快，额度消耗更高</option>
+          </select></label>
+          <label class="model-base" data-api-field>Base URL<input type="url" name="base_url" value="{{ settings.llm.base_url }}" placeholder="https://example.com"></label>
+          <span class="model-key-status" data-api-field>{{ 'API Key 已保存' if settings.llm.api_key_saved else 'API Key 未保存' }}</span>
+          <button class="outline-button codex-connect" form="codex-connect">连接本机 Codex / 更新型号</button>
+          <button class="{{ 'primary-button' if settings.llm.state == 'unconfigured' else 'secondary-button' }}" id="llm-save">保存并启用</button>
+        </form>
+        <form id="llm-key-form" class="model-form" action="{{ url_for('settings.save_llm_key') }}" method="post">
+          <input type="hidden" name="return_to" value="{{ return_to }}">
+          <label class="model-secret">API Key<input type="password" name="api_key" autocomplete="new-password" placeholder="不会回显已保存的密钥" required></label>
+          <button class="outline-button">保存 API Key</button>
+        </form>
+
+        <script id="codex-model-data" type="application/json">{{ settings.llm.codex_models|tojson }}</script>
+        <script src="{{ url_for('static', filename='settings.js') }}" defer></script>
+      </details>
+
+      <details class="asr-setting" {% if open_group == 'models' and (message or draft_asr) %}open{% endif %}>
+        <summary class="setting-row model-row">
+          <span class="state-dot {{ settings.asr.state }}" aria-hidden="true"></span>
+          <strong>ASR</strong><span>{{ settings.asr.provider }}</span><span class="model-name">{{ settings.asr.model }}</span>
+          <span class="status-text">{{ {'configured':'已配置','unavailable':'不可用','unconfigured':'未配置'}[settings.asr.state] }}</span>
+          <span class="row-actions"><span class="secondary-button">{{ '配置模型' if settings.asr.state == 'unconfigured' else '更换模型' }}</span></span>
+        </summary>
+        {% if settings.asr.failure_message %}<p class="settings-message is-error" role="status">{{ settings.asr.failure_message }}</p>{% endif %}
+        {% set component = settings.asr.component|default({"state":"not_installed","label":"尚未安装","ready":false,"busy":false,"can_install":true}) %}
+        {% set selected_asr = draft_asr if draft_asr in ['qwen', 'doubao'] else settings.asr.provider_id %}
+        <form id="asr-form" class="model-form" action="{{ url_for('settings.save_asr') }}" method="post" data-qwen-ready="{{ component.ready|tojson }}" data-seed-ready="{{ (settings.asr.api_key_saved and settings.asr.tos_saved)|default(false)|tojson }}">
+          <input type="hidden" name="return_to" value="{{ return_to }}">
+          <label>模型方案<select name="provider" id="asr-provider">
+            <option value="qwen" {% if selected_asr != 'doubao' %}selected{% endif %}>{{ '●' if settings.asr.provider_id == 'qwen' and settings.asr.state != 'unconfigured' else '○' }} Qwen3-ASR 1.7B · 本地</option>
+            <option value="doubao" {% if selected_asr == 'doubao' %}selected{% endif %}>{{ '●' if settings.asr.provider_id == 'doubao' else '○' }} 豆包录音文件识别模型 2.0</option>
+          </select></label>
+        </form>
+        {% include 'qwen_setup.html' %}
+        <div id="doubao-credentials">{% include 'doubao_onboarding.html' %}</div>
+      </details>
+    </details>
+
+    <details id="path-settings" class="setting-group" {% if open_group == 'paths' %}open{% endif %}>
+      <summary class="group-heading">
+        <span class="group-number">3</span>
+        <strong>路径管理</strong>
+        <img src="{{ url_for('static', filename='icons/chevron-down.svg') }}" alt="">
+      </summary>
+      <details class="feishu-configuration" {% if request.args.get('message', '').startswith('local_address_') %}open{% endif %}>
+        <summary class="setting-row vault-row">
+          <span class="state-dot configured" aria-hidden="true"></span>
+          <strong>本地访问地址</strong>
+          <span class="vault-path">{{ settings.local_address.url }}</span>
+          <span class="row-actions"><span class="secondary-button">自定义地址</span></span>
+        </summary>
+        <form class="feishu-fields" action="{{ url_for('settings.save_local_address') }}" method="post" id="local-address-form">
+          <div class="local-address-editor" role="group" aria-label="自定义本地访问地址">
+            <span>http://</span>
+            <input aria-label="地址名称" name="name" value="{{ settings.local_address.name }}" pattern="[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?" maxlength="63" spellcheck="false" autocomplete="off" required>
+            <span>.localhost:</span>
+            <input aria-label="固定端口" name="port" type="number" min="1024" max="65535" value="{{ settings.local_address.port }}" required>
+            <span>/</span>
+          </div>
+          <p>完整地址：<strong id="local-address-preview">{{ settings.local_address.url }}</strong></p>
+          <p>只允许本机访问。保存会重新启动应用；端口被占用时不会改用随机端口。</p>
+          <div class="feishu-form-actions">
+            <button class="secondary-button" type="submit">保存并重新启动</button>
+            <button class="outline-button" type="submit" form="local-address-default">恢复默认地址</button>
+          </div>
+        </form>
+        <form id="local-address-default" action="{{ url_for('settings.reset_local_address') }}" method="post"></form>
+      </details>
+      <div class="setting-row vault-row vault-location-row">
+        <span class="state-dot {{ settings.vault.state }}" aria-hidden="true"></span>
+        <strong>Obsidian库位置</strong>
+        <span class="vault-path" title="{{ settings.vault.path }}">{{ settings.vault.path }}</span>
+        <span class="row-actions">
+          <form action="{{ url_for('settings.save_vault') }}" method="post"><input type="hidden" name="return_to" value="{{ return_to }}"><button class="secondary-button">{{ '更换文件夹' if settings.vault.state == 'configured' else '选择文件夹' }}</button></form>
+        </span>
+      </div>
+      {% if settings.vault.state == 'problem' %}<p class="vault-location-error" role="status">保存位置无法使用，请更换文件夹。</p>{% endif %}
+      {% if settings.source_files is defined %}
+      <div class="setting-row vault-row">
+        <span class="state-dot configured" aria-hidden="true"></span>
+        <strong>原文件副本</strong>
+        <span class="vault-path" title="{{ settings.source_files.path }}">{{ settings.source_files.path }}</span>
+        <span class="row-actions">
+          <form action="{{ url_for('settings.open_source_files') }}" method="post">
+            <input type="hidden" name="return_to" value="{{ return_to }}">
+            <button class="secondary-button">打开文件夹</button>
+          </form>
+        </span>
+      </div>
+      {% endif %}
+      <div class="reading-style-configuration">
+        <form class="setting-row vault-row" action="{{ url_for('settings.reading_style') }}" method="post">
+          <input type="hidden" name="action" value="{{ 'disable' if reading_style_state == 'enabled' else 'enable' }}">
+          <span class="state-dot {{ 'configured' if reading_style_state == 'enabled' else 'unconfigured' }}" aria-hidden="true"></span>
+          <strong title="为导出的笔记应用字体与段落排版">Obsidian排版</strong>
+          <span class="vault-path" role="status"{% if request.args.get('message', '').startswith('reading_style_') and message_error %} title="{{ message }}"{% endif %}>{{ '更改未完成' if request.args.get('message', '').startswith('reading_style_') and message_error else {'enabled':'已启用', 'disabled':'已关闭', 'unavailable':'无法读取状态', 'update_available':'可更新'}.get(reading_style_state, '未启用') }}</span>
+          <span class="row-actions"><button class="secondary-button">{{ '关闭此排版' if reading_style_state == 'enabled' else '更新此排版' if reading_style_state == 'update_available' else '启用此排版' }}</button></span>
+        </form>
+      </div>
+      <details class="feishu-configuration" {% if open_group == 'paths' and (request.args.get('message', '').startswith('feishu_') or request.args.get('setup') == 'feishu') %}open{% endif %}>
+        <summary class="setting-row vault-row">
+          <span class="state-dot {{ 'configured' if feishu and feishu.state == 'connected' else 'unconfigured' }}" aria-hidden="true"></span>
+          <strong>飞书机器人</strong>
+          <span class="vault-path">{{ {'connected':'已连接','connecting':'正在连接','reconnecting':'正在重新连接','stopped':'连接已停止','unbound':'尚未绑定','pairing':'等待私聊绑定','pairing_expired':'绑定口令已过期'}.get(feishu.state if feishu else 'unbound','等待连接') }}</span>
+          <span class="row-actions"><span class="secondary-button">连接与配置</span></span>
+        </summary>
+        <div class="feishu-fields">
+          {% if feishu and feishu.binding %}
+          <form action="{{ url_for('settings.configure_feishu') }}" method="post">
+            <input type="hidden" name="return_to" value="{{ return_to }}">
+            <label>App ID <input name="app_id" value="{{ feishu.binding.app_id }}" readonly></label>
+            <label>App Secret <input type="password" name="app_secret" autocomplete="new-password" placeholder="留空保留已保存的连接"></label>
+            <div class="feishu-form-actions">
+              <a href="https://open.feishu.cn/app/{{ feishu.binding.app_id }}" target="_blank" rel="noopener noreferrer">打开机器人开发者配置</a>
+              <button class="secondary-button">保存并连接</button>
+            </div>
+          </form>
+          {% else %}
+          {% include 'feishu_onboarding.html' %}
+          {% endif %}
+          {% if feishu and feishu.error %}<p role="status">连接或历史补收暂未完成，已有投递保留，将自动重试。</p>{% endif %}
+          {% if feishu and feishu.delivery_errors %}<p role="status">有 {{ feishu.delivery_errors|length }} 条回执尚未同步，投递和确认记录已保留。</p>{% endif %}
+          {% if feishu and feishu.recoverable %}
+          <p>若原卡片已过期或被删除，可重新发送回执；这不会重新投递素材。</p>
+          {% for receipt in feishu.recoverable %}
+          <form action="{{ url_for('settings.renew_feishu_receipt') }}" method="post">
+            <input type="hidden" name="return_to" value="{{ return_to }}">
+            <input type="hidden" name="message_id" value="{{ receipt.message_id }}">
+            <input type="hidden" name="card_id" value="{{ receipt.card_id }}">
+            <button class="secondary-button">重新发回执</button>
+          </form>
+          {% endfor %}
+          {% endif %}
+        </div>
+      </details>
+      {% if settings.credentials is defined %}
+      <div id="credentials" class="setting-row vault-row">
+        <span class="state-dot {{ settings.credentials.state }}" title="{{ '本地目录可用' if settings.credentials.state == 'configured' else '本地目录不可用' }}" aria-hidden="true"></span>
+        <strong>密钥管理</strong>
+        <span class="vault-path" title="{{ settings.credentials.path }}">{{ settings.credentials.path }}</span>
+        <span class="row-actions"><form action="{{ url_for('settings.open_credentials') }}" method="post"><button class="secondary-button">打开文件夹</button></form></span>
+      </div>
+      {% endif %}
+    </details>
+    {% include "update_settings.html" %}
+  </main>
+{% endblock %}

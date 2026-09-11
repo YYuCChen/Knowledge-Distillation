@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>新知 · 知识蒸馏器</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="page-shell library-shell accepted-shell">
+  <section class="workspace library-workspace accepted-workspace" aria-labelledby="page-title">
+    {% include "_library_navigation.html" %}
+    <header class="library-page-header accepted-header">
+      <p class="accepted-kicker">AI 衍生新知</p>
+      <h1 id="page-title">{% if searched %}新知搜索结果{% else %}新知{% endif %}</h1>
+      <p>这里保存你选择长期留下的 AI 衍生认识；它们不会变成来源型知识。</p>
+    </header>
+
+    <form action="{{ url_for('knowledge_accepted_insights') }}" method="get" class="knowledge-search library-search accepted-search">
+      <label for="insight-query" class="visually-hidden">搜索新知</label>
+      <input id="insight-query" name="q" type="search" autocomplete="off" placeholder="按主张、短论述或连接理由搜索" value="{{ query|default('', true) }}">
+      <button type="submit">搜索新知</button>
+    </form>
+
+    {% if unreadable_count %}
+      <section class="library-warning" role="status">有 {{ unreadable_count }} 条已认可新知当前无法读取，结果可能不完整。</section>
+    {% endif %}
+    {% if read_error %}
+      <section class="library-state library-error" role="alert">
+        <h2>{% if searched %}本次新知搜索没有完成{% else %}新知暂时无法读取{% endif %}</h2>
+        <p>正式新知资产没有被修改，请稍后重试。</p>
+      </section>
+    {% elif not current and not historical %}
+      <section class="library-state library-state-quiet">
+        <h2>{% if searched %}没有找到相关新知{% else %}还没有长期留下的新知{% endif %}</h2>
+        <p>{% if searched %}可以换一个更接近主张或连接理由的词。{% else %}在认知暗涌中选择“有点意思”后，它会出现在这里。{% endif %}</p>
+      </section>
+    {% else %}
+      {% if current %}
+        <section class="accepted-section accepted-current" aria-labelledby="current-insights-heading">
+          <header><h2 id="current-insights-heading">当前新知</h2><p>当前可以参与未来思考的版本</p></header>
+          <ol class="accepted-list">
+            {% for item in current %}
+              <li>
+                <a href="{{ url_for('knowledge_accepted_insight', version_id=item.insight_version_id) }}">
+                  <span class="accepted-card-meta">AI 衍生新知 · 当前版本 · 第 {{ item.version_no }} 版</span>
+                  <strong>{{ item.claim }}</strong>
+                  <span>{{ item.short_discussion }}</span>
+                  {% if item.connection_reasons %}<span class="accepted-card-reason">{{ item.connection_reasons[0] }}</span>{% endif %}
+                </a>
+              </li>
+            {% endfor %}
+          </ol>
+        </section>
+      {% endif %}
+      {% if historical %}
+        <section class="accepted-section accepted-historical" aria-labelledby="historical-insights-heading">
+          <header><h2 id="historical-insights-heading">历史新知</h2><p>保留当时内容和形成位置，不再参与默认推理</p></header>
+          <ol class="accepted-list">
+            {% for item in historical %}
+              <li>
+                <a href="{{ url_for('knowledge_accepted_insight', version_id=item.insight_version_id) }}">
+                  <span class="accepted-card-meta">AI 衍生新知 · 历史版本 · 第 {{ item.version_no }} 版</span>
+                  {% if item.historical_reason %}<span class="accepted-card-meta">{{ accepted_historical_reason_label(item.historical_reason) }}</span>{% endif %}
+                  <strong>{{ item.claim }}</strong>
+                  <span>{{ item.short_discussion }}</span>
+                  {% if item.connection_reasons %}<span class="accepted-card-reason">{{ item.connection_reasons[0] }}</span>{% endif %}
+                </a>
+              </li>
+            {% endfor %}
+          </ol>
+        </section>
+      {% endif %}
+    {% endif %}
+  </section>
+</main>
+</body>
+</html>

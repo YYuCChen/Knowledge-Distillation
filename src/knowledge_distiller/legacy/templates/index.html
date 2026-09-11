@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>知识蒸馏器 · Local Web</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <main class="page-shell home-shell">
+      <section class="workspace home-workspace" aria-labelledby="page-title">
+        <header class="home-header">
+          <div class="product-identity">
+            <h1 id="page-title">知识蒸馏器</h1>
+            <p>Local Web</p>
+          </div>
+          <div class="home-header-actions">
+            <form action="{{ url_for('start_knowledge_organization') }}" method="post">
+              <input type="hidden" name="intent" value="start">
+              <button type="submit" class="organization-start-action">开始整理</button>
+            </form>
+            <a class="library-entry" href="{{ url_for('knowledge_insight_candidates') }}">新知候选</a>
+            <a class="library-entry" href="{{ url_for('knowledge_library') }}">
+              <span>知识库</span>
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3.5 4.5 4.5L6 12.5"></path></svg>
+            </a>
+          </div>
+        </header>
+
+        <section class="submission-section" aria-labelledby="submission-title">
+          <h2 id="submission-title">添加内容</h2>
+          <form action="{{ url_for('submit') }}" method="post" novalidate class="submission-form" data-submission-form>
+            <label for="url" class="visually-hidden">抖音口播链接或分享文案</label>
+            <textarea
+              id="url"
+              name="url"
+              rows="3"
+              autocomplete="url"
+              placeholder="粘贴一条抖音口播链接或分享文案"
+              aria-describedby="submission-help{% if error %} form-error{% endif %}"
+              required
+            >{{ submitted_url|default('', true) }}</textarea>
+            <div class="submission-actions">
+              <p id="submission-help">当前一次只处理一个受支持的抖音链接。</p>
+              <button type="submit" data-submit-button>开始蒸馏</button>
+            </div>
+            {% if error %}<p id="form-error" class="form-error" role="alert">{{ error }}</p>{% endif %}
+            <p class="processing-feedback" data-processing-feedback hidden aria-live="polite">
+              <span class="processing-spinner" aria-hidden="true"></span>
+              <span>正在蒸馏，请稍候</span>
+            </p>
+          </form>
+        </section>
+
+        {% if organization_notice %}
+          <section class="home-organization-notice" role="status">{{ organization_notice }}</section>
+        {% endif %}
+
+        {% if task %}
+          <section
+            class="feedback{% if feedback == 'human_source_confirmation_required' and human_resolution %} feedback-confirmation{% endif %}"
+            aria-labelledby="feedback-title"
+            aria-live="polite"
+          >
+            {% if feedback == "obsidian_saved" %}
+              <h2 id="feedback-title">已保存到 Obsidian</h2>
+              <p>知识内容已经安全保存，可以在你的 Obsidian 知识库中阅读。</p>
+            {% elif feedback == "obsidian_conflict" %}
+              <h2 id="feedback-title">目标位置已有不同内容</h2>
+              <p>为避免覆盖现有笔记，这次没有写入。请检查目标位置后再继续。</p>
+            {% elif feedback == "obsidian_failed" %}
+              <h2 id="feedback-title">暂时无法保存到 Obsidian</h2>
+              <p>正式知识已经保留，但这次没有完成文件保存。恢复目标知识库后可以继续。</p>
+              <form action="{{ url_for('continue_task', task_id=task['task_id']) }}" method="post">
+                <button type="submit" class="secondary-action">重新尝试</button>
+              </form>
+            {% elif feedback == "knowledge_ready" %}
+              <h2 id="feedback-title">知识整理完成</h2>
+              <p>来源内容已经整理成可核查的正式知识，准备保存到你的知识库。</p>
+            {% elif feedback == "knowledge_derivation_unavailable" %}
+              <h2 id="feedback-title">暂时无法整理知识</h2>
+              <p>当前缺少整理知识所需的运行条件。来源内容已经可靠保存，条件恢复后可以继续。</p>
+              <form action="{{ url_for('continue_task', task_id=task['task_id']) }}" method="post">
+                <button type="submit" class="secondary-action">重新尝试</button>
+              </form>
+            {% elif feedback == "knowledge_qualification_rejected" %}
+              <h2 id="feedback-title">这次知识整理未通过检查</h2>
+              <p>整理结果没有得到来源内容的完整支持，因此不会保存为正式知识。</p>
+            {% elif feedback == "knowledge_qualification_failed" %}
+              <h2 id="feedback-title">暂时无法完成知识检查</h2>
+              <p>来源内容已经可靠保存，但这次无法完成知识结果的正式检查。</p>
+            {% elif feedback == "knowledge_derivation_failed" %}
+              <h2 id="feedback-title">暂时无法忠实整理知识</h2>
+              <p>来源内容已经可靠保存，但这次没有形成结构完整、证据可核查的知识候选。</p>
+            {% elif feedback == "source_ready" %}
+              <h2 id="feedback-title">口播内容已可靠恢复</h2>
+              <p>这条作品的完整口播已经形成可靠的本地来源内容，准备进入知识整理。</p>
+            {% elif feedback == "identity_confirmed" %}
+              <h2 id="feedback-title">已识别该抖音作品</h2>
+              <p>作品身份已经确认，准备进入后续处理。当前还没有开始恢复内容或整理知识。</p>
+            {% elif feedback == "login_required" %}
+              <h2 id="feedback-title">需要重新登录抖音</h2>
+              <p>抖音登录已失效，请重新登录后继续。你的投递已保留，不需要再次提交。</p>
+              <form action="{{ url_for('continue_task', task_id=task['task_id']) }}" method="post">
+                <button type="submit" class="secondary-action">我已重新登录，继续</button>
+              </form>
+            {% elif feedback == "identity_failed" %}
+              <h2 id="feedback-title">暂时无法确认该作品</h2>
+              <p>无法确认这条抖音作品。你的投递已保留，但当前不能继续处理。</p>
+            {% elif feedback == "media_failed" %}
+              <h2 id="feedback-title">暂时无法取得完整来源内容</h2>
+              <p>作品身份已经确认，但当前无法取得可继续处理的完整内容。你的投递已保留。</p>
+            {% elif feedback == "primary_failed" %}
+              <h2 id="feedback-title">暂时无法完整恢复口播</h2>
+              <p>作品内容已经取得，但这次没有形成完整的初步口播文本。你的投递已保留。</p>
+            {% elif feedback == "review_unavailable" %}
+              <h2 id="feedback-title">暂时无法整理口播内容</h2>
+              <p>当前缺少整理口播所需的运行条件。你的投递已保留，条件恢复后可以继续。</p>
+              <form action="{{ url_for('continue_task', task_id=task['task_id']) }}" method="post">
+                <button type="submit" class="secondary-action">重新尝试</button>
+              </form>
+            {% elif feedback == "review_failed" %}
+              <h2 id="feedback-title">暂时无法忠实整理口播</h2>
+              <p>初步口播已经恢复，但这次没有形成可继续核查的完整候选文本。你的投递已保留。</p>
+            {% elif feedback == "human_source_confirmation_required" and human_resolution %}
+              <p class="feedback-label">待确认</p>
+              <h2 id="feedback-title">有一处关键内容需要你确认</h2>
+              <p>这里有一处关键内容我无法可靠听清，请只确认这一处。</p>
+              <p class="source-context">
+                {{ human_resolution.request.context_before }}<mark>{{ human_resolution.request.concern.text }}</mark>{{ human_resolution.request.context_after }}
+              </p>
+              <audio controls preload="none" src="{{ url_for('source_confirmation_audio', task_id=task['task_id'], ticket=human_resolution.ticket) }}">
+                你的浏览器无法播放这段局部音频。
+              </audio>
+              <form action="{{ url_for('confirm_source_content', task_id=task['task_id']) }}" method="post" class="source-confirmation-form">
+                <input type="hidden" name="ticket" value="{{ human_resolution.ticket }}">
+                <fieldset>
+                  <legend>这里实际说的是哪一个？</legend>
+                  {% for choice in human_resolution.request.choices %}
+                    <label class="confirmation-choice">
+                      <input type="radio" name="choice" value="{{ choice }}" required>
+                      <span>{{ choice }}</span>
+                    </label>
+                  {% endfor %}
+                  <label class="confirmation-choice">
+                    <input type="radio" name="choice" value="{{ unable_to_confirm_value }}" required>
+                    <span>无法确认</span>
+                  </label>
+                </fieldset>
+                <button type="submit">提交这一处确认</button>
+              </form>
+            {% elif feedback == "human_source_confirmation_expired" %}
+              <h2 id="feedback-title">需要重新准备这处局部内容</h2>
+              <p>上次的局部确认材料已不在当前运行中。你的投递仍然保留，可以从来源内容处理重新尝试。</p>
+              <form action="{{ url_for('continue_task', task_id=task['task_id']) }}" method="post">
+                <button type="submit" class="secondary-action">重新尝试</button>
+              </form>
+            {% elif feedback == "human_source_confirmation_unconfirmed" %}
+              <h2 id="feedback-title">这条内容目前无法可靠处理</h2>
+              <p>关键局部内容仍无法确认，因此不会继续整理知识或保存到 Obsidian。</p>
+            {% elif feedback == "secondary_unavailable" %}
+              <h2 id="feedback-title">局部内容暂时无法进一步确认</h2>
+              <p>整体口播已经恢复，但当前缺少核实关键局部内容所需的运行条件。你的投递已保留，条件恢复后可以继续。</p>
+              <form action="{{ url_for('continue_task', task_id=task['task_id']) }}" method="post">
+                <button type="submit" class="secondary-action">重新尝试</button>
+              </form>
+            {% elif feedback == "snapshot_needs_local_resolution" %}
+              <h2 id="feedback-title">局部内容需要进一步确认</h2>
+              <p>整体口播已经恢复，但仍有可能改变原意的局部内容需要进一步确认。当前不会把它当作可靠来源内容。</p>
+            {% elif feedback == "snapshot_rejected" %}
+              <h2 id="feedback-title">暂时无法可靠恢复完整口播</h2>
+              <p>当前候选内容没有通过完整性检查，因此尚不能进入知识整理。</p>
+            {% else %}
+              <h2 id="feedback-title">投递已收到</h2>
+              <p>当前还没有确认作品身份，因此没有开始恢复内容或整理知识。</p>
+            {% endif %}
+          </section>
+        {% endif %}
+
+        <section class="recent-section" aria-labelledby="recent-title">
+          <div class="section-heading"><h2 id="recent-title">最近沉淀</h2></div>
+          {% if recent_read_error %}
+            <div class="recent-state recent-error" role="status"><p>最近沉淀暂时无法安全读取，请稍后重试。</p></div>
+          {% else %}
+            {% if recent_unreadable_count %}
+              <p class="recent-warning" role="status">有 {{ recent_unreadable_count }} 份正式知识当前不完整，已安全略过。</p>
+            {% endif %}
+            {% if recent_items %}
+              <div class="recent-list">
+                {% for item in recent_items %}
+                  <article class="recent-item">
+                    <details class="recent-details">
+                      <summary aria-label="展开查看《{{ item.title }}》的核心观点">
+                        <span class="recent-summary-layout">
+                          <span class="recent-index" aria-hidden="true">{{ loop.index }}</span>
+                          <span class="recent-chevron" aria-hidden="true">
+                            <svg viewBox="0 0 16 16"><path d="m5.5 3.5 4.5 4.5-4.5 4.5"></path></svg>
+                          </span>
+                          <span class="recent-copy">
+                            <strong>{{ item.title }}</strong>
+                            <span class="recent-summary">{{ item.summary }}</span>
+                            <span class="recent-meta">
+                              <span>来源：{{ item.source_label }}</span>
+                              <span aria-hidden="true">·</span>
+                              <span>{{ item.platform }}</span>
+                              <span aria-hidden="true">·</span>
+                              <time datetime="{{ item.published_at }}">{{ item.display_time }}</time>
+                            </span>
+                          </span>
+                        </span>
+                      </summary>
+                      <div class="recent-core">
+                        <h3>核心观点</h3>
+                        <ul>
+                          {% for statement in item.core_point_statements %}<li>{{ statement }}</li>{% endfor %}
+                        </ul>
+                      </div>
+                    </details>
+                    {% if item.obsidian_uri %}<a class="recent-obsidian-action" href="{{ item.obsidian_uri }}">在 Obsidian 中打开</a>{% endif %}
+                  </article>
+                {% endfor %}
+              </div>
+            {% else %}
+              <div class="recent-state">
+                <p class="recent-state-title">还没有正式沉淀的知识</p>
+                <p>完成一次蒸馏后，它会出现在这里。</p>
+              </div>
+            {% endif %}
+          {% endif %}
+        </section>
+      </section>
+    </main>
+    <script>
+      const submissionForm = document.querySelector("[data-submission-form]");
+      submissionForm.addEventListener("submit", () => {
+        const submitButton = submissionForm.querySelector("[data-submit-button]");
+        const processingFeedback = submissionForm.querySelector("[data-processing-feedback]");
+        submitButton.disabled = true;
+        submitButton.textContent = "正在蒸馏";
+        processingFeedback.hidden = false;
+      });
+    </script>
+  </body>
+</html>

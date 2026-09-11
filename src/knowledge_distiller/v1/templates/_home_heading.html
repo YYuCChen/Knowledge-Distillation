@@ -1,0 +1,17 @@
+    <header class="masthead">
+      <h1>知识蒸馏器</h1>
+      <p>碎片 · 新知</p>
+    </header>
+
+    <nav class="main-nav" aria-label="主要页面">
+      <span class="nav-items">
+        <a href="{{ url_for('topics.index') }}">主题</a>
+        <strong aria-current="page">首页</strong>
+        <a href="{{ url_for('insights.index') }}">新知</a>
+      </span>
+      <img
+        class="active-indicator"
+        src="{{ url_for('static', filename='icons/active-indicator.svg') }}"
+        alt=""
+      >
+    </nav>

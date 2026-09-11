@@ -1,0 +1,148 @@
+@font-face {
+  font-family: "Noto Sans SC";
+  src: url("fonts/NotoSansSC-wght.woff2") format("woff2-variations");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Noto Serif SC";
+  src: url("fonts/NotoSerifSC-wght.woff2") format("woff2-variations");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+:root {
+  --page: #fbfaf9;
+  --card: #fcfcfc;
+  --ink: #17191d;
+  --text: #373839;
+  --secondary: #555d65;
+  --muted: #6c737b;
+  --line: #96a9c0;
+  --soft: #e7e5dd;
+  --action-primary: #141413;
+  --action-primary-pressed: #6b6a65;
+  --action-secondary-pressed: #f0eee7;
+  --action-disabled: #e1e2e3;
+  --action-text: #4d4c48;
+  --warning: #efa12f;
+  --danger: #9d3b31;
+  /* Figma 126:5621 / 127:7234: shared reading roles, automatic line height. */
+  --reading-statement-font: 600 14px/normal "Noto Serif SC", serif;
+  --reading-statement-spacing: .7px;
+  --reading-body-font: 600 12px/normal "Noto Serif SC", serif;
+  --reading-body-spacing: 1.2px;
+}
+
+html { scrollbar-gutter: stable both-edges; }
+
+* {
+  box-sizing: border-box;
+}
+
+body,
+button,
+input,
+textarea,
+select {
+  font-family: "Noto Sans SC", sans-serif;
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font-synthesis: none;
+}
+
+.page-width {
+  width: 640px;
+  margin-inline: auto;
+}
+
+.topbar {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+
+.topbar a {
+  color: #4d4c48;
+  font-size: 14px;
+  letter-spacing: 2.8px;
+  text-decoration: none;
+}
+
+.main-nav {
+  height: 30px;
+  display: flex;
+  align-items: start;
+  justify-content: center;
+  gap: 24px;
+  color: var(--text);
+  font: 600 14px/normal "Noto Serif SC", serif;
+  letter-spacing: 1.4px;
+}
+
+.main-nav strong {
+  font-weight: inherit;
+  height: 26px;
+  border-bottom: 2px solid var(--text);
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.primary-button,
+.secondary-button,
+.outline-button {
+  min-height: 24px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 12px;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.primary-button {
+  border: 1px solid #141413;
+  background: #141413;
+  color: var(--page);
+}
+
+.secondary-button {
+  border: 1px solid var(--soft);
+  background: var(--soft);
+  color: #4d4c48;
+}
+
+.outline-button {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: #4d4c48;
+}
+
+@media (max-width: 720px) {
+  .page-width {
+    width: calc(100% - 32px);
+  }
+}
+
+.main-nav a { color: inherit; text-decoration: none; }
+
+[data-update-attention] { width: 12px; height: 12px; margin-left: 5px; vertical-align: middle; }
+[data-update-attention][hidden] { display: none; }

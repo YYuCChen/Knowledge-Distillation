@@ -1,0 +1,233 @@
+.status-panel {
+  width: 100%;
+  margin: 0;
+  background: var(--card);
+  color: var(--text);
+  font-size: 10px;
+}
+
+.status-panel summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.status-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.processing-strip {
+  width: 100%;
+  height: 90px;
+  display: grid;
+  grid-template-columns: 320px 1px 255px 64px;
+  align-items: center;
+  overflow: hidden;
+  border-top: 2px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.process-counts {
+  height: 100%;
+  padding: 0 28px 0 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  overflow: hidden;
+  font-family: "Noto Serif SC", serif;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.process-counts b {
+  color: #141413;
+  font-family: "Noto Sans SC", sans-serif;
+  font-weight: 500;
+  letter-spacing: 1px;
+}
+
+.process-boundary {
+  width: 1px;
+  height: 54px;
+  background: var(--line);
+}
+
+.process-state {
+  height: 88px;
+  padding: 0 28px;
+  display: grid;
+  grid-template-columns: 64px 64px 1fr;
+  align-items: center;
+  overflow: hidden;
+  font-family: "Noto Serif SC", serif;
+  font-weight: 600;
+  letter-spacing: 2px;
+  white-space: nowrap;
+}
+
+.process-label {
+  text-align: left;
+}
+
+.process-line {
+  width: 64px;
+  border-top: 1px solid var(--text);
+}
+
+.phase-list {
+  height: 88px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.phase {
+  height: 17px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.phase img,
+.summary-signal img {
+  width: 17px;
+  height: 17px;
+}
+
+.panel-chevron {
+  width: 64px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.processing-strip .panel-chevron {
+  align-items: flex-start;
+  padding-top: 18px;
+}
+
+.panel-chevron img,
+.card-chevron img {
+  width: 8px;
+  height: 8px;
+}
+
+.status-panel[open] .closed-chevron {
+  display: none;
+}
+
+.status-panel[open] .open-chevron {
+  display: block;
+}
+
+.operation-rows {
+  width: 100%;
+}
+
+.operation-row {
+  width: 100%;
+  height: 22px;
+  margin: 0;
+  display: grid;
+  align-items: center;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+  font-weight: 400;
+  line-height: normal;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.operation-row span,
+.operation-row time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.processing-row {
+  grid-template-columns: 64px minmax(0, 1fr) 110px;
+}
+
+.processing-row span:first-child,
+.waiting-row span:first-child {
+  font-weight: 500;
+  letter-spacing: 1px;
+  text-align: center;
+}
+
+.processing-row span:last-child,
+.waiting-row span:last-child,
+.waiting-row time {
+  color: #4d4c48;
+  text-align: right;
+}
+
+.processing-row span:last-child {
+  padding-right: 64px;
+}
+
+.compact-summary {
+  width: 100%;
+  height: 32px;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) 64px;
+  align-items: center;
+  overflow: hidden;
+  border-block: 1px solid var(--line);
+}
+
+.summary-signal {
+  width: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.summary-text {
+  overflow: hidden;
+  font-weight: 500;
+  letter-spacing: 1px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waiting-row {
+  grid-template-columns: 64px 244px 110px 110px;
+  column-gap: 24px;
+}
+
+@media (max-width: 720px) {
+  .processing-strip {
+    grid-template-columns: minmax(0, 1fr) 1px 180px 40px;
+  }
+
+  .process-counts {
+    padding-inline: 12px;
+  }
+
+  .process-state {
+    padding-inline: 12px;
+    grid-template-columns: 56px 36px 1fr;
+  }
+
+  .panel-chevron,
+  .summary-signal {
+    width: 40px;
+  }
+
+  .compact-summary {
+    grid-template-columns: 40px minmax(0, 1fr) 40px;
+  }
+
+  .waiting-row {
+    grid-template-columns: 48px minmax(0, 1fr) 72px;
+    column-gap: 10px;
+  }
+
+  .waiting-row time {
+    display: none;
+  }
+}

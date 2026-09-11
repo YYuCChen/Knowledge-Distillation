@@ -1,0 +1,17 @@
+<div class="todo-card-shell"><article class="todo-card image-confirmation-card">
+  <span class="todo-index">{{ cards.index }}</span>
+  <div class="todo-content">
+    <p class="source-fragment">图片文字待核对：<mark>{{ concern.text }}</mark></p>
+    <img class="ocr-concern-crop" src="{{ url_for('confirmation_image', item_id=item.id, concern_id=concern.audio_name, token=item.confirmation.token) }}" alt="疑点附近的原图，含上下文" loading="lazy">
+    <p class="manual-hint">对照局部原图；文字正确可直接确认，有误请修改。</p>
+    {% if error %}<p role="alert">{{ error.message }}</p>{% endif %}
+    <form id="manual-{{ key }}" class="ocr-correction-form manual-confirmation" action="{{ url_for('confirm', item_id=item.id) }}" method="post">
+      <input type="hidden" name="token" value="{{ item.confirmation.token }}">
+      <input type="hidden" name="concern_id" value="{{ concern.audio_name }}">
+                            <input type="hidden" name="concern_revision" value="{{ concern.revision }}">
+      <input type="hidden" name="action" value="manual">
+      <textarea name="value" rows="2" aria-label="疑点 {{ loop.index }} 正确文字">{{ error.value if error else concern.text }}</textarea>
+      <button class="primary-small" type="submit">确认文字</button>
+    </form>
+  </div>
+</article></div>

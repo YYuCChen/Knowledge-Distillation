@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block styles %}
+<link rel="stylesheet" href="{{ url_for('static',filename='home.css') }}">
+<link rel="stylesheet" href="{{ url_for('static',filename='collections.css') }}">
+{% endblock %}
+{% block topbar %}<header class="topbar page-width"><a href="{{ url_for('home') }}">返回首页</a><a href="{{ url_for('settings.page') }}">设置{% if update is defined %}<img data-update-attention src="{{ url_for('static', filename='icons/update-attention.svg') }}" alt="有新版更新说明" {% if not update.attention %}hidden{% endif %}>{% endif %}</a></header>{% endblock %}
+{% block content %}<main class="page-width home-page">{% include "_home_heading.html" %}{% block collection_content %}{% endblock %}</main>{% endblock %}

@@ -1,0 +1,18 @@
+<article class="formal-point-item">
+  <p class="point-statement">{{ item.card.statement }}</p>
+  <p class="formal-point-anchor">见《{{ item.card.knowledge_title }}》</p>
+  <div class="formal-point-footer">
+    <p class="formal-point-meta">
+      <span>{{ "核心观点" if item.card.role == "core" else "其他观点" }}</span>
+      {% if item.card.source_label != "来源信息未标注" %}
+        <span aria-hidden="true">·</span><span>来源：{{ item.card.source_label }}</span>
+      {% endif %}
+      {% if item.platform_label %}
+        <span aria-hidden="true">·</span><span>{{ item.platform_label }}</span>
+      {% endif %}
+    </p>
+    {% if item.obsidian_uri %}
+      <a class="library-obsidian-action" href="{{ item.obsidian_uri }}">在 Obsidian 中打开</a>
+    {% endif %}
+  </div>
+</article>

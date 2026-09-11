@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if topic %}{{ topic.name }}{% else %}主题读取失败{% endif %} · 知识蒸馏器</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="page-shell library-shell topic-detail-shell">
+  <section class="workspace library-workspace" aria-labelledby="page-title">
+    {% include "_library_navigation.html" %}
+    <nav class="topic-back-nav" aria-label="主题导航">
+      <a href="{{ url_for('knowledge_library') }}">← 返回主题列表</a>
+    </nav>
+    {% if read_error %}
+      <section class="library-state library-error" role="alert">
+        <h1 id="page-title">这个主题暂时无法读取</h1>
+        <p>数据没有被修改，可返回主题列表或使用搜索。</p>
+      </section>
+    {% else %}
+      <header class="topic-header">
+        <h1 id="page-title">{{ topic.name }}</h1>
+        {% if topic.scope %}<p>{{ topic.scope }}</p>{% endif %}
+      </header>
+      {% if not snapshot.current %}
+        <section class="library-warning topic-stale" role="status">
+          这个主题尚未覆盖最新知识；下方仍可安全浏览当前有效、可读的观点。
+          {% if snapshot.uncovered_count %}当前有 {{ snapshot.uncovered_count }} 个有效观点尚未被旧索引覆盖。{% endif %}
+        </section>
+      {% endif %}
+      {% if snapshot.unreadable_count %}
+        <section class="library-warning" role="status">有 {{ snapshot.unreadable_count }} 份正式知识当前损坏或无法读取，本主题可能不完整。</section>
+      {% endif %}
+      {% if points %}
+        <section class="topic-points" aria-label="{{ topic.name }}的正式观点">
+          {% for item in points %}
+            <details class="topic-point">
+              <summary class="topic-point-summary">
+                <span class="topic-point-order" aria-hidden="true">{{ item.position }}</span>
+                <span class="topic-point-copy">
+                  <span class="topic-point-statement">{{ item.statement }}</span>
+                  <span class="topic-knowledge-anchor">见《{{ item.knowledge_title }}》</span>
+                </span>
+                <svg class="topic-point-chevron" aria-hidden="true" viewBox="0 0 20 20">
+                  <path d="m4 7 6 6 6-6"/>
+                </svg>
+              </summary>
+              <div class="topic-lead">
+                <div class="topic-lead-heading">
+                  <svg aria-hidden="true" viewBox="0 0 20 20">
+                    <path d="M10 1.5v4M10 14.5v4M1.5 10h4M14.5 10h4M4 4l2.8 2.8M13.2 13.2 16 16M16 4l-2.8 2.8M6.8 13.2 4 16"/>
+                  </svg>
+                  <span>引</span>
+                </div>
+                <div class="topic-lead-body">
+                  <p class="topic-lead-summary">{{ item.knowledge_summary }}</p>
+                  {% if item.source_line or item.obsidian_uri %}
+                    <div class="topic-lead-footer">
+                      {% if item.source_line %}<p class="topic-source-line">来源：{{ item.source_line }}</p>{% endif %}
+                      {% if item.obsidian_uri %}
+                        <a class="topic-obsidian-action" href="{{ item.obsidian_uri }}">
+                          <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m10 2 6 4.4-1.8 9.3L10 18l-4.2-2.3L4 6.4 10 2Zm0 0v16m-4.2-2.3L10 11l4.2 4.7M4 6.4 10 11l6-4.6"/></svg>
+                          在 Obsidian 中打开
+                        </a>
+                      {% endif %}
+                    </div>
+                  {% endif %}
+                </div>
+              </div>
+            </details>
+          {% endfor %}
+        </section>
+      {% else %}
+        <section class="library-state">
+          <h2>这个主题暂时没有可读观点</h2>
+          <p>主题索引可能已过期，可返回列表重新整理。</p>
+        </section>
+      {% endif %}
+      {% if auxiliary_read_error %}
+        <aside class="topic-auxiliary topic-auxiliary-error" aria-labelledby="topic-auxiliary-heading">
+          <h2 id="topic-auxiliary-heading">相关 AI 新知暂时无法读取</h2>
+          <p>上方来源型主题主链仍可安全浏览；辅助区没有触发刷新或修改。</p>
+        </aside>
+      {% elif auxiliary_insights or auxiliary_unreadable_count %}
+        <aside class="topic-auxiliary" aria-labelledby="topic-auxiliary-heading">
+          <header>
+            <p class="topic-auxiliary-kicker">只读辅助定位</p>
+            <h2 id="topic-auxiliary-heading">相关 AI 新知</h2>
+            <p>它们不属于 Topic 主观点链、membership 或 evidence。</p>
+          </header>
+          {% if auxiliary_unreadable_count %}<p class="topic-auxiliary-warning" role="status">有 {{ auxiliary_unreadable_count }} 条相关新知当前无法读取。</p>{% endif %}
+          {% if auxiliary_insights %}
+            <ul>
+              {% for insight in auxiliary_insights %}
+                <li><a href="{{ url_for('knowledge_accepted_insight', version_id=insight.insight_version_id) }}">{{ insight.claim }}</a></li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        </aside>
+      {% endif %}
+    {% endif %}
+  </section>
+</main>
+</body>
+</html>

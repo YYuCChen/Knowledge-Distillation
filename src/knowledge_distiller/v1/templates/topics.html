@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}主题 · 知识蒸馏器{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='topics.css') }}">{% endblock %}
+{% block content %}
+<main class="page-width topic-page" data-reading-state>
+  <header class="topbar"><span></span><a href="{{ url_for('settings.page', return_to=request.full_path) }}">设置{% if update is defined %}<img data-update-attention src="{{ url_for('static', filename='icons/update-attention.svg') }}" alt="有新版更新说明" {% if not update.attention %}hidden{% endif %}>{% endif %}</a></header>
+  <nav class="main-nav" aria-label="主要页面"><strong aria-current="page">主题</strong><a href="{{ url_for('home') }}">首页</a><a href="{{ url_for('insights.index') }}">新知</a></nav>
+  <header class="topic-heading"><h1>主题</h1>{% if snapshot %}<p>{{ snapshot.topics|length }} 个主题、{{ snapshot.knowledge_count }} 篇知识</p>{% endif %}</header>
+  <form class="topic-search" method="get" action="{{ url_for('topics.index') }}" role="search">
+    <button aria-label="搜索" title="搜索" type="submit"><img src="{{ url_for('static', filename='icons/topic-search.svg') }}" alt=""></button>
+    <input type="search" name="q" value="{{ query }}" placeholder="搜索主题、观点或新知" aria-label="搜索主题、观点或新知" autocomplete="off">
+    {% if query %}<a href="{{ url_for('topics.index') }}" data-clear-search>清空</a>{% endif %}
+  </form>
+  <div class="topic-scroll" data-scroll-area>
+  {% if error %}<p class="topic-empty" role="alert">{{ error }}</p>
+  {% else %}
+    {% if searching %}<h2 class="search-group">主题 · {{ topics|length }}</h2>{% endif %}
+    {% for topic in topics %}
+      <a class="topic-card" id="topic-{{ topic.id }}" href="{{ url_for('topics.detail', topic_id=topic.id, q=query) if searching else url_for('topics.detail', topic_id=topic.id) }}">
+        <span class="topic-number">{{ loop.index }}</span>
+        <div class="topic-card-content"><h2 title="{{ topic.name }}">{{ topic.name }}</h2><p class="topic-scope" title="{{ topic.scope }}">{{ topic.scope }}</p>
+          <div class="topic-note"><span>{{ topic.members|length }} 条正式观点</span><time>{{ topic.date }}</time></div></div>
+        <img class="topic-chevron" src="{{ url_for('static', filename='icons/topic-chevron.svg') }}" alt="">
+      </a>
+    {% endfor %}
+    {% if searching %}
+      <h2 class="search-group">来源型观点 · {{ points|length }}</h2>
+      {% for point in points %}{% set point_number = loop.index %}{% include "topic_point.html" %}{% endfor %}
+      <h2 class="search-group">有意思的新知 · {{ insights|length }}</h2>
+      {% for item in insights %}<a class="topic-card search-insight" href="{{ url_for('insights.index', state='interesting') }}#insight-{{ item.id }}"><span class="topic-number">{{ loop.index }}</span><div class="topic-card-content"><h2>{{ item.payload.claim }}</h2></div><img class="topic-chevron" src="{{ url_for('static', filename='icons/topic-chevron.svg') }}" alt=""></a>{% endfor %}
+      {% if not topics and not points and not insights %}<p class="topic-empty" role="status">没有找到与“{{ query }}”匹配的主题、观点或新知。</p>{% endif %}
+    {% elif not topics %}<p class="topic-empty">还没有整理出的主题。</p>{% endif %}
+  {% endif %}
+  </div>
+</main>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='topics.js') }}" defer></script>{% endblock %}

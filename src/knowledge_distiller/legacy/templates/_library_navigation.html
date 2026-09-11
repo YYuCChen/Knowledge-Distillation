@@ -1,0 +1,25 @@
+<nav class="primary-nav library-product-nav" aria-label="主要导航">
+  <a href="{{ url_for('index') }}">投递</a>
+  <a href="{{ url_for('knowledge_library') }}" aria-current="page">知识库</a>
+</nav>
+<nav class="library-section-nav" aria-label="知识库浏览方式">
+  <a href="{{ url_for('knowledge_library') }}"{% if active_library_section == "topics" %} aria-current="page"{% endif %}>主题</a>
+  <a href="{{ url_for('knowledge_library', view='knowledge') }}"{% if active_library_section == "knowledge" %} aria-current="page"{% endif %}>知识</a>
+  <a href="{{ url_for('knowledge_accepted_insights') }}"{% if active_library_section == "insights" %} aria-current="page"{% endif %}>新知</a>
+</nav>
+<div class="growth-entry-actions" aria-label="知识整理入口">
+  <form action="{{ url_for('start_knowledge_organization') }}" method="post">
+    <input type="hidden" name="intent" value="start">
+    <button type="submit" class="secondary-action">开始整理</button>
+  </form>
+  <a href="{{ url_for('knowledge_insight_candidates') }}">认知暗涌</a>
+</div>
+{% if active_library_section != "insights" %}
+  <form action="{{ url_for('knowledge_library') }}" method="get"
+    class="knowledge-search library-search">
+    <label for="library-query" class="visually-hidden">关键词、概念或短句</label>
+    <input id="library-query" name="q" type="search" autocomplete="off"
+      placeholder="输入关键词、概念或短句" value="{{ query|default('', true) }}">
+    <button type="submit">搜索正式知识</button>
+  </form>
+{% endif %}

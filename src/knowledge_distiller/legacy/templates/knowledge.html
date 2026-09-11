@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>知识库 · 知识蒸馏器</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="page-shell library-shell">
+  <section class="workspace library-workspace" aria-labelledby="page-title">
+    {% include "_library_navigation.html" %}
+    <header class="library-page-header">
+      {% if searched %}
+        <h1 id="page-title">搜索结果</h1>
+        <p>按记得的词定位历史正式观点</p>
+      {% elif active_library_section == "knowledge" %}
+        <h1 id="page-title">来源型知识</h1>
+        <p>按正式沉淀时间浏览曾经主动收录的知识</p>
+      {% else %}
+        <h1 id="page-title">知识库</h1>
+        <p>默认按主题浏览正式观点</p>
+      {% endif %}
+    </header>
+
+    {% if searched %}
+      {% if unreadable_count %}
+        <section class="library-warning" role="status">有 {{ unreadable_count }} 份正式知识当前无法读取，本次搜索结果可能不完整。</section>
+      {% endif %}
+      {% if read_error %}
+        <section class="library-state library-error" role="alert">
+          <h2>本次搜索没有完成</h2>
+          <p>正式知识库暂时无法安全读取。数据没有被修改，请稍后重试。</p>
+        </section>
+      {% elif not cards %}
+        <section class="library-state">
+          <h2>没有找到相关正式观点</h2>
+          <p>可以换一个更接近观点原文的关键词或短句。</p>
+        </section>
+      {% endif %}
+      {% if cards %}
+        <section class="knowledge-results" aria-label="正式观点搜索结果">
+          {% for item in cards %}{% include "_formal_point_card.html" %}{% endfor %}
+        </section>
+      {% endif %}
+    {% elif active_library_section == "knowledge" %}
+      {% if knowledge_unreadable_count %}
+        <section class="library-warning" role="status">有 {{ knowledge_unreadable_count }} 份来源型知识当前无法读取，已安全略过。</section>
+      {% endif %}
+      {% if knowledge_read_error %}
+        <section class="library-state library-error" role="alert">
+          <h2>来源型知识暂时无法读取</h2>
+          <p>正式知识没有被修改，可继续使用主题浏览和本地搜索。</p>
+        </section>
+      {% elif knowledge_items %}
+        <section class="knowledge-browse-list" aria-label="来源型知识">
+          {% for item in knowledge_items %}{% include "_knowledge_browse_item.html" %}{% endfor %}
+        </section>
+      {% else %}
+        <section class="library-state library-state-quiet">
+          <h2>还没有来源型知识</h2>
+          <p>完成第一份知识整理并发布后，它会出现在这里。</p>
+        </section>
+      {% endif %}
+    {% else %}
+      {% if topic_notice %}<section class="library-notice" role="status">{{ topic_notice }}</section>{% endif %}
+      {% if topic_read_error %}
+        <section class="library-state library-error" role="alert">
+          <h2>主题列表暂时无法读取</h2>
+          <p>本地搜索仍然可用，数据没有被修改。</p>
+        </section>
+      {% elif snapshot.empty_knowledge %}
+        <section class="library-state">
+          <h2>还没有可浏览的正式知识</h2>
+          <p>完成第一份知识整理并发布后，主题会在这里出现。</p>
+        </section>
+      {% else %}
+        {% if snapshot.unreadable_count %}
+          <section class="library-warning" role="status">有 {{ snapshot.unreadable_count }} 份正式知识当前无法读取，主题可能不完整。</section>
+        {% endif %}
+        {% if not snapshot.has_index %}
+          <section class="library-state">
+            <h2>主题还未整理</h2>
+            <p>正式知识已可以搜索，但还没有形成主题列表。</p>
+          </section>
+        {% elif not snapshot.current %}
+          <section class="library-warning topic-stale" role="status">
+            主题列表尚未覆盖最新知识；下方仍可安全浏览上次保存的结果。
+            {% if snapshot.uncovered_count %}当前有 {{ snapshot.uncovered_count }} 个有效观点尚未被这份旧索引覆盖。{% endif %}
+            {% if not indexer_available %}主题整理暂时不可用，可继续浏览现有主题或搜索正式知识。{% endif %}
+          </section>
+        {% elif snapshot.current and not topics %}
+          <section class="library-state">
+            <h2>当前知识尚未形成具有足够导航价值的主题</h2>
+            <p>所有正式观点仍可通过上方搜索找到，也可手动重新整理。</p>
+          </section>
+        {% elif snapshot.unassigned_count %}
+          <section class="library-warning" role="status">当前有 {{ snapshot.unassigned_count }} 个有效观点暂未归入主题。</section>
+        {% endif %}
+
+        {% if not indexer_available and not snapshot.has_index %}
+          <section class="topic-availability-note" role="status">
+            <p><strong>主题整理当前不可用。</strong>可继续使用上方的本地搜索；现有正式知识不受影响。</p>
+          </section>
+        {% endif %}
+
+        {% if auto_refresh %}
+          <section class="topic-refreshing" role="status" aria-live="polite">
+            <span class="status-spinner" aria-hidden="true"></span>
+            <div><h2>正在整理主题……</h2><p>完成后会自动刷新这一页。</p></div>
+          </section>
+          <form action="{{ url_for('refresh_knowledge_topics') }}" method="post" data-auto-topic-refresh hidden></form>
+        {% endif %}
+
+        {% if topics and snapshot.has_index %}
+          <ul class="topic-list" aria-label="知识主题">
+            {% for topic in topics %}
+              <li class="topic-list-item">
+                <a class="topic-list-link" href="{{ url_for('knowledge_topic', topic_id=topic.topic_id) }}">
+                  <span class="topic-list-name">{{ topic.name }}</span>
+                  {% if topic.scope %}<span class="topic-list-scope">{{ topic.scope }}</span>{% endif %}
+                  <svg class="topic-list-chevron" aria-hidden="true" viewBox="0 0 20 20">
+                    <path d="m7 4 6 6-6 6"/>
+                  </svg>
+                </a>
+              </li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+
+        {% if indexer_available %}
+          <form action="{{ url_for('refresh_knowledge_topics') }}" method="post" class="topic-refresh-form">
+            <input type="hidden" name="force" value="true">
+            <button type="submit" class="secondary-action">重新整理全部主题</button>
+          </form>
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  </section>
+</main>
+{% if auto_refresh %}
+<script>
+  const autoTopicRefreshForm = document.querySelector("[data-auto-topic-refresh]");
+  const failedTopicRefreshUrl = {{ url_for('knowledge_library', topic_notice='failed')|tojson }};
+  fetch(autoTopicRefreshForm.action, {
+    method: "POST",
+    body: new FormData(autoTopicRefreshForm),
+    credentials: "same-origin"
+  }).then((response) => {
+    window.location.replace(response.ok ? response.url : failedTopicRefreshUrl);
+  }).catch(() => {
+    window.location.replace(failedTopicRefreshUrl);
+  });
+</script>
+{% endif %}
+</body>
+</html>

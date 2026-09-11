@@ -1,0 +1,359 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>豆包 ASR 图文配置教程 · 知识蒸馏器</title><link rel="stylesheet" href="../base.css"><link rel="stylesheet" href="guide.css"></head><body><main><a class="guide-back" href="../../settings?open=models">返回模型配置</a><h1>知识蒸馏器：豆包 ASR 新用户配置教程</h1>
+<p>适用：Mac 版知识蒸馏器，豆包录音文件识别模型 2.0。配图来自 2026 年 9 月 6 日的配置教程；应用操作已对齐当前四步向导，服务标识及存储桶设置已于 2026 年 9 月 9 日核对官方文档。控制台菜单以后可能调整。</p>
+<p>配置完成后，知识蒸馏器会把视频音轨上传到私有 TOS 桶，交给豆包转成文字，取得结果后清理云端临时音频。转写后的文字整理与知识提炼使用另行配置的语言模型。</p>
+<blockquote>
+<p>豆包语音和 TOS 可能产生用量费用，请先查看自己的额度、价格和余额。教程配图只选用不含密钥值、APP ID、个人桶名或账号 ID 的页面，不包含个人浏览器标签页。</p>
+</blockquote>
+<h2>先分清：语音识别、TOS 和大模型</h2>
+<table>
+<thead>
+<tr>
+<th>服务</th>
+<th>在知识蒸馏器里做什么</th>
+<th>在哪里配置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ASR（这里是豆包语音）</td>
+<td>把视频里的声音转成文字</td>
+<td>设置 → 模型配置 → ASR</td>
+</tr>
+<tr>
+<td>TOS（对象存储）</td>
+<td>临时存放音频，让豆包语音读取</td>
+<td>豆包配置向导第 3 步</td>
+</tr>
+<tr>
+<td>LLM（语言模型）</td>
+<td>阅读文字、提炼知识，参与整理</td>
+<td>设置 → 模型配置 → LLM</td>
+</tr>
+</tbody>
+</table>
+<p><strong>TOS 不是大模型，也不负责转写。</strong> 选择豆包语音不要求把 LLM 也换成豆包：保留已配置的语言模型即可。三者的密钥不能混填。</p>
+<h2>先看懂：到底需要配置什么</h2>
+<table>
+<thead>
+<tr>
+<th>名称</th>
+<th>用途</th>
+<th>获取位置</th>
+<th>填到应用哪里</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>豆包语音 API Key</td>
+<td>调用录音转文字服务</td>
+<td>豆包语音控制台 → API Key</td>
+<td>豆包 API Key</td>
+</tr>
+<tr>
+<td>TOS Access Key ID（AK）</td>
+<td>标识访问存储桶的身份</td>
+<td>访问控制 → API 访问密钥 → Access Key</td>
+<td>TOS → Access Key ID</td>
+</tr>
+<tr>
+<td>TOS Secret Access Key（SK）</td>
+<td>与 AK 配对，签名访问存储桶</td>
+<td>与 AK 一起创建</td>
+<td>TOS → Secret Access Key</td>
+</tr>
+<tr>
+<td>Bucket</td>
+<td>临时音频存放的桶</td>
+<td>对象存储 TOS</td>
+<td>TOS → Bucket</td>
+</tr>
+<tr>
+<td>Region</td>
+<td>桶所在区域</td>
+<td>桶详情页</td>
+<td>TOS → Region</td>
+</tr>
+</tbody>
+</table>
+<p><strong>不要把豆包 API Key 填到 TOS 的 AK 或 SK 栏。AK 和 SK 必须是同一次创建得到的一对。</strong></p>
+<p>另外，下面几个名字容易混淆：</p>
+<ul>
+<li>旧版豆包控制台里的 <strong>APP ID</strong>，不是本应用需要填写的 API Key。</li>
+<li>名为 <code>default</code> 的豆包应用，与 TOS 的 <code>default（默认项目）</code> 不是一回事。项目只是资源分组，不要求为每个豆包应用单独建桶。</li>
+<li>豆包 API Key 页面里的“默认体验中心使用”，只影响控制台体验中心，不会自动同步到知识蒸馏器。</li>
+<li>IAM「API 访问密钥」页面下方也可能有一个 <strong>API Key</strong> 区域。配置 TOS 时使用上方的 <strong>Access Key</strong> 区域。</li>
+</ul>
+<p>整个过程按这个顺序进行：</p>
+<p><strong>开通豆包语音 → 保存语音 API Key → 创建私有 TOS 桶 → 设置自动清理 → 准备 TOS AK/SK → 在应用中保存并启用 → 短视频验证。</strong></p>
+<h2>1. 开通豆包录音文件识别 2.0</h2>
+<ol>
+<li>登录<a target="_blank" rel="noopener noreferrer" href="https://console.volcengine.com/">火山引擎控制台</a>，搜索并进入「豆包语音」。</li>
+<li>如果看到旧版「应用管理」及 APP ID 列表，点击「立即体验」进入新版控制台。</li>
+<li>在「开通管理」中找到 <strong>录音文件识别 2.0</strong>，按页面流程开通。</li>
+<li>确认该服务显示 <strong>已开通</strong>。</li>
+</ol>
+<p>本应用对应资源标识 <code>volc.seedasr.auc</code>。不要误选流式语音识别、语音合成或闲时识别等其他服务。</p>
+<p><strong>完成标志：录音文件识别 2.0 显示已开通。</strong></p>
+<h2>2. 创建并保存豆包语音 API Key</h2>
+<ol>
+<li>在豆包语音控制台左侧进入「API Key」。</li>
+<li>创建一条专用密钥，名称可填写 <code>知识蒸馏器-ASR</code>。已有专用密钥可以直接使用。</li>
+<li>确认状态为 <strong>启用</strong>，复制密钥。</li>
+<li>打开知识蒸馏器 → 设置 → 模型配置 → ASR，选择 <strong>豆包录音文件识别模型 2.0</strong>。</li>
+<li>在向导第 2 步将密钥粘贴到「豆包语音 API Key」，点击 <strong>保存并继续</strong>。</li>
+</ol>
+<p>不要把密钥发到聊天、教程或截图中。应用不会回显已保存的密钥，所以保存后输入框看起来仍为空是正常的。</p>
+<p><strong>完成标志：应用显示豆包 API Key 已保存。此时还没有验证云端调用，也不代表已切换到这条密钥。</strong></p>
+<h2>3. 创建专用 TOS 存储桶</h2>
+<p>进入「对象存储 TOS」→「桶列表」→「创建存储桶」。建议使用专用临时桶，便于设置自动清理，避免影响其他文件。</p>
+<p><img src="assets/doubao-asr/create-bucket.png" alt="TOS 创建存储桶：基础设置" /></p>
+<blockquote>
+<p>上图展示的是未填写的创建页，默认选中了北京。地域按实际使用选择，<strong>广州只是本教程示例，不是应用的必选地域</strong>。已有可用桶无需为了与截图一致而重建。</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>字段</th>
+<th>填写方式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>名称</td>
+<td>例如 <code>my-distiller-asr-temp-20260906</code>；若已被占用，换一个名称</td>
+</tr>
+<tr>
+<td>区域</td>
+<td>选择适用地域，例如华南1（广州）；记住实际选择的地域</td>
+</tr>
+<tr>
+<td>版本控制</td>
+<td><strong>不开通</strong></td>
+</tr>
+<tr>
+<td>桶策略</td>
+<td><strong>私有</strong></td>
+</tr>
+<tr>
+<td>对象 ACL 默认策略</td>
+<td>保持关闭</td>
+</tr>
+<tr>
+<td>项目</td>
+<td>可保留 <code>default（默认项目）</code></td>
+</tr>
+</tbody>
+</table>
+<p>桶名示例不应直接当成你的实际桶名。创建后请复制自己桶详情页里的完整名称。</p>
+<h3>高级设置</h3>
+<p><img src="assets/doubao-asr/advanced-settings.png" alt="TOS 创建存储桶：高级设置" /></p>
+<table>
+<thead>
+<tr>
+<th>选项</th>
+<th>本教程的设置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>分层命名空间</td>
+<td>关闭</td>
+</tr>
+<tr>
+<td>多 AZ 冗余</td>
+<td>关闭</td>
+</tr>
+<tr>
+<td>默认存储类型</td>
+<td><strong>标准存储</strong></td>
+</tr>
+<tr>
+<td>服务端加密</td>
+<td>保持页面默认「无」</td>
+</tr>
+<tr>
+<td>日志分析</td>
+<td>关闭</td>
+</tr>
+<tr>
+<td>RenameObject</td>
+<td>关闭</td>
+</tr>
+<tr>
+<td>标签</td>
+<td>暂时不填</td>
+</tr>
+<tr>
+<td>保留策略</td>
+<td><strong>关闭</strong></td>
+</tr>
+</tbody>
+</table>
+<p>这些设置适用于此处的临时音频用途。点击「创建」，进入桶概览，确认桶名、区域和默认存储类型。</p>
+<p><strong>完成标志：能进入桶详情页；地域与自己的选择一致，默认存储类型为标准存储。</strong></p>
+<h2>4. 设置 5 天自动清理</h2>
+<p><strong>“保留策略”不是“自动删除”。</strong> 保留策略（WORM）用于在规定期限内限制删除或覆盖；自动清理应使用「生命周期」。</p>
+<p>在桶概览找到「生命周期」旁的「设置」，创建规则：</p>
+<table>
+<thead>
+<tr>
+<th>项目</th>
+<th>设置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>规则名称</td>
+<td><code>临时音频5天自动清理</code></td>
+</tr>
+<tr>
+<td>状态</td>
+<td><strong>启用</strong></td>
+</tr>
+<tr>
+<td>影响范围</td>
+<td><strong>整个存储桶</strong>，前提是该桶专门用于临时音频</td>
+</tr>
+<tr>
+<td>标签、文件大小条件</td>
+<td>不设置</td>
+</tr>
+<tr>
+<td>Not</td>
+<td>关闭</td>
+</tr>
+<tr>
+<td>生效策略</td>
+<td><strong>最后修改时间</strong></td>
+</tr>
+<tr>
+<td>文件最新版本过期策略</td>
+<td>开启，选择 <strong>指定天数</strong></td>
+</tr>
+<tr>
+<td>所有“沉降至……”选项</td>
+<td>全部不勾选</td>
+</tr>
+<tr>
+<td>“后，将自动删除”</td>
+<td><strong>勾选，并把默认 630 天改成 5 天</strong></td>
+</tr>
+<tr>
+<td>文件历史版本过期策略</td>
+<td>关闭，本教程未开启版本控制</td>
+</tr>
+<tr>
+<td>分片过期策略</td>
+<td>本次保持关闭</td>
+</tr>
+</tbody>
+</table>
+<p>提交前确认文字为：<strong>文件最后修改时间 5 天后，将自动删除</strong>。点击「确定」，在规则列表确认已启用。</p>
+<p>应用转写成功后会主动删除临时音频；生命周期用于清理失败等情况下留下的对象。它不判断任务是否已经完成，超过期限的文件即使仍需使用，也可能被删除。后台清理并不保证恰好在第 120 小时执行。</p>
+<p><strong>完成标志：生命周期规则列表中存在已启用的 5 天删除规则。</strong></p>
+<h2>5. 准备 TOS Access Key 和权限</h2>
+<p>在火山控制台进入「访问控制」→「API 访问密钥」。</p>
+<ol>
+<li>找到上半部分 <strong>Access Key</strong> 区域。</li>
+<li>已有有效且身份明确的 AK/SK 可以复用；没有则点击 <strong>创建 Access Key</strong>，完成页面要求的身份验证。</li>
+<li>将同一次创建得到的 <strong>Access Key ID</strong> 和 <strong>Secret Access Key</strong> 分别填写到应用 TOS 对应输入框，不要错位或混用旧值。</li>
+<li>若由管理员提供子用户密钥，应确认该身份有访问目标桶的权限。</li>
+</ol>
+<h3>权限应覆盖什么</h3>
+<p>应用需要检查对象是否存在、上传音频、读取音频以及删除自己上传的临时对象。管理员应按目标桶及 <code>knowledge-distiller/asr/</code> 对象前缀配置所需权限；用于诊断的桶信息检查也需要相应权限。</p>
+<p><strong>不必把桶改为公共读或公共读写来解决权限错误。</strong> 应用会生成带签名的临时读取链接，供豆包访问私有音频。</p>
+<p>出现拒绝访问时，检查密钥所属身份、桶所属账号、IAM 授权及桶策略。不要直接套用全账号管理员权限，也不要仅凭对不存在对象的一次 403 就认定某一项权限缺失。</p>
+<blockquote>
+<p>新建存储桶本身不会修复无效 AK，也不会自动为其他身份授权。密钥列表为空只说明当前页面没有列出该身份的密钥，不能据此判断其他身份下是否存在密钥。</p>
+</blockquote>
+<p><strong>完成标志：拥有一对有效 AK/SK，并确认对应身份可访问这个桶。</strong></p>
+<h2>6. 在知识蒸馏器中保存并启用</h2>
+<p>进入「设置 → 模型配置 → ASR」，选择豆包方案，按四步向导继续。</p>
+<ol>
+<li>第 1 步开通录音文件识别服务，第 2 步保存语音 API Key。</li>
+<li>第 3 步填写同一组 TOS AK/SK，点击 <strong>读取我的存储桶</strong>，选择刚创建的桶，再点击 <strong>使用所选桶并继续</strong>。地域会自动带出。</li>
+<li>如果身份只有指定桶权限、无法读取桶列表，展开 <strong>无法读取列表，手动填写</strong>，填写桶名、真实地域和配对的 AK/SK，再保存。</li>
+<li>第 4 步检查信息，点击 <strong>检查配置并启用</strong>；已经使用豆包时按钮显示 <strong>重新检查并启用</strong>。</li>
+</ol>
+<p>Bucket 只填桶名，不填网址或目录；Region 使用实际桶的地域代码。选择广州时是 <code>cn-guangzhou</code>，其他区域必须填写对应代码。</p>
+<p>最后一步不能省略：保存密钥只更新待启用配置，不会更换当前任务使用的方案。以后更换密钥或存储桶，也要在第 4 步重新检查并启用。</p>
+<p><strong>完成标志：当前 ASR 方案显示豆包。这里的“已配置”仍不等于云端认证或识别成功。</strong></p>
+<h2>7. 用一条短视频验证</h2>
+<p>先选一条有清晰人声的短视频投递，观察处理结果。真实调用会消耗相应额度或产生费用。</p>
+<p>成功链路是：</p>
+<p><strong>取得音轨 → 上传 TOS → 豆包转写 → 取得文字结果 → 删除临时对象 → 语言模型整理与提炼。</strong></p>
+<p>首次验证时应区分两件事：</p>
+<ul>
+<li><strong>豆包 ASR 配置成功</strong>：上传、转写和结果获取完成，临时对象清理正常。</li>
+<li><strong>整篇蒸馏成功</strong>：还需要后续语言模型整理和知识提炼成功。</li>
+</ul>
+<p>后续出现“语言模型本次调用失败”，不应直接归因于豆包；先确认失败发生在哪个阶段。正常清理后桶内文件消失是预期行为，桶内暂时没文件也不能单独证明任务成功。</p>
+<p>如需排障，可先让维护者做只读检查：桶信息请求成功、对不存在对象的检查正常返回 404，可以帮助确认上传前的访问问题是否解决，但不能代替真实上传、转写和删除验证。</p>
+<h2>8. 在 Mac 上管理已保存的密钥</h2>
+<p>用 Spotlight 搜索并打开 <strong>钥匙串访问</strong>，搜索 <strong>知识蒸馏器</strong>。新版条目名称示例：</p>
+<ul>
+<li><code>知识蒸馏器｜豆包语音 API｜当前启用｜短编号</code></li>
+<li><code>知识蒸馏器｜TOS 存储凭据｜当前启用｜你的桶名｜短编号</code></li>
+<li><code>知识蒸馏器｜语言模型 API｜当前启用｜型号｜短编号</code></li>
+<li><code>知识蒸馏器｜豆包语音 API｜已保存未启用｜短编号</code></li>
+</ul>
+<p>名称中的“当前启用”表示应用的绑定状态，不代表服务一定可用。无法搜索到中文名称的旧版本，可搜索服务名 <code>com.knowledge-distiller.credentials</code>。</p>
+<p>“已替换”或“未被当前配置引用”也不一定意味着可以立即删除：其他运行实例或历史任务仍可能引用它。先确认用途，再清理。删除 Mac 中的条目不会代替火山控制台的撤销密钥操作。</p>
+<h2>常见问题速查</h2>
+<table>
+<thead>
+<tr>
+<th>现象</th>
+<th>优先检查</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>API Key 已保存，仍在使用旧密钥</td>
+<td>是否点击了向导第 4 步的「检查配置并启用」</td>
+</tr>
+<tr>
+<td>TOS 返回 <code>InvalidAccessKeyId</code></td>
+<td>是否填错类型、使用失效 AK，或 AK/SK 不属于同一组；不要拿豆包 API Key 当 AK</td>
+</tr>
+<tr>
+<td>TOS 返回 <code>AccessDenied</code> / 403</td>
+<td>密钥身份、目标桶、区域、IAM 权限与桶策略；不要反复盲目重建密钥</td>
+</tr>
+<tr>
+<td>豆包认证失败</td>
+<td>语音 API Key 是否有效、录音文件识别 2.0 是否开通、当前是否已启用新配置</td>
+</tr>
+<tr>
+<td>TOS 已保存但访问旧桶</td>
+<td>保存后是否重新启用；Bucket 是否为完整新桶名</td>
+</tr>
+<tr>
+<td>输入框保存后为空</td>
+<td>密钥不回显是正常行为，看保存与启用状态</td>
+</tr>
+<tr>
+<td>转写成功但整理失败</td>
+<td>检查语言模型阶段，不要重新配置豆包</td>
+</tr>
+<tr>
+<td>文件没有在精确第 5 天消失</td>
+<td>生命周期由后台异步执行；检查规则是否启用，以及自动删除那一行是否真正勾选</td>
+</tr>
+<tr>
+<td>首次投递出现浏览器调试授权</td>
+<td>这是当前来源采集使用 Chrome 的授权，与豆包或 TOS 密钥无关；应用重启后可能再次请求</td>
+</tr>
+</tbody>
+</table>
+<h2>官方参考</h2>
+<ul>
+<li><a target="_blank" rel="noopener noreferrer" href="https://docs.volcengine.com/docs/6561/2606792?lang=zh">豆包录音文件识别结果查询：API Key 与模型资源标识</a></li>
+<li><a target="_blank" rel="noopener noreferrer" href="https://www.volcengine.com/docs/6349/75024">TOS 创建存储桶</a></li>
+<li><a target="_blank" rel="noopener noreferrer" href="https://www.volcengine.com/docs/6349/196022">TOS 生命周期规则</a></li>
+<li><a target="_blank" rel="noopener noreferrer" href="https://www.volcengine.com/docs/6349/1167743">TOS 生命周期规则生效时间</a></li>
+<li><a target="_blank" rel="noopener noreferrer" href="https://www.volcengine.com/docs/6349/1764516">TOS 保留策略 WORM</a></li>
+</ul>
+<hr />
+<p>本教程与配图随应用提供，可离线阅读；控制台及官方参考链接需要联网。</p>
+</main></body></html>

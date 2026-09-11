@@ -1,0 +1,55 @@
+{% set pairing = feishu.pairing if feishu and feishu.pairing else {} %}
+<div class="feishu-onboarding" data-setup-wizard data-pairing="{{ 'true' if pairing else 'false' }}" data-app-id="{{ pairing.app_id if pairing else '' }}">
+  <p class="feishu-step-progress" data-setup-progress aria-live="polite"></p>
+  <h3>连接你自己的飞书机器人</h3>
+
+  <section data-setup-step="1">
+    <h4>创建应用，启用机器人</h4>
+    <p>打开飞书开发者后台，创建「企业自建应用」，填写名称（例如“知识蒸馏器”）。在「添加应用能力」中启用「机器人」。</p>
+
+    <a href="https://open.feishu.cn/app" target="_blank" rel="noopener noreferrer">打开飞书开发者后台</a>
+    <details class="feishu-step-help"><summary>找不到创建入口？</summary><p>账号需要有自建应用创建权限，可联系组织管理员。请选择应用机器人，群里的自定义 Webhook 机器人不适用。</p></details>
+    <div class="feishu-form-actions"><span></span><button type="button" class="secondary-button" data-setup-next="2">填写连接项</button></div>
+  </section>
+  <section data-setup-step="2">
+    <h4>填入应用凭据，启动连接</h4>
+    <p>从新应用的「凭证与基础信息」复制以下两项。</p>
+    <form action="{{ url_for('settings.configure_feishu') }}" method="post">
+      <input type="hidden" name="return_to" value="{{ return_to }}">
+      <label>App ID <input name="app_id" required value="{{ pairing.app_id if pairing else request.args.get('feishu_app_id', '') }}" placeholder="cli_ 开头的应用标识"></label>
+      <label>App Secret <input type="password" name="app_secret" autocomplete="new-password" {% if not pairing %}required{% endif %} placeholder="{{ '留空使用已保存的密钥' if pairing else '复制应用密钥，仅保存在本机' }}"></label>
+      <div class="feishu-form-actions">
+        <a href="https://open.feishu.cn/app{% if pairing %}/{{ pairing.app_id }}{% endif %}" target="_blank" rel="noopener noreferrer">打开应用配置</a>
+        <button class="secondary-button">{{ '重新取口令' if pairing else '验证并连接' }}</button>
+      </div>
+    </form>
+  </section>
+  <section data-setup-step="3">
+    <h4>配置权限、事件并发布</h4>
+    <p><strong>① 权限管理</strong>：开通以下应用身份权限。</p>
+    <ul>
+      <li><code>im:message.p2p_msg:readonly</code>：接收发给机器人的私聊。</li>
+      <li><code>im:message:readonly</code>：程序重新上线后补收消息。</li>
+      <li><code>im:message:send_as_bot</code>：回复和更新待办卡片。</li>
+      <li><code>im:resource</code>：上传待核对的短音频和局部图片。</li>
+    </ul>
+    <p><strong>② 事件与回调</strong>：均选择「长连接」。添加事件 <code>im.message.receive_v1</code>（接收消息）和回调 <code>card.action.trigger</code>（卡片操作）。保持本程序运行。</p>
+    <p><strong>③ 版本管理与发布</strong>：创建版本，可用范围包含自己，完成发布；需要审批时等待审批生效。</p>
+    <div class="feishu-form-actions"><a href="https://open.feishu.cn/app{% if pairing %}/{{ pairing.app_id }}{% endif %}" target="_blank" rel="noopener noreferrer">去配置并发布</a><button type="button" class="secondary-button" data-setup-next="4">绑定此私聊</button></div>
+  </section>
+  <section data-setup-step="4">
+    <h4>绑定自己的私聊</h4>
+    {% if pairing %}
+    <p>用自己的飞书账号打开新机器人的私聊，发送下方口令。</p>
+    <p id="feishu-pairing-status" data-status-url="{{ url_for('settings.feishu_status') }}" role="status">{{ '口令已过期，请在第 2 步重新生成。' if feishu.state == 'pairing_expired' else '等待收到绑定口令。' }}</p>
+    {% if feishu.state != 'pairing_expired' %}
+    <div class="feishu-pairing-code"><code id="feishu-pairing-code">{{ pairing.code }}</code><button type="button" class="secondary-button" data-copy-pairing>复制此口令</button></div>
+    <p>口令 10 分钟有效，不会生成知识。</p>
+    {% endif %}
+    {% else %}<p>先完成第 2 步，程序会生成绑定口令；完成第 3 步发布后发送。</p>{% endif %}
+    <p>绑定后，再发送一段正文或链接，检查机器人是否回复投递回执。</p>
+    <button type="button" class="secondary-button" data-setup-next="2">重新填凭据</button>
+    <details><summary>没有收到绑定结果？</summary><p>确认私聊的是同一个应用的机器人、口令未过期；检查第 3 步的接收消息权限、事件订阅和发布是否生效。找不到机器人时，检查发布状态和可用范围是否包含自己的账号。</p></details>
+  </section>
+  <button type="button" class="feishu-step-back" data-setup-back hidden>返回上一步</button>
+</div>

@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if detail %}{{ detail.payload.claim }}{% elif publication_problem %}新知发布反馈{% else %}新知读取失败{% endif %} · 知识蒸馏器</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="page-shell library-shell accepted-detail-shell">
+  <section class="workspace library-workspace accepted-detail-workspace" aria-labelledby="page-title">
+    {% include "_library_navigation.html" %}
+    <nav class="topic-back-nav" aria-label="新知导航"><a href="{{ url_for('knowledge_accepted_insights') }}">← 返回新知</a></nav>
+
+    {% if publication_problem %}
+      <section class="library-state library-error accepted-publication-problem" role="alert">
+        {% if publication_problem == "conflict" %}
+          <h1 id="page-title">没有覆盖已有目标</h1>
+          <p>目标位置已有不同内容，或无法安全确认它属于这次发布。已有目标保持不变，也没有建立发布成功事实。</p>
+        {% elif publication_problem == "not_eligible" %}
+          <h1 id="page-title">这版新知不能发布</h1>
+          <p>目标不存在、尚未获得“有点意思”，或不具备已认可版本的发布权限。未授权正文不会在这里显示。</p>
+        {% else %}
+          <h1 id="page-title">这次发布没有完成</h1>
+          <p>Vault 未配置或当前不可用，或在正式读取、文件落位、I/O、数据库记录过程中发生了运行失败。系统没有把失败伪装成成功。</p>
+        {% endif %}
+        <a href="{{ url_for('knowledge_accepted_insights') }}">返回新知</a>
+      </section>
+    {% elif unreadable %}
+      <section class="library-state library-error" role="alert">
+        <h1 id="page-title">这条新知暂时无法安全读取</h1>
+        <p>正式资产没有被修改。可返回新知列表，稍后再试。</p>
+      </section>
+    {% else %}
+      <article class="accepted-detail">
+        <header class="accepted-detail-header">
+          <div class="accepted-identity-line">
+            <span>AI 衍生新知</span>
+            <span>{% if detail.current_role.value == "current" %}当前版本{% else %}历史版本{% endif %}</span>
+            <span>第 {{ detail.version_no }} 版</span>
+          </div>
+          <h1 id="page-title">{{ detail.payload.claim }}</h1>
+          <p>{{ detail.payload.short_discussion }}</p>
+        </header>
+
+        {% if detail.current_role.value == "historical" %}
+          <section class="accepted-history-note" role="status">
+            <h2>这是一份历史新知</h2>
+            <p>{{ historical_reason_label }}</p>
+            {% if detail.caused_by_event_id %}<p>历史位置由整理事件 {{ detail.caused_by_event_id }} 中已经成立的正式事实造成。</p>{% endif %}
+          </section>
+        {% endif %}
+
+        {% if publication_notice %}
+          <section class="accepted-publication-notice" role="status">
+            <strong>发布反馈</strong>
+            <p>{{ publication_notice }}</p>
+          </section>
+        {% endif %}
+
+        <section class="accepted-publication-panel" aria-labelledby="publication-heading">
+          {% if publication %}
+            <div>
+              <span class="accepted-publication-status">已发布</span>
+              <h2 id="publication-heading">这版 AI 衍生新知已由正式记忆记录为曾成功发布</h2>
+              <p>持久目标：{{ publication.relative_path }}。文件后来被移动、修改或删除，也不会静默改写这条历史成功事实。</p>
+            </div>
+            {% if publication_obsidian_uri %}
+              <a class="accepted-publication-action" href="{{ publication_obsidian_uri }}">在 Obsidian 中打开这版新知</a>
+            {% endif %}
+          {% elif vault_configured %}
+            <div>
+              <span class="accepted-publication-status accepted-publication-status-pending">尚未发布</span>
+              <h2 id="publication-heading">发布这一个已认可版本</h2>
+              <p>系统会建立独立 AI 新知文件；它不会变成来源证据，也不会覆盖已有用户文件。</p>
+            </div>
+            <form action="{{ url_for('publish_knowledge_accepted_insight', version_id=detail.insight_version_id) }}" method="post">
+              <button type="submit">发布到 Obsidian</button>
+            </form>
+          {% else %}
+            <div>
+              <span class="accepted-publication-status accepted-publication-status-pending">尚未发布</span>
+              <h2 id="publication-heading">Obsidian Vault 尚未配置</h2>
+              <p>配置本地 Vault 后，这里才会提供发布动作；当前不会诱导一次无法成功的发布。</p>
+            </div>
+          {% endif %}
+        </section>
+
+        {% if additional_exit_facts %}
+          <section class="accepted-detail-section accepted-additional-facts" aria-labelledby="additional-facts-heading">
+            <h2 id="additional-facts-heading">后来成立的事实</h2>
+            <p class="accepted-section-intro">这些正式事实按成立顺序追加保留，不改写上方的历史主因。</p>
+            <ol>
+              {% for item in additional_exit_facts %}
+                <li>
+                  <strong>{{ item.label }}</strong>
+                  <p>{{ item.fact.reason_text }}</p>
+                  <p class="accepted-muted">整理事件 {{ item.fact.event_id }} · {{ item.fact.created_at }}</p>
+                  {% if item.fact.replacement_insight_id %}<p class="accepted-muted">替代新知身份：{{ item.fact.replacement_insight_id }}</p>{% endif %}
+                </li>
+              {% endfor %}
+            </ol>
+          </section>
+        {% endif %}
+
+        <section class="accepted-detail-section" aria-labelledby="reasons-heading">
+          <h2 id="reasons-heading">连接理由</h2>
+          <ul class="accepted-reason-list">
+            {% for reason in detail.payload.connection_reasons %}<li>{{ reason }}</li>{% endfor %}
+          </ul>
+        </section>
+
+        {% if detail.payload.limitations %}
+          <section class="accepted-detail-section" aria-labelledby="limitations-heading">
+            <h2 id="limitations-heading">边界与限制</h2>
+            <ul>
+              {% for limitation in detail.payload.limitations %}<li>{{ limitation.text }}</li>{% endfor %}
+            </ul>
+          </section>
+        {% endif %}
+
+        <section class="accepted-detail-section accepted-judgment" aria-labelledby="judgment-heading">
+          <h2 id="judgment-heading">你的判断</h2>
+          <p>你选择了“有点意思”：这条 AI 衍生认知值得长期留下。这不等于真理认证或证据等级提升。</p>
+          {% if detail.judgment.annotation_text %}
+            <blockquote><p>{{ detail.judgment.annotation_text }}</p><footer>可选个人批注</footer></blockquote>
+          {% else %}<p class="accepted-muted">这次没有填写个人批注。</p>{% endif %}
+        </section>
+
+        <section class="accepted-detail-section accepted-formation" aria-labelledby="formation-heading">
+          <h2 id="formation-heading">形成位置</h2>
+          <p>形成于整理事件 {{ detail.formation_event.event_id }}。这次判断不改变原始参与者、关系或来源依据。</p>
+        </section>
+
+        <section class="accepted-detail-section" aria-labelledby="participants-heading">
+          <h2 id="participants-heading">实际参与知识</h2>
+          <ol class="accepted-participant-list">
+            {% for item in participants %}
+              <li>
+                <span class="accepted-item-kind">{{ item.kind }}</span>
+                {% if item.insight_version_id %}
+                  <a href="{{ url_for('knowledge_accepted_insight', version_id=item.insight_version_id) }}">{{ item.title }}</a>
+                {% else %}<strong>{{ item.title }}</strong>{% endif %}
+                {% if item.statement %}<p>{{ item.statement }}</p>{% endif %}
+                <p class="accepted-muted">形成作用：{{ item.contribution }}</p>
+              </li>
+            {% endfor %}
+          </ol>
+        </section>
+
+        {% if used_relations %}
+          <section class="accepted-detail-section" aria-labelledby="relations-heading">
+            <h2 id="relations-heading">形成时使用的关系</h2>
+            <p class="accepted-section-intro">这些是形成当时的历史连接角色；展示不授予它们当前关系权限。</p>
+            <ol class="accepted-relation-list">
+              {% for item in used_relations %}
+                <li>
+                  <strong>{{ item.payload.relation_statement }}</strong>
+                  <p>历史连接角色：{{ item.edge.role_text }}</p>
+                  {% if item.payload.conditions %}<p class="accepted-muted">成立条件：{{ item.payload.conditions|join("；") }}</p>{% endif %}
+                  {% if item.payload.limitations %}<p class="accepted-muted">限制：{% for limitation in item.payload.limitations %}{{ limitation.text }}{% if not loop.last %}；{% endif %}{% endfor %}</p>{% endif %}
+                </li>
+              {% endfor %}
+            </ol>
+          </section>
+        {% endif %}
+
+        <section class="accepted-detail-section" aria-labelledby="lineage-heading">
+          <h2 id="lineage-heading">递归形成谱系</h2>
+          <p class="accepted-section-intro">保留每一层 AI 衍生中间节点，再继续穿透到来源型知识。</p>
+          <ol class="accepted-lineage-list">
+            {% for node in detail.recursive_lineage %}
+              <li>
+                <span class="accepted-item-kind">AI 衍生新知 · 第 {{ node.version_no }} 版 · 整理事件 {{ node.produced_event_id }}</span>
+                {% if node.insight_version_id == detail.insight_version_id %}
+                  <strong>{{ node.payload.claim }}</strong>
+                {% else %}
+                  <a href="{{ url_for('knowledge_accepted_insight', version_id=node.insight_version_id) }}">{{ node.payload.claim }}</a>
+                {% endif %}
+                {% if node.payload.limitations %}<p class="accepted-muted">限制：{% for limitation in node.payload.limitations %}{{ limitation.text }}{% if not loop.last %}；{% endif %}{% endfor %}</p>{% endif %}
+              </li>
+            {% endfor %}
+          </ol>
+        </section>
+
+        <section class="accepted-detail-section accepted-sources" aria-labelledby="sources-heading">
+          <h2 id="sources-heading">来源型知识与依据</h2>
+          <p class="accepted-section-intro">这些来源叶仍保持来源型知识身份；AI 新知不能冒充作者原话。</p>
+          <ol>
+            {% for item in sources %}
+              <li>
+                <span class="accepted-item-kind">来源型知识 · {{ item.leaf.platform }}</span>
+                <strong>{{ item.leaf.title }}</strong>
+                <p>{{ item.leaf.statement }}</p>
+                <p class="accepted-muted">{{ item.leaf.argument }}</p>
+                {% if item.obsidian_uri %}<a class="topic-obsidian-action" href="{{ item.obsidian_uri }}">在 Obsidian 中打开来源知识</a>{% endif %}
+              </li>
+            {% endfor %}
+          </ol>
+        </section>
+      </article>
+    {% endif %}
+  </section>
+</main>
+</body>
+</html>

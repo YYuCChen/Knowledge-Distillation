@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}{{ topic.name }} · 知识蒸馏器{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='topics.css') }}">{% endblock %}
+{% block content %}
+<main class="page-width topic-page topic-detail" data-reading-state>
+  <header class="topbar"><a class="topic-back" href="{{ url_for('topics.index', q=request.args.get('q')) if request.args.get('q') else url_for('topics.index') }}"><img src="{{ url_for('static', filename='icons/chevron-back.svg') }}" alt="">返回</a><a href="{{ url_for('settings.page', return_to=request.full_path) }}">设置{% if update is defined %}<img data-update-attention src="{{ url_for('static', filename='icons/update-attention.svg') }}" alt="有新版更新说明" {% if not update.attention %}hidden{% endif %}>{% endif %}</a></header>
+  <div class="topic-nav-space"></div>
+  <header class="topic-heading"><h1>{{ topic.name }}</h1><p class="detail-scope">{{ topic.scope }}</p>
+    <div class="topic-detail-note"><span>{{ points|length }} 条正式观点</span><time>{{ topic.date }}</time></div></header>
+  <div class="topic-scroll" data-scroll-area>
+    {% for point in points %}{% set point_number = loop.index %}{% include "topic_point.html" %}{% endfor %}
+  </div>
+</main>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='topics.js') }}" defer></script>{% endblock %}

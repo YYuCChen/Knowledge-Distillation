@@ -1,0 +1,378 @@
+.todo-list {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--page);
+}
+
+.todo-card-shell {
+  width: 100%;
+  padding: 2px;
+}
+
+.todo-card {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) 64px;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+}
+
+.confirmation-card {
+  min-height: 56px;
+}
+
+.failure-card {
+  min-height: 56px;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+}
+
+.failure-card .todo-index {
+  align-self: center;
+  padding-top: 0;
+}
+
+.todo-index {
+  padding-top: 16px;
+  line-height: 20px;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: center;
+}
+
+.todo-content {
+  min-width: 0;
+  padding: 16px 0;
+}
+
+.confirmation-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  overflow: hidden;
+}
+
+.source-fragment {
+  min-width: 0;
+  flex: 1;
+  margin: 0;
+  overflow: hidden;
+  font: 500 10px/normal "Noto Serif SC", serif;
+  letter-spacing: 0.5px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+mark {
+  background: transparent;
+  color: inherit;
+}
+
+.candidate-actions,
+.source-actions,
+.confirmation-buttons,
+.failure-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.candidate-actions form,
+.source-actions form,
+.manual-confirmation,
+.unable-confirmation,
+.failure-actions form {
+  margin: 0;
+}
+
+.outline-choice,
+.primary-small,
+.secondary-small {
+  width: 56px;
+  height: 24px;
+  padding: 6px 7px;
+  overflow: hidden;
+  border-radius: 6px;
+  font-size: 10px;
+  line-height: 10px;
+  white-space: nowrap;
+}
+
+.outline-choice {
+  width: auto;
+  min-width: 56px;
+  border: 1px solid #6b6a65;
+  background: transparent;
+  color: #4d4c48;
+  font-weight: 400;
+  letter-spacing: 0.5px;
+}
+
+.confirmation-actions {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: 135px minmax(0, 1fr) 122px;
+  align-items: center;
+  gap: 10px;
+}
+
+.source-actions {
+  width: 135px;
+}
+
+.source-actions button,
+.source-actions a {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #4d4c48;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.source-actions a {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.source-action-icon {
+  width: 8px;
+  height: 10px;
+}
+
+.manual-confirmation {
+  min-width: 0;
+}
+
+.manual-confirmation input:not([type="hidden"]) {
+  width: 100%;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid var(--text);
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: 500 10px/normal "Noto Serif SC", serif;
+  letter-spacing: 0.5px;
+}
+
+.primary-small,
+.secondary-small,
+.failure-actions a {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  font-weight: 500;
+  letter-spacing: 1px;
+  text-decoration: none;
+}
+
+.primary-small {
+  background: #141413;
+  color: var(--page);
+}
+
+.secondary-small,
+.failure-actions a {
+  width: 56px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--soft);
+  color: #4d4c48;
+}
+
+.card-chevron {
+  border: 0;
+  background: transparent;
+  align-self: stretch;
+  align-items: flex-start;
+  cursor: pointer;
+  padding: 22px 0 0;
+  display: flex;
+  justify-content: center;
+}
+
+.failure-content {
+  grid-column: 2;
+  padding: 0;
+  display: grid;
+  grid-template-columns: fit-content(100px) minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 16px;
+  color: #4d4c48;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+
+.failure-content strong,
+.failure-content > span:not(.failure-actions) {
+  overflow: hidden;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.failure-actions {
+  justify-content: flex-end;
+}
+
+.failure-source {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100px;
+}
+
+.failure-source > strong {
+  font: 400 10px/normal "Noto Sans SC", sans-serif;
+  letter-spacing: 0.5px;
+  color: var(--text);
+}
+
+.failure-source > span {
+  font: 400 10px/normal "Noto Sans SC", sans-serif;
+  letter-spacing: 0.5px;
+  color: #6b6a65;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+
+.confirmation-actions[hidden] {
+  display: none;
+}
+
+.card-chevron img {
+  width: 8px;
+  height: 8px;
+}
+
+.card-chevron[aria-expanded="true"] img {
+  transform: rotate(90deg);
+}
+
+.source-fragment mark {
+  background: var(--soft);
+  font-weight: 600;
+}
+
+.manual-hint {
+  white-space: nowrap;
+  font-size: 10px;
+  color: #6b6a65;
+}
+
+.candidate-actions {
+  flex-shrink: 0;
+  gap: 6px;
+  flex-wrap: wrap;
+  max-width: 180px;
+}
+
+.confirmation-actions audio {
+  grid-column: 1 / -1;
+}
+
+.confirmation-actions audio {
+  width: 100%;
+  height: 28px;
+}
+
+.manual-confirmation input[aria-invalid="true"] {
+  border-color: #a83224;
+}
+
+.manual-confirmation input[aria-invalid="true"]::placeholder {
+  color: #a83224;
+}
+
+.failure-content > span:not(.failure-actions) {
+  white-space: normal;
+  overflow: visible;
+}
+
+.failure-content > .failure-reason {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
+
+.failure-actions .primary-small,
+.failure-actions .secondary-small {
+  width: auto;
+  min-width: 56px;
+}
+
+
+@media (max-width: 720px) {
+  .todo-card {
+    grid-template-columns: 48px minmax(0, 1fr) 40px;
+  }
+
+  .confirmation-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .failure-content {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .failure-card {
+    grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .failure-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+}
+.confirmation-feedback { margin: 12px 20px; color: #9d3030; font-size: 13px; }
+
+/* Keep every explanation on its own line below its choice. */
+.confirmation-actions .candidate-actions { grid-column: 1 / -1; display: grid; gap: 8px; min-width: 0; max-width: 100%; }
+.candidate-row { display: grid; justify-items: start; gap: 3px; min-width: 0; }
+.candidate-row .candidate-option { width: auto; min-width: 0; max-width: 100%; height: auto; padding: 5px 8px; white-space: normal; text-align: left; line-height: 14px; }
+.candidate-text { overflow-wrap: anywhere; }
+.candidate-explanation { max-width: 100%; margin: 0; min-width: 0; color: var(--muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.suggest-candidates { grid-column: 1 / -1; margin: 0; }
+.suggest-candidates .secondary-small { width: auto; }
+.manual-entry { min-width: 0; }
+
+.candidate-basis { color: var(--muted); }
+.candidate-basis summary { cursor: pointer; }
+.candidate-basis p { margin: 4px 0 0; }
+
+.compact-candidates { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-wrap: wrap; max-width: 180px; }
+.compact-candidates form { margin: 0; }
+.compact-candidates .outline-choice { width: 56px; min-width: 56px; height: 24px; padding: 5px 6px; white-space: nowrap; }
+
+.ocr-concern-crop { display: block; max-width: 100%; width: auto; height: auto; max-height: 220px; margin: 10px 0; border: 1px solid #ddd; }
+.ocr-correction-form { display: flex; align-items: flex-end; gap: 12px; margin-top: 10px; }
+.ocr-correction-form textarea { flex: 1; min-width: 0; padding: 8px; font: inherit; resize: vertical; }
+
+/* The whole right column toggles the card without a hover background. */
+.todo-list .todo-card .card-chevron,
+.todo-list .todo-card .card-chevron:is(:hover, :active, :focus, :focus-visible) {
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+}
+.card-chevron:focus-visible img { outline: 1px solid var(--line); outline-offset: 3px; }
+
+.confirmation-head .candidate-count { align-self: flex-start; flex-shrink: 0; line-height: 20px; white-space: nowrap; }

@@ -1,0 +1,7 @@
+{% if collection_cards %}
+<section class="section collection-list" {% if collection_cards|selectattr('state','in',['queued','working'])|list %}data-live-status{% endif %}>
+<h2>集合</h2>
+{% for collection in collection_cards %}
+<article class="collection-card"><span class="collection-number">{{ loop.index }}</span><div><h3><a href="{{ url_for('collections.detail',operation=collection.operation_id) }}">{{ collection.title }}</a></h3><p>{{ collection.label }} · 共 {{ collection.total }} 条 · 已收录 {{ collection.counts.succeeded }} 条</p>{% if collection.state=='partial' %}<p>部分成员未完成，暂不生成集合综合</p>{% elif collection.state=='succeeded' %}<p>集合综合已形成，可以查看逐条来源依据</p>{% endif %}</div><a class="collection-open" href="{{ url_for('collections.detail',operation=collection.operation_id) }}" aria-label="查看 {{ collection.title }}"><img src="{{ url_for('static',filename='icons/topic-chevron.svg') }}" alt=""></a></article>
+{% endfor %}</section>
+{% endif %}

@@ -1,0 +1,17 @@
+<details class="insight-card" id="insight-{{ item.id }}" data-version="{{ item.id }}" {% if expanded %}open{% endif %}>
+  <summary><span class="insight-number">{{ number }}</span><div><strong>{{ item.payload.claim }}</strong><div class="insight-tags">{% for tag in item.payload.scan_tags %}<span>{{ tag }}</span>{% endfor %}</div></div><img class="point-chevron" src="{{ url_for('static', filename='icons/topic-chevron.svg') }}" alt=""></summary>
+  <div class="insight-body">
+    <p class="insight-discussion">{{ item.payload.short_discussion }}</p>
+    <section class="insight-sources"><h2>来自这些知识</h2>{% for source in item.sources %}<div><span>{{ source.title }}</span>{% if source.obsidian_url %}<a href="{{ source.obsidian_url }}"><img src="{{ url_for('static', filename='icons/obsidian.svg') }}" alt="">查看原文</a>{% else %}<span class="is-disabled" aria-disabled="true" title="{{ '笔记已保存；请在 Obsidian 中打开原保存文件夹作为仓库。' if source.publication_saved else '归档文件暂不可用，请在首页检查原保存位置。' }}">查看原文</span>{% endif %}</div>{% endfor %}</section>
+    {% if item.state=='rethink' or item.annotation or item.notes %}<section class="personal-history"><h2>上次提到</h2>{% if item.annotation %}<p>{{ item.annotation }}</p><time>{{ item.annotation_date }}</time>{% endif %}{% for note in item.notes %}<p>{{ note.text }}</p><time>{{ note.date }}</time>{% endfor %}{% if item.state=='rethink' and not item.annotation and not item.notes %}<time>{{ item.date }}</time>{% endif %}</section>{% endif %}
+    <form method="post" action="{{ url_for('insights.mutate', version_id=item.id, action='judge' if item.state=='pending' else ('idea' if item.state=='interesting' else 'reconsider')) }}" data-insight-action="{{ item.state }}">
+      <input type="hidden" name="operation_id" value="{{ item.operation_id }}"><input type="hidden" name="number" value="{{ number }}">
+      <div class="insight-note"><label for="insight-text-{{ item.id }}">{{ '批注' if item.state=='pending' else ('新想法' if item.state=='interesting' else '新看法') }}：</label>
+      <textarea rows="1" id="insight-text-{{ item.id }}" name="text" aria-label="{{ '批注' if item.state=='pending' else ('新想法' if item.state=='interesting' else '新看法') }}"></textarea></div>
+      <p class="insight-error" role="alert" hidden></p><div class="insight-actions">
+      {% if item.state=='pending' %}<button name="decision" value="rethink">再想想</button><button name="decision" value="interesting" class="insight-primary">有点意思</button>
+      {% else %}<button class="compact-action" aria-label="{{ '记录' if item.state=='interesting' else '改观' }}" {% if item.state=='interesting' %}disabled{% endif %}><span>{{ '记' if item.state=='interesting' else '改' }}</span><span>{{ '录' if item.state=='interesting' else '观' }}</span></button>{% endif %}
+      </div>
+    </form>
+  </div>
+</details>
