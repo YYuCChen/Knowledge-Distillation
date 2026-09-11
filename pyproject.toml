@@ -14,6 +14,7 @@ dependencies = [
   "PyYAML>=6.0.2,<7",
   "pypdf>=6,<7",
   "httpx>=0.27,<1",
+  "cryptography==50.0.1; sys_platform == 'win32'",
   "playwright==1.61.0",
   "websocket-client==1.9.0",
   "lark-oapi==1.7.3",
@@ -43,6 +44,7 @@ build = [
 ]
 secondary = [
   "httpx>=0.27,<1",
+  "cryptography==50.0.1; sys_platform == 'win32'",
   "tos==2.9.2",
 ]
 test = [
@@ -64,6 +66,8 @@ knowledge_distiller = [
   "v1/adapters/*.mjs",
   "v1/adapters/qwen_worker.py",
   "v1/adapters/qwen-selftest.wav",
+  "v1/adapters/qwen_windows_worker.py",
+  "v1/adapters/qwen-windows-lock.json",
   "v1/adapters/qwen-mac-requirements.txt",
   "v1/templates/*.html",
   "v1/static/*.css",

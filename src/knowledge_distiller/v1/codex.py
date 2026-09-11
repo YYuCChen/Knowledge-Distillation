@@ -11,6 +11,7 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -22,11 +23,22 @@ from .llm import LLMRequestError
 
 
 def executable() -> str:
-    candidates = [shutil.which('codex'),
+    candidates = [os.environ.get('KNOWLEDGE_DISTILLER_CODEX'), shutil.which('codex.exe' if sys.platform == 'win32' else 'codex'),
                   '/Applications/ChatGPT.app/Contents/Resources/codex',
                   '/Applications/Codex.app/Contents/Resources/codex']
+    if sys.platform == 'win32':
+        # Desktop-app version directories contain native executables. Do not run
+        # npm .cmd wrappers through a shell, or assume the user installed Node.
+        local = os.environ.get('LOCALAPPDATA')
+        if local:
+            root = Path(local)
+            candidates += [str(path) for path in sorted(
+                (root / 'OpenAI/Codex/bin').glob('*/codex.exe'),
+                key=lambda path: path.stat().st_mtime, reverse=True)]
+            candidates += [str(root / 'Programs/Codex/resources/codex.exe')]
     for value in candidates:
-        if value and os.access(value, os.X_OK):
+        if (value and os.access(value, os.X_OK)
+                and (sys.platform != 'win32' or Path(value).suffix.lower() == '.exe')):
             return value
     raise LLMRequestError('llm_config_unavailable')
 
@@ -36,7 +48,8 @@ def subscription_models() -> list[dict]:
     messages = queue.Queue()
     try:
         process = subprocess.Popen([executable(), 'app-server'], stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding='utf-8', bufsize=1,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
     except OSError as error:
         raise LLMRequestError('llm_config_unavailable') from error
     def read():
@@ -175,12 +188,13 @@ class CodexSubscriptionClient:
             status, usage, transport = 'failed', {}, {}
             try:
                 result = subprocess.run(command + ['-'], input='\n'.join(parts), text=True,
-                    capture_output=True, timeout=self.timeout_seconds, env=environment)
+                    capture_output=True, timeout=self.timeout_seconds, env=environment, encoding='utf-8',
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
                 usage = _usage(result.stdout)
                 transport = _transport_diagnostics(result.stderr)
                 if result.returncode:
                     raise LLMRequestError('llm_request_failed')
-                text = output.read_text().strip()
+                text = output.read_text(encoding='utf-8').strip()
                 status = 'completed' if text else 'incomplete'
             except subprocess.TimeoutExpired as error:
                 status = 'timeout'

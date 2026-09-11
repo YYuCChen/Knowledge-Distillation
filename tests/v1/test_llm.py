@@ -3,6 +3,67 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+
+def assert_private_diagnostic(path):
+    import os
+    if os.name != 'nt':
+        assert path.stat().st_mode & 0o777 == 0o600
+        return
+    # Windows stat mode does not expose permissions. Check the actual DACL:
+    # only the owner and Windows privileged accounts may read diagnostics.
+    import ctypes as c
+    from ctypes import wintypes as w
+    api = c.WinDLL('advapi32', use_last_error=True)
+    kernel = c.WinDLL('kernel32', use_last_error=True)
+    api.GetNamedSecurityInfoW.argtypes = [w.LPWSTR, w.DWORD, w.DWORD,
+        c.c_void_p, c.c_void_p, c.POINTER(c.c_void_p), c.c_void_p, c.POINTER(c.c_void_p)]
+    api.GetNamedSecurityInfoW.restype = w.DWORD
+    api.GetAce.argtypes = [c.c_void_p, w.DWORD, c.POINTER(c.c_void_p)]
+    api.ConvertSidToStringSidW.argtypes = [c.c_void_p, c.POINTER(w.LPWSTR)]
+    kernel.LocalFree.argtypes = [c.c_void_p]
+    owner, dacl, descriptor = c.c_void_p(), c.c_void_p(), c.c_void_p()
+    assert api.GetNamedSecurityInfoW(str(path), 1, 5, c.byref(owner), None, c.byref(dacl), None, c.byref(descriptor)) == 0
+    try:
+        owner_sid = w.LPWSTR()
+        assert api.ConvertSidToStringSidW(owner, c.byref(owner_sid))
+        try:
+            allowed = {owner_sid.value, 'S-1-3-4', 'S-1-5-18', 'S-1-5-32-544'}
+        finally:
+            kernel.LocalFree(c.cast(owner_sid, c.c_void_p))
+        assert dacl.value  # NULL DACL would allow everybody.
+        count = c.c_ushort.from_address(dacl.value + 4).value
+        assert count > 0
+        for index in range(count):
+            ace = c.c_void_p()
+            assert api.GetAce(dacl, index, c.byref(ace))
+            if c.c_ubyte.from_address(ace.value).value != 0:
+                continue
+            sid = w.LPWSTR()
+            assert api.ConvertSidToStringSidW(ace.value + 8, c.byref(sid))
+            try:
+                if sid.value not in allowed:
+                    assert not c.c_uint32.from_address(ace.value + 4).value & 0x90000001
+            finally:
+                kernel.LocalFree(c.cast(sid, c.c_void_p))
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+@pytest.mark.parametrize('link_name', ['review-response.tmp', 'review-response.json'])
+def test_review_diagnostic_never_writes_through_existing_link(tmp_path, link_name):
+    from knowledge_distiller.v1.reviewer import ReviewBinding
+    outside = tmp_path / 'keep-original.txt'
+    outside.write_text('untouched', encoding='utf-8')
+    (tmp_path / link_name).symlink_to(outside)
+    class Client:
+        def complete(self, **kwargs):
+            return '中文诊断'
+    binding = ReviewBinding(Client(), tmp_path / 'review-response.json')
+    assert binding.complete('原文').text == '中文诊断'
+    assert outside.read_text(encoding='utf-8') == 'untouched'
+    assert '中文诊断' in (tmp_path / 'review-response.json').read_text(encoding='utf-8')
+    assert not list(tmp_path.glob('review-response-*.tmp'))
+
 from knowledge_distiller.v1.llm import AnthropicMessagesClient, LLMRequestError
 
 
@@ -204,7 +265,7 @@ def test_review_records_and_reuses_only_matching_valid_result(tmp_path):
     assert reviewer.review_in_directory(source, tmp_path).candidate
     assert len(calls) == 1
     path = tmp_path / 'review-response.json'
-    assert path.stat().st_mode & 0o777 == 0o600
+    assert_private_diagnostic(path)
     record = json.loads(path.read_text())
     record['text'] = 'invalid result'
     path.write_text(json.dumps(record))

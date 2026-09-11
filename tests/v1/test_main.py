@@ -1,4 +1,4 @@
-import fcntl
+from knowledge_distiller.v1.file_lock import acquire
 import socket
 from types import SimpleNamespace
 
@@ -37,8 +37,7 @@ def test_data_directory_lock_blocks_second_worker(tmp_path, monkeypatch):
     with socket.socket() as probe:
         probe.bind((cli.DEFAULT_HOST, 0))
         port = probe.getsockname()[1]
-    with (tmp_path / ".instance.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with acquire(tmp_path / '.instance.lock'):
         with pytest.raises(SystemExit) as result:
             cli.main(["--port", str(port), "--data-dir", str(tmp_path)])
     assert result.value.code == 2
@@ -68,5 +67,5 @@ def test_worker_stops_and_lock_releases_when_server_fails(tmp_path, monkeypatch)
     with pytest.raises(RuntimeError, match="server failure"):
         cli.main(["--port", str(port), "--data-dir", str(tmp_path)])
     assert stopped == ["feishu", True, "browsers"]
-    with (tmp_path / ".instance.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with acquire(tmp_path / '.instance.lock'):
+        pass

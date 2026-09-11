@@ -2,6 +2,7 @@
   const seed = document.querySelector('#update-state');
   if (!seed) return;
   let state = JSON.parse(seed.textContent);
+  if (state.manual_download_url) return;
   let pending = false;
   const group = document.querySelector('#version-updates');
   const text = (selector, value) => { const node = document.querySelector(selector); if (node) node.textContent = value; };

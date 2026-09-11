@@ -8,7 +8,7 @@
   <div id="qwen-download-progress" hidden><progress id="qwen-progress-bar" max="100" aria-label="当前下载阶段进度"></progress><span id="qwen-progress-text"></span></div>
   <p id="qwen-install-detail" role="status">{{ component.detail|default('') }}</p>
   <p id="qwen-next-hint"></p>
-  <details class="qwen-help"><summary>安装与使用说明</summary><p>目前支持 Apple Silicon Mac。首次安装需能访问 GitHub、PyPI 和 Hugging Face；请保持程序运行。退出后可继续安装，已有可用文件和缓存会复用。</p><p>识别会使用本机内存和算力；首次加载可能稍慢。新安装完成前会用内置短音频进行离线自检，不读取你的素材、不生成知识。启用后可再投递自己的素材验证使用效果。</p></details>
+  <details class="qwen-help"><summary>安装与使用说明</summary><p>{{ '本机支持 Windows x64 CPU 运行时。' if windows_runtime else '目前支持 Apple Silicon Mac。' }}首次安装需能访问 GitHub、PyPI 和 Hugging Face；请保持程序运行。退出后可继续安装，已有可用文件和缓存会复用。</p><p>识别会使用本机内存和算力；首次加载可能稍慢。新安装完成前会用内置短音频进行离线自检，不读取你的素材、不生成知识。启用后可再投递自己的素材验证使用效果。</p></details>
   <div class="qwen-actions">
     <a id="qwen-first-use" href="{{ url_for('home') }}" hidden>去首页投递短音视频</a>
     <form id="qwen-install-form" action="{{ url_for('settings.install_qwen') }}" method="post">

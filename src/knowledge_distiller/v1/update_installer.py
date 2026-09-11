@@ -15,12 +15,13 @@ import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .updates import Updates, UpdateError, parse_feed
+from .updates import Updates, UpdateError, parse_feed, validate_install_paths
 
 
 def run(plan_path):
     plan_path = Path(plan_path)
     plan = json.loads(plan_path.read_text())
+    validate_install_paths(plan['data_root'], plan['info']['bundle'])
     updates = Updates(plan['data_root'], info=plan['info'])
     feed = (updates.root/'appcast.xml').read_bytes()
     release = parse_feed(feed, updates.info['public_key'], updates.info['version'])
@@ -116,7 +117,7 @@ def run(plan_path):
         with (updates.root/'install.log').open('w') as log:
             result = subprocess.run([str(cli), updates.info['bundle'], '--application', updates.info['bundle'],
                 '--feed-url', f'http://127.0.0.1:{server.server_port}/{token}/appcast.xml',
-                '--check-immediately', '--user-agent-name', 'KnowledgeDistiller', '--verbose'],
+                '--check-immediately', '--interactive', '--user-agent-name', 'KnowledgeDistiller', '--verbose'],
                 stdout=log, stderr=subprocess.STDOUT).returncode
         if result:
             if full_refused.is_set():

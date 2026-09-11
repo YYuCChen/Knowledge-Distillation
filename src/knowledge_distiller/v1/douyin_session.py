@@ -7,6 +7,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -62,7 +63,8 @@ class DouyinOwnedSession:
             if self._profile == profile and self._headed == headed:
                 return profile / 'DevToolsActivePort'
             self.close()
-        executable = Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+        from .desktop_paths import chrome_executable
+        executable = chrome_executable()
         if not executable.is_file():
             raise ChromeSessionError(self.platform + '_browser_missing')
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -171,6 +173,15 @@ class DouyinOwnedSession:
         with self._lock:
             process, self._process = self._process, None
             if process is not None and process.poll() is None:
+                if sys.platform == 'win32':
+                    # Only this Popen-owned live process tree, never /IM chrome.
+                    subprocess.run(
+                        [str(Path(os.environ['SystemRoot']) / 'System32/taskkill.exe'),
+                         '/PID', str(process.pid), '/T', '/F'],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW, timeout=10, check=False)
+                    if process.poll() is not None:
+                        return
                 process.terminate()
                 try:
                     process.wait(timeout=5)
@@ -189,4 +200,14 @@ class DouyinOwnedSession:
                 self.close()
             self._secret(identifier).clear()
             if (self.root / identifier).exists():
-                shutil.rmtree(self.root / identifier)
+                deadline = time.monotonic() + (5 if sys.platform == 'win32' else 0)
+                while True:
+                    try:
+                        shutil.rmtree(self.root / identifier)
+                        break
+                    except PermissionError:
+                        # Windows may release terminated Chrome's file handles
+                        # after taskkill returns. Retry only our owned profile.
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(.1)

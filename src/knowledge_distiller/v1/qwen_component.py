@@ -40,7 +40,7 @@ class ComponentError(RuntimeError):
 
 def _read(path):
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return {}
 
@@ -48,7 +48,17 @@ def _read(path):
 def _atomic_json(path, value):
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(value, ensure_ascii=False), encoding='utf-8')
-    temporary.replace(path)
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError as error:
+            # Windows readers may hold the old state without FILE_SHARE_DELETE.
+            # Wait for that short read to close; never publish a partial JSON.
+            if os.name != 'nt' or error.winerror not in {5, 32, 33} or time.monotonic() >= deadline:
+                raise
+            time.sleep(.01)
 
 
 def _environment(root, *, offline=False):
@@ -75,13 +85,30 @@ class QwenComponent:
 
     @property
     def supported(self):
+        if sys.platform == 'win32':
+            from .windows_platform import machine
+            return machine().lower() in {'amd64', 'x86_64'}
         return sys.platform == 'darwin' and platform.machine() == 'arm64'
+
+    def python_path(self, root):
+        return root / ('python/python.exe' if self.windows else 'python/bin/python3')
+
+    @property
+    def windows(self):
+        return sys.platform == 'win32'
+
+    def identity(self):
+        if self.windows:
+            from .qwen_windows import RUNTIME_VERSION, MODEL_REVISION
+            return RUNTIME_VERSION, MODEL_REVISION
+        return QWEN_RUNTIME_VERSION, QWEN_MODEL_REVISION
 
     def ready(self):
         manifest = _read(self.active/'component.json')
-        if not isinstance(manifest, dict) or manifest.get('version') != QWEN_RUNTIME_VERSION or manifest.get('revision') != QWEN_MODEL_REVISION:
+        runtime_version, revision = self.identity()
+        if not isinstance(manifest, dict) or manifest.get('version') != runtime_version or manifest.get('revision') != revision:
             return False
-        if not (self.active/'python/bin/python3').is_file():
+        if not self.python_path(self.active).is_file():
             return False
         files = manifest.get('files')
         if not isinstance(files, dict) or not files or 'config.json' not in files or not any(isinstance(name,str) and name.endswith('.safetensors') for name in files):
@@ -125,7 +152,18 @@ class QwenComponent:
             saved = _read(self.root/'state.json')
             state = saved.get('state','not_installed') if isinstance(saved,dict) else 'failed'
             if state in BUSY and not self._locked():
-                state = 'interrupted'
+                # Installation can finish between reading state and checking
+                # the lock. Observe its final state before declaring interruption.
+                if self.ready():
+                    return dict(state='ready', label=LABELS['ready'], busy=False,
+                                ready=True, can_install=False)
+                saved = _read(self.root/'state.json')
+                state = saved.get('state','not_installed') if isinstance(saved,dict) else 'failed'
+                if state in BUSY:
+                    state = 'interrupted'
+            if state == 'ready' and self.ready():
+                return dict(state='ready', label=LABELS['ready'], busy=False,
+                            ready=True, can_install=False)
             if state == 'ready' or state not in LABELS:
                 state = 'failed'
         saved=_read(self.root/'state.json')
@@ -141,27 +179,34 @@ class QwenComponent:
     def _locked(self):
         if not (self.root/'install.lock').exists():
             return False
-        import fcntl
-        with (self.root/'install.lock').open('r') as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return False
-            except BlockingIOError:
-                return True
+        from .file_lock import acquire
+        try:
+            acquire(self.root/'install.lock').close()
+            return False
+        except BlockingIOError:
+            return True
 
     def start(self):
         if not self.supported:
             raise ComponentError('qwen_platform_unsupported')
         if self.ready():
             return
-        import fcntl
+        from .file_lock import acquire
         self.root.mkdir(parents=True,exist_ok=True)
-        lock=(self.root/'install.lock').open('a')
-        try:
-            fcntl.flock(lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            lock.close()
-            return  # Repeated POST shares the existing installation.
+        deadline = time.monotonic() + 1
+        while True:
+            try:
+                lock=acquire(self.root/'install.lock')
+                break
+            except BlockingIOError:
+                saved = _read(self.root/'state.json')
+                if isinstance(saved, dict) and saved.get('state') in BUSY:
+                    return  # Repeated POST shares the existing installation.
+                # A terminal status may be visible just before the installer
+                # releases its lock; a status probe also holds it briefly.
+                if time.monotonic() >= deadline:
+                    return
+                time.sleep(.02)
         if self.ready():
             lock.close()
             return
@@ -175,6 +220,10 @@ class QwenComponent:
 
     def _install(self,lock):
         try:
+            if self.windows:
+                from .qwen_windows import install
+                install(self)
+                return
             staging=self.root/'installing'
             staging.mkdir(exist_ok=True)
             python=staging/'python/bin/python3'
@@ -231,8 +280,14 @@ class QwenComponent:
     def _verify_runtime(self,root):
         with tempfile.TemporaryDirectory(dir=self.root,prefix='selftest-') as temporary:
             output=Path(temporary)/'result.json'
-            self._run([str(root/'python/bin/python3'),'-I',str(ASSETS/'qwen_worker.py'),
-                'transcribe',str(root/'model'),QWEN_MODEL_ID,QWEN_MODEL_REVISION,QWEN_RUNTIME_VERSION,
+            worker = 'qwen_windows_worker.py' if self.windows else 'qwen_worker.py'
+            model_id = QWEN_MODEL_ID
+            if self.windows:
+                from .qwen_windows import MODEL_ID
+                model_id = MODEL_ID
+            runtime_version, revision = self.identity()
+            self._run([str(self.python_path(root)),'-I',str(ASSETS/worker),
+                'transcribe',str(root/'model'),model_id,revision,runtime_version,
                 str(ASSETS/'qwen-selftest.wav'),str(output)],root,offline=True,quiet=True)
             value=_read(output)
             words=str(value.get('text','')).lower() if isinstance(value,dict) else ''
@@ -275,7 +330,11 @@ class QwenComponent:
     def _run(self,command,root,*,offline=False,quiet=False):
         deadline=time.monotonic()+3600
         with (Path(os.devnull) if quiet else self.root/'install.log').open('ab') as log:
-            process=subprocess.Popen(command,stdout=log,stderr=log,env=_environment(root,offline=offline),start_new_session=True)
+            from .subprocess_environment import external_process
+            with external_process():
+                process=subprocess.Popen(command,stdout=log,stderr=log,env=_environment(root,offline=offline),
+                                         start_new_session=os.name != 'nt',
+                                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
             self._process=process
             try:
                 while True:
@@ -295,6 +354,11 @@ class QwenComponent:
     @staticmethod
     def _terminate(process):
         if process.poll() is None:
+            if os.name == 'nt':
+                subprocess.run(['taskkill.exe','/PID',str(process.pid),'/T','/F'],
+                               capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                process.wait(timeout=10)
+                return
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(process.pid,signal.SIGTERM)
             try:
@@ -323,10 +387,16 @@ class ComponentQwenRuntime:
         try:
             with tempfile.TemporaryDirectory(prefix='transcription-',dir=self.component.root) as temp:
                 output=Path(temp)/'result.json'
-                self.component._run([str(active/'python/bin/python3'),'-I',str(ASSETS/'qwen_worker.py'),
-                    'transcribe',str(active/'model'),QWEN_MODEL_ID,QWEN_MODEL_REVISION,QWEN_RUNTIME_VERSION,
+                worker = 'qwen_windows_worker.py' if self.component.windows else 'qwen_worker.py'
+                model_id = QWEN_MODEL_ID
+                if self.component.windows:
+                    from .qwen_windows import MODEL_ID
+                    model_id = MODEL_ID
+                runtime_version, revision = self.component.identity()
+                self.component._run([str(self.component.python_path(active)),'-I',str(ASSETS/worker),
+                    'transcribe',str(active/'model'),model_id,revision,runtime_version,
                     str(audio_path),str(output)],active,offline=True,quiet=True)
-                value=json.loads(output.read_text())
+                value=json.loads(output.read_text(encoding='utf-8'))
                 if not isinstance(value,dict) or not isinstance(value.get('text'),str) or not isinstance(value.get('truncated'),bool):
                     raise ValueError
                 return QwenRuntimeResult(value['text'],value.get('language'),value.get('finish_reason'),

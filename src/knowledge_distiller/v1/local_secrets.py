@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import tempfile
 import time
 from .keychain import KeychainError
@@ -21,16 +22,20 @@ class LocalSecrets:
     def __call__(self, account):
         if not isinstance(account, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,180}', account):
             raise SecretError('credential_account_invalid')
+        if sys.platform == 'win32':
+            from .windows_credentials import WindowsLocalSecret
+            return WindowsLocalSecret(self, account)
         return LocalSecret(self, account)
 
     def _directory(self):
         try:
             # Never follow a symlink in the application credential path.
             for parent in (*reversed(self.root.parents), self.root):
-                if parent.is_symlink(): raise SecretError('credential_path_unsafe')
+                if parent.is_symlink() or (sys.platform == 'win32' and getattr(parent, 'is_junction', lambda: False)()):
+                    raise SecretError('credential_path_unsafe')
             self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
             info = self.root.stat()
-            if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
+            if not stat.S_ISDIR(info.st_mode) or (sys.platform != 'win32' and info.st_mode & 0o077):
                 raise SecretError('credential_permissions_unsafe')
         except OSError:
             raise SecretError('credential_directory_unavailable') from None

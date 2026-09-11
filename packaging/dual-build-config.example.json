@@ -1,0 +1,13 @@
+{
+  "output_root": "<output_root>",
+  "mac_python": "<mac_python>",
+  "signing_config": "<signing_config>",
+  "sparkle_sdk": "<sparkle_sdk>",
+  "mac_models": "<mac_models>",
+  "windows_root": "<windows_root>",
+  "windows_python": "<windows_python>",
+  "windows_cache": "<windows_cache>",
+  "windows_host": "<windows_host>",
+  "ssh_key": "<ssh_key>",
+  "known_hosts": "<known_hosts>"
+}

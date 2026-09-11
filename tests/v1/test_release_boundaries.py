@@ -59,7 +59,7 @@ def test_opencli_manifest_keeps_runtime_and_excludes_development_assets(tmp_path
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('fixture')
-    selected = {str(Path(source).relative_to(tmp_path)) for source, _ in RESOURCES['opencli_datas'](tmp_path)}
+    selected = {Path(source).relative_to(tmp_path).as_posix() for source, _ in RESOURCES['opencli_datas'](tmp_path)}
     assert selected == set(names[:11])
     (tmp_path / 'clis/zhihu/auth.js').unlink()
     import pytest

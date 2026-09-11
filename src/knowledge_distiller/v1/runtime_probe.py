@@ -18,7 +18,10 @@ def check(destination, audio=None, *, ocr_image=None, pdf=None, epub=None, compo
             report['checks'][tool]=result.stdout.splitlines()[0]
         stage = 'native_imports'
         from core.api_client import DouyinAPIClient
-        from AppKit import NSApplication
+        if sys.platform == 'darwin':
+            from AppKit import NSApplication
+        elif sys.platform == 'win32':
+            from . import windows_job
         report['checks']['python_adapters']='loaded'
         if getattr(sys, 'frozen', False):
             import plistlib

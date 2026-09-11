@@ -183,6 +183,7 @@ def test_compact_update_journey_and_notes_ack(tmp_path, key, width):
     from playwright.sync_api import sync_playwright
     app = create_app(Store(tmp_path/'db.sqlite3'), lambda: None)
     updates = app.extensions['updates']
+    updates.info.pop('download_url', None)  # Explicit signed-updater fixture, not Windows product capability.
     updates.info.update(version='1',display_version='2026.09.09.11',public_key=public(key),feed_url='https://example.test/appcast.xml')
     updates.release = parse_feed(signed_feed(key, version='2026.09.09.12'), public(key), '1')
     updates.phase = 'available'
@@ -240,3 +241,57 @@ def test_manual_candidate_cannot_install_even_with_callback(tmp_path):
     with pytest.raises(UpdateError,match='手动'):
         updates.request_install()
     assert not called
+
+
+@pytest.mark.parametrize('nested', [False, True])
+def test_install_rejects_data_inside_program_before_touching_files(tmp_path, nested):
+    from knowledge_distiller.v1.updates import validate_install_paths
+    bundle = tmp_path/'app'
+    data = bundle/'data' if nested else bundle
+    data.mkdir(parents=True)
+    sentinel = data/'knowledge.sqlite3'
+    sentinel.write_bytes(b'untouched')
+    with pytest.raises(UpdateError, match='数据目录位于程序目录内'):
+        validate_install_paths(data, bundle)
+    assert sentinel.read_bytes() == b'untouched'
+
+
+def test_install_resolves_linked_data_and_vault_without_writing_database(tmp_path):
+    import sqlite3
+    from knowledge_distiller.v1.updates import validate_install_paths
+    bundle = tmp_path/'app'; bundle.mkdir()
+    data = tmp_path/'data'; data.mkdir()
+    vault = bundle/'vault'; vault.mkdir()
+    link = tmp_path/'linked-vault'
+    link.symlink_to(vault, target_is_directory=True)
+    database = data/'knowledge.sqlite3'
+    with sqlite3.connect(database) as db:
+        db.execute('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        db.execute('INSERT INTO settings VALUES (?, ?)', ('vault_path', str(link)))
+    before = database.read_bytes()
+    with pytest.raises(UpdateError, match='Vault 位于程序目录内'):
+        validate_install_paths(data, bundle)
+    assert database.read_bytes() == before
+    validate_install_paths(data, tmp_path/'separate-app')
+    assert database.read_bytes() == before
+    with pytest.raises(UpdateError, match='数据目录位于程序目录内'):
+        validate_install_paths(link, bundle)
+
+
+@pytest.mark.parametrize('kind', ['data', 'vault'])
+def test_install_rejects_case_alias_inside_bundle_on_insensitive_volume(tmp_path, kind):
+    import sqlite3
+    from knowledge_distiller.v1.updates import validate_install_paths
+    bundle = tmp_path/'ActualProgram'; bundle.mkdir()
+    alias = tmp_path/'actualprogram'
+    if not alias.exists():
+        pytest.skip('Requires case-insensitive filesystem')
+    assert alias.samefile(bundle)
+    data = alias/'data' if kind=='data' else tmp_path/'data'
+    data.mkdir()
+    if kind=='vault':
+        with sqlite3.connect(data/'knowledge.sqlite3') as db:
+            db.execute('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+            db.execute('INSERT INTO settings VALUES (?, ?)', ('vault_path', str(alias/'vault')))
+    with pytest.raises(UpdateError, match='位于程序目录内'):
+        validate_install_paths(data, bundle)

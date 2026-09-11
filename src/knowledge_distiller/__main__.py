@@ -1,10 +1,10 @@
 import argparse
-import fcntl
 import os
 import socket
 from pathlib import Path
 
 from .v1.app import AppPaths, create_application
+from .v1.file_lock import acquire
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -24,7 +24,7 @@ def _port(value: str) -> int:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="启动知识蒸馏器本地开发服务")
     parser.add_argument("--port", type=_port, default=os.environ.get("PORT", DEFAULT_PORT))
-    parser.add_argument("--data-dir", type=Path, default=AppPaths.mac_default().data_root,
+    parser.add_argument("--data-dir", type=Path, default=AppPaths.system_default().data_root,
                         help="SQLite 与运行文件目录；验收时指定独立目录")
     args = parser.parse_args(argv)
     paths = AppPaths(args.data_dir.expanduser().resolve())
@@ -39,11 +39,11 @@ def main(argv: list[str] | None = None) -> None:
 
     paths.data_root.mkdir(parents=True, exist_ok=True)
     # Two ports must not start two workers against the same SQLite queue.
-    with (paths.data_root / ".instance.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            parser.error(f"此数据目录已有服务运行：{paths.data_root}")
+    try:
+        lock = acquire(paths.data_root / '.instance.lock')
+    except BlockingIOError:
+        parser.error(f"此数据目录已有服务运行：{paths.data_root}")
+    with lock:
         app = create_application(paths)
         print(f"页面：http://{DEFAULT_HOST}:{args.port}", flush=True)
         print(f"数据目录：{paths.data_root}", flush=True)

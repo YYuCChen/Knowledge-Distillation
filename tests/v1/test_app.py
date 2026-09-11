@@ -66,3 +66,26 @@ def test_unconfigured_submission_fails_at_exact_first_missing_boundary(
         assert chrome.calls == 0
     finally:
         app.config["KNOWLEDGE_DISTILLER_WORKER"].stop()
+
+
+def test_pending_update_blocks_writes_until_acceptance(tmp_path):
+    import sqlite3
+    paths=AppPaths(tmp_path/'data')
+    app=create_application(paths,chrome=Chrome(),start_workers=False)
+    client=app.test_client()
+    try:
+        def rows():
+            with sqlite3.connect(paths.database) as db:
+                return tuple(db.iterdump())
+        before=rows()
+        response=client.post('/submissions',data={'content':'更新验收期间不能写入的新素材'})
+        assert response.status_code==503
+        assert rows()==before
+        assert client.get('/').status_code==200
+        assert client.get('/settings/updates/status').json['phase']=='installing'
+        app.extensions['updates'].phase='idle'
+        response=client.post('/submissions',data={'content':'确认升级后允许写入的新素材'})
+        assert response.status_code==302
+        assert rows()!=before
+    finally:
+        app.config['KNOWLEDGE_DISTILLER_CLOSE_BROWSERS']()

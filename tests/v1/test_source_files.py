@@ -1,4 +1,5 @@
 import subprocess
+import sys
 
 import pytest
 
@@ -45,23 +46,29 @@ def test_open_actions_use_owned_paths_and_report_failures(tmp_path, monkeypatch)
     client = create_app(store, service, settings).test_client()
     calls = []
     monkeypatch.setattr(subprocess, 'run', lambda command, **kw: calls.append(command))
+    if sys.platform == 'win32':
+        import os
+        monkeypatch.setattr(os, 'startfile', lambda path: calls.append(['startfile', path]))
+    opener = 'startfile' if sys.platform == 'win32' else '/usr/bin/open'
     page = client.get('/settings?open=paths').text
     assert '原文件副本' in page and '打开文件夹' in page
     assert str(tmp_path / 'source-files') in page
     assert not (tmp_path / 'source-files').exists()
     assert client.post('/settings/source-files/open', data={'path': '/arbitrary'}).status_code == 302
-    assert calls == [['/usr/bin/open', str(tmp_path / 'source-files')]]
+    assert calls == [[opener, str(tmp_path / 'source-files')]]
     source = prepare_file('原文.md', b'body')
     item = store.submit_source(source)
     path = copy_path(tmp_path, source.source_kind, source.source_key, source.label)
     assert client.get(f'/items/{item}/open-source-file').status_code == 405
     assert client.post(f'/items/{item}/open-source-file').status_code == 302
-    assert calls[-1] == ['/usr/bin/open', str(path)]
+    assert calls[-1] == [opener, str(path)]
     path.unlink()
     assert client.post(f'/items/{item}/open-source-file').status_code == 400
     def fail(*args, **kwargs):
         raise OSError('test unavailable')
     monkeypatch.setattr(subprocess, 'run', fail)
+    if sys.platform == 'win32':
+        monkeypatch.setattr(os, 'startfile', fail)
     assert '未能打开' in client.post('/settings/source-files/open', follow_redirects=True).text
 
 

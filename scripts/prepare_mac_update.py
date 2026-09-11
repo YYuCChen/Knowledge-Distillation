@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import plistlib
 import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 
 p = argparse.ArgumentParser()
@@ -16,10 +17,16 @@ p.add_argument('--notes', type=Path, required=True)
 p.add_argument('--account', default='knowledge-distiller-updates')
 p.add_argument('--test-key', type=Path)
 p.add_argument('--testing', action='store_true')
+p.add_argument('--allow-full-only-release', action='store_true', help='显式准备无差量基线的首装发行；日常升级须传入--previous')
+p.add_argument('--allow-manual-release', action='store_true', help='显式准备手动更新包；不能当作差量发行验收')
 a = p.parse_args()
 if a.output.exists() and any(a.output.iterdir()): p.error('输出目录必须为空')
 a.output.mkdir(parents=True, exist_ok=True)
 info = plistlib.loads((a.app/'Contents/Info.plist').read_bytes())
+if not a.testing and info.get('KDManualUpdateOnly', True) and not a.allow_manual_release:
+    p.error('正式发行目标仍禁止差量安装；必须先完成自动更新构建验收')
+if not a.testing and not a.previous and not a.allow_full_only_release:
+    p.error('正式更新缺少差量基线，请提供--previous；首装包须显式声明--allow-full-only-release')
 if not a.testing and (info.get('KDUpdateTestDataRoot') or a.test_key): p.error('测试包/测试私钥不能作为正式发布内容')
 if not info.get('SUPublicEDKey') or not info.get('SURequireSignedFeed'): p.error('应用未配置签名更新')
 subprocess.run(['codesign', '--verify', '--deep', '--strict', str(a.app)], check=True)
@@ -54,6 +61,14 @@ if a.previous:
     if previous['CFBundleIdentifier'] != info['CFBundleIdentifier']: p.error('差量基线应用身份不同')
     delta = a.output/f'KnowledgeDistiller-{previous["CFBundleVersion"]}-{version}.delta'
     subprocess.run([str(a.sdk/'bin/BinaryDelta'), 'create', '--version=4', str(a.previous), str(a.app), str(delta)], check=True)
+    # Verify reconstruction before signing/publishing a patch. BinaryDelta
+    # checks its target tree hash; codesign independently verifies the result.
+    with tempfile.TemporaryDirectory(prefix='kd-delta-verify-') as temporary:
+        restored = Path(temporary)/a.app.name
+        subprocess.run([str(a.sdk/'bin/BinaryDelta'), 'apply', str(a.previous), str(restored), str(delta)], check=True)
+        subprocess.run(['codesign', '--verify', '--deep', '--strict', str(restored)], check=True)
+        if (restored/'Contents/Info.plist').read_bytes() != (a.app/'Contents/Info.plist').read_bytes():
+            raise ValueError('差量重建的目标应用配置不一致')
     enclosure(ET.SubElement(item, s+'deltas'), delta, **{s+'deltaFrom':previous['CFBundleVersion']})
 feed = a.output/'appcast.xml'
 feed.write_bytes(ET.tostring(rss, encoding='utf-8', xml_declaration=True)+b'\n')

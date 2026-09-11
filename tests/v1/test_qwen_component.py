@@ -16,6 +16,9 @@ from knowledge_distiller.v1.store import Store
 
 @pytest.fixture
 def component(tmp_path,monkeypatch):
+    # This fixture exercises the Mac tar installer on every host; Windows has
+    # its own wheel/embedded-runtime installer tests.
+    monkeypatch.setattr(module.QwenComponent,'windows',property(lambda self:False))
     monkeypatch.setattr(module.QwenComponent,'supported',property(lambda self:True))
     result=module.QwenComponent(tmp_path/'qwen')
     def download(path):
@@ -40,6 +43,41 @@ def component(tmp_path,monkeypatch):
 def finish(component):
     component._thread.join(5)
     assert not component._thread.is_alive()
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows reader sharing semantics')
+def test_atomic_state_write_waits_for_windows_status_reader(tmp_path):
+    import ctypes
+    from ctypes import wintypes
+    path = tmp_path/'state.json'
+    module._atomic_json(path, {'state':'downloading_runtime'})
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    # Exact native condition: a reader permits READ/WRITE but not DELETE.
+    handle = kernel.CreateFileW(str(path), 0x80000000, 3, None, 3, 0x80, None)
+    assert handle != ctypes.c_void_p(-1).value
+    errors, done = [], threading.Event()
+    def update():
+        try:
+            module._atomic_json(path, {'state':'ready'})
+        except Exception as error:
+            errors.append(error)
+        finally:
+            done.set()
+    writer = threading.Thread(target=update)
+    writer.start()
+    try:
+        assert not done.wait(.05)
+        assert module._read(path) == {'state':'downloading_runtime'}
+    finally:
+        kernel.CloseHandle(handle)
+    writer.join(3)
+    assert done.is_set() and not errors
+    assert module._read(path) == {'state':'ready'}
+    assert not path.with_suffix('.tmp').exists()
 
 
 def test_install_is_explicit_complete_and_does_not_activate(component,tmp_path):
@@ -69,6 +107,42 @@ def test_concurrent_click_and_restart_observe_same_installation(component,monkey
     assert other._thread is None
     release.set();finish(component)
     assert other.ready()
+
+
+@pytest.mark.parametrize('final_state', ['failed', 'ready'])
+def test_status_observes_installation_finishing_during_lock_check(component,monkeypatch,final_state):
+    component.root.mkdir(parents=True)
+    module._atomic_json(component.root/'state.json', {'state':'downloading_runtime'})
+    ready = [False]
+    monkeypatch.setattr(component, 'ready', lambda: ready[0])
+    def finishes_before_lock_check():
+        module._atomic_json(component.root/'state.json', {'state':final_state})
+        ready[0] = final_state == 'ready'
+        return False
+    monkeypatch.setattr(component, '_locked', finishes_before_lock_check)
+    status = component.status()
+    assert status['state'] == final_state
+    assert status['label'] == module.LABELS[final_state]
+    assert not status['busy']
+    assert status['ready'] == (final_state == 'ready')
+
+
+def test_retry_is_not_lost_while_terminal_installer_releases_lock(component,monkeypatch):
+    from knowledge_distiller.v1 import file_lock
+    component.root.mkdir(parents=True)
+    module._atomic_json(component.root/'state.json', {'state':'failed'})
+    original = file_lock.acquire
+    attempts = []
+    def finishing(path):
+        attempts.append(path)
+        if len(attempts) == 1:
+            raise BlockingIOError('previous installer finishing')
+        return original(path)
+    monkeypatch.setattr(file_lock, 'acquire', finishing)
+    component.start()
+    finish(component)
+    assert len(attempts) == 2
+    assert component.ready()
 
 
 def test_failure_retry_reuses_runtime_and_recovers_after_restart(component,monkeypatch):

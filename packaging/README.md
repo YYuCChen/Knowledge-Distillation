@@ -1,6 +1,6 @@
 # Packaging notes
 
-This directory contains the macOS packaging helpers for Knowledge Distiller. The
+This directory contains the macOS and Windows packaging helpers for Knowledge Distiller. The
 published application is intended for Apple Silicon Macs running macOS 14 or
 later. The public GitHub Releases page is the source of truth for downloadable
 application packages and supported platforms.
@@ -52,3 +52,14 @@ before publishing a GitHub Release.
 The application uses third-party libraries, fonts, models, and packaging
 components. Their notices and licenses remain separate from this project's
 Apache-2.0 license; retain those files when redistributing a package.
+
+## Windows and paired candidate builds
+
+See [Windows build instructions](WINDOWS_BUILD.md) for the pinned model manifest,
+Windows dependency lock, native tools, packaging and verification steps.
+[Paired candidate builds](DUAL_PLATFORM_BUILD.md) describes optional two-host
+coordination using a private configuration derived from
+[the example](dual-build-config.example.json). No script publishes automatically.
+
+The source reconciliation does not rebuild or replace existing Releases. Record
+the actual candidate commit and native verification before releasing new binaries.

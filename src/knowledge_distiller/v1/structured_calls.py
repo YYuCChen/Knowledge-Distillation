@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -29,7 +30,7 @@ class StructuredCalls:
         path = self.directory / f'{stage}.json' if self.directory else None
         if path and path.is_file() and not path.is_symlink():
             try:
-                saved = json.loads(path.read_text())
+                saved = json.loads(path.read_text(encoding='utf-8'))
                 if saved.get('fingerprint') == fingerprint and saved.get('accepted'):
                     value = _response_value(saved['text'], schema)
                     validator.validate(value)
@@ -75,16 +76,20 @@ class StructuredCalls:
     def save(self, stage):
         if not self.directory:
             return
+        temp = None
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
             target = self.directory / f'{stage}.json'
-            temp = target.with_suffix('.tmp')
-            fd = os.open(temp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(fd, 'w') as output:
+            fd, name = tempfile.mkstemp(prefix=target.stem + '-', suffix='.tmp', dir=self.directory)
+            temp = Path(name)
+            with os.fdopen(fd, 'w', encoding='utf-8') as output:
                 json.dump(self.records[stage], output, ensure_ascii=False)
             os.replace(temp, target)
         except OSError:
             logger.warning('Organization %s diagnostic could not be saved', stage)
+        finally:
+            if temp is not None:
+                temp.unlink(missing_ok=True)
 
 
 def _response_value(text, schema):

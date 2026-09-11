@@ -369,9 +369,10 @@ def test_obsidian_handoff_requires_registered_exact_vault(tmp_path, monkeypatch)
     vault = tmp_path/'a'/'vault'; vault.mkdir(parents=True)
     (vault/'note.md').write_text('owned')
     other = tmp_path/'b'/'vault'; other.mkdir(parents=True)
-    registry = tmp_path/'Library/Application Support/obsidian/obsidian.json'
+    registry = tmp_path / ('AppData/Roaming/obsidian/obsidian.json' if __import__('sys').platform=='win32' else 'Library/Application Support/obsidian/obsidian.json')
     registry.parent.mkdir(parents=True)
     monkeypatch.setattr(Path, 'home', classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv('APPDATA',str(tmp_path/'AppData/Roaming'))
     registry.write_text(json.dumps({'vaults': {'other': {'path': str(other)}}}))
     assert _obsidian_url(str(vault), 'note.md') is None
     registry.write_text(json.dumps({'vaults': {'other': {'path': str(other)}, 'exact-id': {'path': str(vault)}}}))

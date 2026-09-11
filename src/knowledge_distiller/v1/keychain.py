@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -194,7 +195,10 @@ class MacOSKeychain:
 
 
 @lru_cache(maxsize=1)
-def system_keychain() -> MacOSKeychain:
+def system_keychain():
+    if sys.platform == 'win32':
+        from .windows_credentials import WindowsKeychain
+        return WindowsKeychain()
     return MacOSKeychain()
 
 

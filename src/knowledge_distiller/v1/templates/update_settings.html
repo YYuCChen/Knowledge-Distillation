@@ -6,10 +6,10 @@
   <div class="update-content">
     <div class="update-version-row">
       <div class="update-version-info"><span>当前版本：</span><strong>{{ 'V' if update.display_version[0].isdigit() else '' }}{{ update.display_version }}</strong></div>
-      <button type="button" class="secondary-button" data-update-primary>检查更新</button>
+      {% if update.manual_download_url %}<a class="secondary-button" href="{{ update.manual_download_url }}" target="_blank" rel="noopener noreferrer">Windows 官方下载</a>{% else %}<button type="button" class="secondary-button" data-update-primary>检查更新</button>{% endif %}
     </div>
     <p class="update-release-date">发行时间：{{ update.release_date }}</p>
-    <div class="update-status-row"><p data-update-status role="status">{{ '尚未检查更新。' if update.configured else '此版本尚未配置更新源。' }}</p>
+    <div class="update-status-row"><p data-update-status role="status">{{ 'Windows 应用内安装尚未支持，请从官方页面下载 Windows ZIP。' if update.manual_download_url else ('尚未检查更新。' if update.configured else '此版本尚未配置更新源。') }}</p>
     <span data-update-package-size hidden></span></div>
     <p id="update-description" data-update-description hidden></p>
     <button type="button" class="secondary-button" data-update-full-fallback hidden>改用完整包</button>

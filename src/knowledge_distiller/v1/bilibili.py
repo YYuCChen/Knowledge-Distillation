@@ -300,13 +300,21 @@ def _run_worker(request, timeout):
                    [sys.executable, '-c', 'from knowledge_distiller.v1.bilibili import _worker_main; _worker_main()'])
         process = subprocess.Popen(command,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding='utf-8', env=env, start_new_session=True)
+            text=True, encoding='utf-8', env=env, start_new_session=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
         try:
             output, _ = process.communicate(json.dumps(request), timeout=timeout)
         except subprocess.TimeoutExpired:
             # The worker's own session also owns any ffmpeg download subprocess.
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                if sys.platform == 'win32':
+                    subprocess.run(['taskkill.exe', '/PID', str(process.pid), '/T', '/F'],
+                                   capture_output=True, timeout=10,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+                    if process.poll() is None:
+                        process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             process.communicate()

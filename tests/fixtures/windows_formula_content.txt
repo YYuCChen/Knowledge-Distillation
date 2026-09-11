@@ -1,0 +1,23 @@
+BT /F1 18 Tf 50 780 Td (Energy and elementary mathematical relationships) Tj ET
+BT /F1 12 Tf 50 745 Td (This synthetic document illustrates simple mathematical notation.) Tj ET
+BT /F1 12 Tf 50 715 Td (Mass and energy are related by the speed of light. The equation is) Tj ET
+BT /F1 16 Tf 230 675 Td (E = mc) Tj ET
+BT /F1 10 Tf 275 682 Td (2) Tj ET
+BT /F1 12 Tf 500 675 Td ((1)) Tj ET
+BT /F1 12 Tf 50 640 Td (where E denotes energy, m denotes mass, and c denotes the speed of light.) Tj ET
+BT /F1 12 Tf 50 605 Td (For a right triangle, the lengths of the three sides satisfy) Tj ET
+BT /F1 16 Tf 208 565 Td (a) Tj ET
+BT /F1 10 Tf 216 572 Td (2) Tj ET
+BT /F1 16 Tf 230 565 Td (+ b) Tj ET
+BT /F1 10 Tf 252 572 Td (2) Tj ET
+BT /F1 16 Tf 268 565 Td (= c) Tj ET
+BT /F1 10 Tf 290 572 Td (2) Tj ET
+BT /F1 12 Tf 500 565 Td ((2)) Tj ET
+BT /F1 12 Tf 50 530 Td (The two shorter sides are a and b, and the longest side is c.) Tj ET
+BT /F1 12 Tf 50 495 Td (A fraction can also be displayed as a separate equation:) Tj ET
+BT /F1 16 Tf 188 450 Td (x =) Tj ET
+BT /F1 16 Tf 245 460 Td (a + b) Tj ET
+BT /F1 16 Tf 260 430 Td (2) Tj ET
+238 450 m 288 450 l S
+BT /F1 12 Tf 500 450 Td ((3)) Tj ET
+BT /F1 12 Tf 50 390 Td (All values and claims here are synthetic test material only.) Tj ET
