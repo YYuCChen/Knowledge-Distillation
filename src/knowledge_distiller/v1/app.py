@@ -50,6 +50,13 @@ class AppPaths:
             / "Knowledge Distiller"
         )
 
+    @classmethod
+    def system_default(cls) -> AppPaths:
+        import os
+        if os.name == 'nt':
+            return cls(Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData' / 'Local')) / 'Knowledge Distiller')
+        return cls.mac_default()
+
 
 def create_application(
     paths: AppPaths | None = None,
@@ -58,7 +65,7 @@ def create_application(
     settings: SettingsService | None = None,
     start_workers: bool = True,
 ):
-    selected_paths = paths or AppPaths.mac_default()
+    selected_paths = paths or AppPaths.system_default()
     store = Store(selected_paths.database)
     from .douyin_session import DouyinOwnedSession
     browser = chrome or DouyinOwnedSession(store, selected_paths.data_root / "browser-profiles" / "douyin")

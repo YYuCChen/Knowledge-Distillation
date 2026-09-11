@@ -49,7 +49,8 @@ class PlatformOwnedSession(DouyinOwnedSession):
         profile = self.root / identifier
         profile.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(profile, 0o700)
-        executable = Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+        from .desktop_paths import chrome_executable
+        executable = chrome_executable()
         if not executable.is_file():
             raise ChromeSessionError(self.platform + '_browser_missing')
         # Ordinary visible Chrome: no debugging, headless, or automation arguments.

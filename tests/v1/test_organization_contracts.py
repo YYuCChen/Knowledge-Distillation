@@ -2,6 +2,19 @@ import json
 from copy import deepcopy
 from types import SimpleNamespace
 import pytest
+
+
+@pytest.mark.parametrize('link_name', ['stage.tmp', 'stage.json'])
+def test_structured_diagnostic_never_writes_through_existing_link(tmp_path, link_name):
+    outside = tmp_path / 'keep-original.txt'
+    outside.write_text('untouched', encoding='utf-8')
+    (tmp_path / link_name).symlink_to(outside)
+    calls = StructuredCalls(object(), tmp_path)
+    calls.records['stage'] = {'text': '中文诊断', 'accepted': False}
+    calls.save('stage')
+    assert outside.read_text(encoding='utf-8') == 'untouched'
+    assert json.loads((tmp_path / 'stage.json').read_text(encoding='utf-8')) == calls.records['stage']
+    assert not list(tmp_path.glob('stage-*.tmp'))
 from jsonschema import Draft202012Validator, ValidationError
 from knowledge_distiller.v1.organization_contracts import topic_contract, topic_plan, recall_contract, growth_contract, growth_plan
 from knowledge_distiller.v1.structured_calls import StructuredCalls
@@ -59,7 +72,8 @@ def test_diagnostics_and_only_accepted_exact_inputs_reuse(tmp_path):
     assert client.calls == 2
     calls.complete('stage','system',{'changed':True},schema,32)
     assert client.calls == 3
-    assert (tmp_path/'stage.json').stat().st_mode & 0o777 == 0o600
+    from .test_llm import assert_private_diagnostic
+    assert_private_diagnostic(tmp_path/'stage.json')
 
 
 @pytest.mark.parametrize('kind,field,payload_factory', [

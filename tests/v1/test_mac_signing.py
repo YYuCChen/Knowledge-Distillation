@@ -122,3 +122,35 @@ def test_unsigned_or_unsafe_identifier_gets_stable_identifier(tmp_path, metadata
     signed = next(c for c in calls if '--sign' in c)
     assert signed[signed.index('--identifier')+1].startswith('local.knowledge-distiller.code.')
     assert any('--test-requirement' in c for c in calls)
+
+
+def test_release_update_policy_requires_stable_identity_and_signed_feed():
+    policy = api()['update_policy']
+    stable = {'identity': 'local-certificate', 'certificate_sha1': 'ab'*20}
+    feed = {'public_key': 'key', 'feed_url': 'https://example.test/appcast.xml'}
+    assert policy(stable, feed)['KDManualUpdateOnly'] is False
+    assert policy({}, feed)['KDManualUpdateOnly'] is True
+    assert policy(stable, {})['KDManualUpdateOnly'] is True
+    assert policy(stable, feed, manual=True)['KDManualUpdateOnly'] is True
+    with pytest.raises(ValueError, match='签名公钥'):
+        policy(stable, {'feed_url': feed['feed_url']})
+    with pytest.raises(ValueError):
+        policy({'identity': 'local-certificate'}, feed)
+
+
+def test_update_helper_identity_ignores_pyinstaller_build_uuid(tmp_path):
+    import subprocess
+    app = tmp_path/'Test.app'
+    helper = app/'Contents/MacOS/update-helper'
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes(b'\xcf\xfa\xed\xfe'+b'fixture')
+    identifiers = []
+    for uuid in ('aaaa', 'bbbb'):
+        def run(command, **kwargs):
+            if '--display' in command:
+                return subprocess.CompletedProcess(command, 0, b'', f'Identifier=update-helper-{uuid}\n'.encode())
+            if '--sign' in command and command[-1] == str(helper):
+                identifiers.append(command[command.index('--identifier')+1])
+            return subprocess.CompletedProcess(command, 0, b'', b'')
+        api()['sign_bundle'](app, {'identity':'Test', 'certificate_sha1':'ab'*20}, run=run)
+    assert identifiers == ['local.knowledge-distiller.update-helper'] * 2

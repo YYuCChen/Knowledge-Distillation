@@ -27,6 +27,32 @@ class UpdateError(ValueError):
     pass
 
 
+def validate_install_paths(data_root, bundle):
+    """Replacing a bundle must never also replace user data or the selected Vault."""
+    import sqlite3
+    root, target = Path(data_root).resolve(), Path(bundle).resolve()
+    def inside(path):
+        if path.is_relative_to(target):
+            return True
+        # resolve() preserves spelling on case-insensitive macOS volumes.
+        # Compare filesystem identity without casefolding case-sensitive volumes.
+        if target.exists():
+            return any(parent.exists() and parent.samefile(target) for parent in (path, *path.parents))
+        return False
+    if inside(root):
+        raise UpdateError('数据目录位于程序目录内，已停止安装。请先把程序移到数据目录之外，保留原数据目录。')
+    database = root/'knowledge.sqlite3'
+    if database.exists():
+        connection = sqlite3.connect(database.as_uri()+'?mode=ro', uri=True)
+        try:
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").fetchone():
+                row = connection.execute("SELECT value FROM settings WHERE key='vault_path'").fetchone()
+                if row and row[0] and inside(Path(row[0]).expanduser().resolve()):
+                    raise UpdateError('Obsidian Vault 位于程序目录内，已停止安装。请先把程序移到 Vault 之外，保留原 Vault。')
+        finally:
+            connection.close()
+
+
 def version_key(value):
     if not isinstance(value, str) or not re.fullmatch(r'\d+(?:\.\d+){0,4}', value):
         raise UpdateError('更新版本格式无效。')
@@ -92,6 +118,22 @@ def parse_feed(data, public_key, current):
 
 
 def bundle_info():
+    if sys.platform == 'win32':
+        metadata = {'version': '0', 'product_version': '开发版本'}
+        if getattr(sys, 'frozen', False):
+            try:
+                metadata = json.loads((Path(sys._MEIPASS) / 'windows-version.json').read_text(encoding='utf-8'))
+                version_key(metadata['version'])
+                if not isinstance(metadata.get('product_version'), str) or not metadata['product_version']:
+                    raise ValueError()
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+                raise UpdateError('Windows 发行版本信息无效。') from error
+        return {'version': metadata['version'], 'display_version': metadata['product_version'],
+                'bundle': str(Path(sys.executable).resolve().parent) if metadata.get('feed_url') else None,
+                'feed_url': metadata.get('feed_url', ''), 'public_key': metadata.get('public_key', ''),
+                'manual_update_only': not bool(metadata.get('feed_url') and metadata.get('public_key')),
+                'windows_update': True,
+                'download_url': '' if metadata.get('feed_url') else 'https://github.com/YYuCChen/Knowledge-Distillation/releases/latest'}
     if not getattr(sys, 'frozen', False):
         return {'version': '0', 'display_version': '开发版本', 'bundle': None, 'feed_url': '', 'public_key': ''}
     bundle = Path(sys.executable).resolve().parents[2]
@@ -178,9 +220,12 @@ class Updates:
         return path.is_file() and path.stat().st_size == asset['size']
 
     def snapshot(self):
+        from .windows_platform import system_label
         with self.lock:
             return {**{k: self.info[k] for k in ('version', 'display_version')},
-                    'system': f'macOS {platform.mac_ver()[0]} · {platform.machine()}',
+                    'system': (system_label() if sys.platform == 'win32'
+                               else f'macOS {platform.mac_ver()[0]} · {platform.machine()}'),
+                    'manual_download_url': self.info.get('download_url', ''),
                     'release_date': self.info.get('release_date') or ('-'.join(self.info['version'].split('.')[:3]) if re.fullmatch(r'\d{4}\.\d{2}\.\d{2}\.\d+', self.info['version']) else '待发行'),
                     'configured': bool(self.info['feed_url'] and self.info['public_key']),
                     'phase': self.phase, 'error': self.error, 'received': self.received,
@@ -271,6 +316,17 @@ class Updates:
     def verify_file(self, path, asset):
         if path.stat().st_size != asset['size']:
             raise UpdateError('更新文件不完整，请重新下载。')
+        if self.info.get('windows_update'):
+            import mmap
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+            from cryptography.exceptions import InvalidSignature
+            try:
+                key=Ed25519PublicKey.from_public_bytes(base64.b64decode(self.info['public_key'],validate=True))
+                with path.open('rb') as source, mmap.mmap(source.fileno(),0,access=mmap.ACCESS_READ) as data:
+                    key.verify(base64.b64decode(asset['signature'],validate=True),data)
+            except (ValueError,InvalidSignature) as error:
+                raise UpdateError('更新签名验证失败，已保留当前版本。') from error
+            return
         verifier = self.info.get('verifier') or (str(Path(self.info['bundle'])/'Contents/MacOS/update-verify') if self.info['bundle'] else None)
         if verifier:
             result = subprocess.run([verifier, self.info['public_key'], asset['signature'], str(path)], capture_output=True)

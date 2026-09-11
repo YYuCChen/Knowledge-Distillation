@@ -75,6 +75,7 @@ def installation(tmp_path, monkeypatch):
             shutil.copytree(command[1], command[2], dirs_exist_ok=True)
         elif name == 'update-cli':
             assert '--defer-install' not in command
+            assert '--interactive' in command  # Permit native authorization after the user's install action.
             (target / 'version').write_text('new')
         elif name == 'KnowledgeDistiller':
             assert '--check-runtime' in command
@@ -219,3 +220,16 @@ def test_installation_lock_blocks_second_helper_without_app_or_db_mutation(insta
         with (state.data / '.update.lock').open('a') as contender:
             with pytest.raises(BlockingIOError):
                 fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_helper_refuses_internal_data_even_for_explicit_full_update(installation):
+    state = installation
+    plan = json.loads(state.plan.read_text())
+    plan['info']['bundle'] = str(state.data)
+    plan['asset_name'] = 'update.zip'
+    state.plan.write_text(json.dumps(plan))
+    before = state.database.read_bytes()
+    with pytest.raises(installer.UpdateError, match='数据目录位于程序目录内'):
+        installer.run(state.plan)
+    assert state.events == []
+    assert state.database.read_bytes() == before

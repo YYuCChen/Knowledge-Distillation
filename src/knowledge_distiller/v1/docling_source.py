@@ -99,6 +99,13 @@ class DoclingSourceConverter:
 
 def _bundled_artifacts():
     if not getattr(sys, "frozen", False):
+        import os
+        explicit = os.environ.get('KNOWLEDGE_DISTILLER_DOCLING_MODELS')
+        if explicit:
+            root = Path(explicit).resolve()
+            if not (root / 'manifest.json').is_file():
+                raise DoclingSourceError('docling_runtime_unavailable')
+            return root
         return None
     root = Path(sys._MEIPASS) / "docling-models"
     if not (root / "manifest.json").is_file():

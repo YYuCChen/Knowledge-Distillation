@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 
 FILE_KINDS = frozenset({'markdown', 'pdf', 'epub'})
@@ -55,18 +56,20 @@ def retain_copy(data_root: Path, kind: str, key: str, label: str, content: bytes
                 output.write(content)
                 output.flush()
                 os.fsync(output.fileno())
-                os.fchmod(output.fileno(), 0o444)
+                if sys.platform != 'win32':
+                    os.fchmod(output.fileno(), 0o444)
             try:
                 os.link(temporary, target)
             except FileExistsError:
                 pass
             # Existing files are never overwritten, even after a failed DB commit.
             read_copy(data_root, kind, key, label)
-            directory = os.open(target.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            if sys.platform != 'win32':
+                directory = os.open(target.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
         finally:
             temporary.unlink(missing_ok=True)
     except OSError as error:
@@ -78,7 +81,7 @@ def open_copy(data_root: Path, kind: str, key: str, label: str) -> None:
     read_copy(data_root, kind, key, label)
     target = copy_path(data_root, kind, key, label)
     try:
-        subprocess.run(['/usr/bin/open', str(target)], check=True, capture_output=True, timeout=10)
+        _open(target)
     except (OSError, subprocess.SubprocessError) as error:
         raise SourceCopyError('系统未能打开原文件副本，请检查该文件格式的默认应用。') from error
 
@@ -89,6 +92,13 @@ def open_directory(data_root: Path) -> None:
         if root.is_symlink():
             raise SourceCopyError('副本目录被替换，不能安全打开。')
         root.mkdir(parents=True, exist_ok=True)
-        subprocess.run(['/usr/bin/open', str(root)], check=True, capture_output=True, timeout=10)
+        _open(root)
     except (OSError, subprocess.SubprocessError) as error:
         raise SourceCopyError('未能打开原文件副本目录，请检查应用数据目录。') from error
+
+
+def _open(path: Path) -> None:
+    if sys.platform == 'win32':
+        os.startfile(str(path))
+    else:
+        subprocess.run(['/usr/bin/open', str(path)], check=True, capture_output=True, timeout=10)

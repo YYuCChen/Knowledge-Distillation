@@ -215,9 +215,10 @@ def main(argv=None):
     worker = app.config['KNOWLEDGE_DISTILLER_WORKER']
 
     def begin_install():
-        from .updates import UpdateError
+        from .updates import UpdateError, validate_install_paths
         import subprocess
         import shutil
+        validate_install_paths(paths.data_root, updates.info['bundle'])
         if app.extensions['qwen_component'].status()['busy']:
             raise UpdateError('Qwen 组件正在安装，请完成后再更新应用。')
         if not worker.reserve_for_update():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import sys
 
 from flask import Blueprint, current_app, redirect, render_template, request, url_for
 
@@ -143,6 +144,7 @@ def settings_blueprint(service: SettingsService) -> Blueprint:
                                      'host': address.host, 'url': address.url}
         return render_template(
             "settings.html",
+            windows_runtime=sys.platform == "win32",
             settings=view,
             reading_style_state=state(view.get('vault',{}).get('path')),
             feishu=current_app.extensions['feishu'].status() if 'feishu' in current_app.extensions else None,

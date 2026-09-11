@@ -1,0 +1,44 @@
+name: Windows source regressions
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: windows-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    if: github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      PYTHONPATH: src;.
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated test dependencies
+        run: python -m pip install 'pytest>=8.3,<9' 'Flask>=3.1,<4' 'PyYAML>=6,<7' 'jsonschema>=4.23,<5' 'httpx>=0.27,<1' 'pycryptodome>=3.20,<4' 'Pillow>=11,<13' 'markdown-it-py>=4,<5' 'pypdf>=6,<7' 'cryptography==50.0.1' setuptools packaging
+      - name: Native lifecycle, credentials and update regressions
+        run: >-
+          python -m pytest -q --junitxml=windows-tests.xml
+          tests/v1/test_windows_12_interfaces.py tests/v1/test_windows_12_updates.py
+          tests/v1/test_windows_delta.py tests/v1/test_windows_interfaces.py
+          tests/v1/test_windows_lifecycle.py tests/v1/test_windows_local_secrets.py
+          tests/v1/test_windows_release.py tests/v1/test_windows_update_installer.py
+          tests/v1/test_windows_version_metadata.py tests/v1/test_main.py
+          tests/test_build_job.py tests/test_dual_build.py tests/test_prepare_windows_feed.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-test-results
+          path: windows-tests.xml
+          retention-days: 3
+          if-no-files-found: ignore

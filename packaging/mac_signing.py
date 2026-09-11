@@ -21,6 +21,18 @@ def version_info(product, build):
     return {'CFBundleShortVersionString': product, 'CFBundleVersion': build}
 
 
+def update_policy(signing_config, update_config, *, manual=False):
+    """Automatic replacement requires stable signing and an authenticated feed."""
+    stable = signing_config.get('identity', '-') != '-'
+    if stable:
+        requirement('local.validation', signing_config.get('certificate_sha1', ''))
+    enabled = stable and bool(update_config) and not manual
+    if enabled and not (update_config.get('public_key') and update_config.get('feed_url')):
+        raise ValueError('自动更新需要签名公钥和更新源')
+    return {'KDManualUpdateOnly': not enabled,
+            'KDCodeSigningMode': 'local-certificate' if stable else 'ad-hoc'}
+
+
 def requirement(identifier, certificate):
     if not re.fullmatch(r'[A-Za-z0-9_.-]+', identifier) or not re.fullmatch(r'[a-fA-F0-9]{40}', certificate):
         raise ValueError('签名标识或证书 SHA1 格式无效')
@@ -86,7 +98,11 @@ def sign_bundle(app, config=None, *, run=subprocess.run):
                     raise subprocess.CalledProcessError(metadata.returncode, metadata.args, metadata.stdout, metadata.stderr)
                 match = re.search(rb'^Identifier=(.+)$', metadata.stderr, re.MULTILINE)
                 bundle_info = next((p for p in (target/'Contents/Info.plist', target/'Resources/Info.plist') if p.is_file()), None) if target.is_dir() else None
-                if bundle_info:
+                if target.relative_to(app).as_posix() == 'Contents/MacOS/update-helper':
+                    # PyInstaller's ad-hoc identifier embeds the build UUID.
+                    # Keep this executable's identity stable across updates.
+                    identifier = 'local.knowledge-distiller.update-helper'
+                elif bundle_info:
                     identifier = plistlib.loads(bundle_info.read_bytes())['CFBundleIdentifier']
                 elif match and re.fullmatch(rb'[A-Za-z0-9_.-]+', match[1]):
                     identifier = match[1].decode()

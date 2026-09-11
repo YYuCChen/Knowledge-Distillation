@@ -40,3 +40,7 @@ vault/
 *.zip
 *.dmg
 *.app/
+
+# Disposable Windows build inputs and candidate outputs
+.windows-build/
+.venv-windows/

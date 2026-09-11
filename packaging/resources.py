@@ -9,7 +9,7 @@ def application_datas(project: Path) -> list[tuple[str, str]]:
     patterns = config['tool']['setuptools']['package-data']['knowledge_distiller']
     package = project / 'src' / 'knowledge_distiller'
     files = {path for pattern in patterns for path in package.glob(pattern) if path.is_file()}
-    return [(str(path), str(Path('knowledge_distiller') / path.relative_to(package).parent))
+    return [(str(path), (Path('knowledge_distiller') / path.relative_to(package).parent).as_posix())
             for path in sorted(files)]
 
 
@@ -30,5 +30,5 @@ def opencli_datas(root: Path) -> list[tuple[str, str]]:
     for folder in ('dist', 'clis', 'node_modules'):
         files.update(path for path in (root / folder).rglob('*') if path.is_file()
                      and not (folder == 'dist' and path.name.endswith(('.test.js', '.map', '.d.ts'))))
-    return [(str(path), str(Path('opencli') / path.relative_to(root).parent))
+    return [(str(path), (Path('opencli') / path.relative_to(root).parent).as_posix())
             for path in sorted(files)]

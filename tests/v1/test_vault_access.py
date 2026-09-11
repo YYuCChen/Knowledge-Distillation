@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 from pathlib import Path
 import subprocess
 
@@ -12,7 +14,8 @@ from .test_settings import service
 
 
 def registry(home, entries):
-    path=home/'Library/Application Support/obsidian/obsidian.json'
+    path=(home/'AppData/Roaming/obsidian/obsidian.json' if sys.platform=='win32'
+          else home/'Library/Application Support/obsidian/obsidian.json')
     path.parent.mkdir(parents=True,exist_ok=True)
     path.write_text(json.dumps({'vaults':entries}))
     return path
@@ -20,6 +23,7 @@ def registry(home, entries):
 
 def test_registration_refresh_and_same_named_vault(tmp_path,monkeypatch):
     monkeypatch.setattr(Path,'home',classmethod(lambda cls:tmp_path))
+    monkeypatch.setenv('APPDATA',str(tmp_path/'AppData/Roaming'))
     first=tmp_path/'first/Vault';first.mkdir(parents=True)
     second=tmp_path/'second/Vault';second.mkdir(parents=True)
     note=first/'原文.md';note.write_text('不可改写')
@@ -36,6 +40,7 @@ def test_registration_refresh_and_same_named_vault(tmp_path,monkeypatch):
 
 def test_file_missing_invalid_path_and_unreadable_registry(tmp_path,monkeypatch):
     monkeypatch.setattr(Path,'home',classmethod(lambda cls:tmp_path))
+    monkeypatch.setenv('APPDATA',str(tmp_path/'AppData/Roaming'))
     vault=tmp_path/'Vault';vault.mkdir()
     assert publication_status(str(vault),'missing.md')['state']=='file_missing'
     assert publication_status(str(vault),'../outside.md')['state']=='invalid_path'
@@ -51,6 +56,7 @@ def test_file_missing_invalid_path_and_unreadable_registry(tmp_path,monkeypatch)
 
 def test_home_rechecks_and_fallback_uses_original_publication(tmp_path,monkeypatch):
     monkeypatch.setattr(Path,'home',classmethod(lambda cls:tmp_path))
+    monkeypatch.setenv('APPDATA',str(tmp_path/'AppData/Roaming'))
     store=Store(tmp_path/'app.sqlite3');app=create_app(store,object());client=app.test_client()
     item=_complete_item(store,tmp_path)
     row=store.item_bundle(item);original=row['published_vault'];relative=row['published_path']
@@ -62,8 +68,11 @@ def test_home_rechecks_and_fallback_uses_original_publication(tmp_path,monkeypat
     assert 'obsidian://open' not in page
     calls=[]
     monkeypatch.setattr('knowledge_distiller.v1.vault_access.subprocess.run',lambda args,**kwargs:calls.append(args))
+    monkeypatch.setattr('knowledge_distiller.v1.vault_access.subprocess.Popen',lambda args,**kwargs:calls.append(args))
+    if sys.platform=='win32':
+        monkeypatch.setattr('knowledge_distiller.v1.vault_access.os.startfile',lambda path:calls.append(['explorer.exe',path]))
     assert client.post(f'/items/{item}/open-publication/file').status_code==302
-    assert calls[-1]==['/usr/bin/open','-R',str(Path(original,relative).resolve())]
+    assert calls[-1]==(['explorer.exe','/select,',str(Path(original,relative).resolve())] if sys.platform=='win32' else ['/usr/bin/open','-R',str(Path(original,relative).resolve())])
     registry(tmp_path,{'old':{'path':original}})
     assert 'obsidian://open?vault=old' in client.get('/').text
     assert Path(original,relative).read_bytes()==before
@@ -74,7 +83,7 @@ def test_home_rechecks_and_fallback_uses_original_publication(tmp_path,monkeypat
     assert '注意力' in page
     assert client.post(f'/items/{item}/open-publication/file').status_code==400
     assert client.post(f'/items/{item}/open-publication/folder').status_code==302
-    assert calls[-1]==['/usr/bin/open',str(Path(original).resolve())]
+    assert calls[-1]==(['explorer.exe',str(Path(original).resolve())] if sys.platform=='win32' else ['/usr/bin/open',str(Path(original).resolve())])
     assert store.item_bundle(item)['published_vault']==original
 
 

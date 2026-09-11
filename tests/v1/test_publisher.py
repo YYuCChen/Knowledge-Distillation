@@ -134,10 +134,11 @@ def test_vault_switch_cannot_redirect_an_existing_publication(tmp_path: Path, mo
     store.set_setting("vault_path", str(other))
 
     import json
-    registry = tmp_path / 'Library/Application Support/obsidian/obsidian.json'
+    registry = tmp_path / ('AppData/Roaming/obsidian/obsidian.json' if __import__('sys').platform=='win32' else 'Library/Application Support/obsidian/obsidian.json')
     registry.parent.mkdir(parents=True)
     registry.write_text(json.dumps({'vaults': {'original-id': {'path': str(original)}, 'other-id': {'path': str(other)}}}))
     monkeypatch.setattr(Path, 'home', classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv('APPDATA',str(tmp_path/'AppData/Roaming'))
     page = create_app(store, object()).test_client().get("/")
 
     assert "vault=original-id&amp;file=" in page.text

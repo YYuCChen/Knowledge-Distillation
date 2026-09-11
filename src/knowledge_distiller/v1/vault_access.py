@@ -3,11 +3,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 from urllib.parse import quote
 
 
 def vault_registration(vault):
-    registry = Path.home() / 'Library/Application Support/obsidian/obsidian.json'
+    registry = (Path(os.environ.get('APPDATA', Path.home() / 'AppData/Roaming')) / 'obsidian/obsidian.json'
+                if sys.platform == 'win32' else Path.home() / 'Library/Application Support/obsidian/obsidian.json')
     try:
         data = json.loads(registry.read_text(encoding='utf-8'))
         entries = data.get('vaults', {})
@@ -87,7 +89,14 @@ def open_saved_location(vault_path, published_path=None, *, reveal=False):
     if target is None:
         raise ValueError('原保存位置不可用，请检查文件或磁盘；已有归档记录保持不变。')
     try:
-        subprocess.run(['/usr/bin/open', *(['-R'] if reveal else []), str(target)],
-                       check=True, capture_output=True, timeout=10)
+        if sys.platform == 'win32':
+            if reveal:
+                subprocess.Popen(['explorer.exe', '/select,', str(target)],
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                os.startfile(str(target))
+        else:
+            subprocess.run(['/usr/bin/open', *(['-R'] if reveal else []), str(target)],
+                           check=True, capture_output=True, timeout=10)
     except (OSError, subprocess.SubprocessError) as error:
-        raise ValueError('系统未能打开保存位置，请在 Finder 中检查该目录。') from error
+        raise ValueError('系统未能打开保存位置，请在文件管理器中检查该目录。') from error

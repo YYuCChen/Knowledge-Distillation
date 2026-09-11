@@ -5,6 +5,7 @@ import logging
 import re
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
@@ -545,6 +546,12 @@ class AuthorizedDouyinSession:
 
 
 def choose_vault() -> Path | None:
+    if sys.platform == 'win32':
+        from .desktop_paths import choose_windows_folder
+        try:
+            return choose_windows_folder()
+        except OSError as error:
+            raise SettingsError("vault_picker_failed") from error
     result = subprocess.run(
         [
             "/usr/bin/osascript",

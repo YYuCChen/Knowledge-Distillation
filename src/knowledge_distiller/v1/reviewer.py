@@ -4,6 +4,7 @@ import json
 import logging
 import hashlib
 import os
+import tempfile
 from pathlib import Path
 from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
@@ -67,17 +68,19 @@ class ReviewBinding:
         if self.record_path is not None:
             record = {"identity": self.identity(primary_text), "text": text, "source_range": self.source_range}
             target = self.record_path
-            temp = target.with_suffix(".tmp")
+            temp = None
             try:
-                fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-                with os.fdopen(fd, "w") as output:
+                fd, name = tempfile.mkstemp(prefix=target.stem + '-', suffix='.tmp', dir=target.parent)
+                temp = Path(name)
+                with os.fdopen(fd, "w", encoding='utf-8') as output:
                     json.dump(record, output, ensure_ascii=False)
                     output.flush(); os.fsync(output.fileno())
                 os.replace(temp, target)
             except OSError as error:
                 raise ReviewRuntimeFailure("review_checkpoint_unavailable") from error
             finally:
-                temp.unlink(missing_ok=True)
+                if temp is not None:
+                    temp.unlink(missing_ok=True)
         return ReviewRuntimeResult(text, "end_turn")
 
 
@@ -136,7 +139,7 @@ class RecordedReviewer(FaithfulReviewAdapter):
         path = binding.record_path
         if path.is_file() and not path.is_symlink():
             try:
-                record = json.loads(path.read_text())
+                record = json.loads(path.read_text(encoding='utf-8'))
                 if record.get("identity") == binding.identity(recovery.text.strip()):
                     class Cached:
                         def complete(self, primary_text):

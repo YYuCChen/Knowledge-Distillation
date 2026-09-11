@@ -34,14 +34,15 @@ def test_frozen_opencli_uses_bundle_without_global_install(tmp_path,monkeypatch)
     from knowledge_distiller.v1.opencli_session import read_opencli
     import knowledge_distiller.v1.opencli_session as module
     page=tmp_path/'opencli/dist/src/browser/page.js';page.parent.mkdir(parents=True);page.write_text('')
+    node=tmp_path/'bin/node';node.parent.mkdir();node.write_bytes(b'candidate-node')
     monkeypatch.setattr(sys,'frozen',True,raising=False);monkeypatch.setattr(sys,'_MEIPASS',str(tmp_path),raising=False)
-    monkeypatch.setattr(module.shutil,'which',lambda name:'/bundled/node' if name=='node' else None)
+    monkeypatch.setattr(module.shutil,'which',lambda name:None)
     calls=[]
     def run(args,**kwargs):
         calls.append(args);return subprocess.CompletedProcess(args,0,'{"ok":true}','')
     monkeypatch.setattr(module.subprocess,'run',run)
     assert read_opencli('xpost','x','https://x.com/a/status/1','test')=={'ok':True}
-    assert calls[0][0]=='/bundled/node' and calls[0][2]==str(tmp_path/'opencli')
+    assert calls[0][0]==str(node) and calls[0][2]==str(tmp_path/'opencli')
 
 
 def test_application_shutdown_closes_owned_browser_sessions(tmp_path, monkeypatch):

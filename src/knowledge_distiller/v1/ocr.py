@@ -79,7 +79,7 @@ class PaddleOcrRunner:
         return _parse(results, width, height)
 
 
-def _load_predictor():
+def _load_predictor(*, artifacts=None):
     try:
         for distribution, expected in (("paddleocr", OCR_VERSION),
                                        ("paddlex", PADDLEX_VERSION),
@@ -93,10 +93,25 @@ def _load_predictor():
     except (ImportError, PackageNotFoundError, OSError) as error:
         raise OcrError("ocr_runtime_unavailable") from error
     try:
+        bundled = {}
+        if sys.platform == 'win32':
+            # Paddle 3.3.0 MKLDNN cannot convert this PP-OCRv6 PIR attribute on
+            # the verified Windows CPU; keep Paddle's native CPU executor.
+            bundled['engine_config'] = {'run_mode': 'paddle', 'cpu_threads': 2}
+        if getattr(sys, 'frozen', False):
+            from pathlib import Path
+            artifacts = Path(sys._MEIPASS) / 'paddle-models'
+        if artifacts is not None:
+            from pathlib import Path
+            root = Path(artifacts)
+            if not all((root / name / 'inference.yml').is_file() for name in (DETECTION_MODEL, RECOGNITION_MODEL)):
+                raise OcrError('ocr_model_unavailable')
+            bundled.update(text_detection_model_dir=str(root / DETECTION_MODEL),
+                           text_recognition_model_dir=str(root / RECOGNITION_MODEL))
         return PaddleOCR(text_detection_model_name=DETECTION_MODEL,
                          text_recognition_model_name=RECOGNITION_MODEL,
                          use_doc_orientation_classify=False, use_doc_unwarping=False,
-                         use_textline_orientation=False, device="cpu")
+                         use_textline_orientation=False, device="cpu", **bundled)
     except (ImportError, DependencyError) as error:
         raise OcrError("ocr_runtime_unavailable") from error
     except Exception as error:

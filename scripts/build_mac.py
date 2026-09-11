@@ -17,6 +17,7 @@ parser.add_argument('--output',type=Path,required=True)
 parser.add_argument('--version', required=True, help='递增构建号 YYYY.MM.DD.N')
 parser.add_argument('--product-version', default='1.1')
 parser.add_argument('--signing-config', type=Path, help='显式本地证书 identity/certificate_sha1；省略则仅 ad-hoc 手动候选')
+parser.add_argument('--manual-update-only', action='store_true', help='显式构建仅手动更新候选；正式稳定签名版本默认启用差量安装')
 parser.add_argument('--sparkle-sdk',type=Path)
 parser.add_argument('--update-config',type=Path,help='公钥、更新源；隔离验收可指定test_data_root')
 parser.add_argument('--docling-models',type=Path,required=True,help='预下载并带 manifest.json 的完整 Docling 模型目录')
@@ -72,12 +73,13 @@ try:
         runpy.run_path(str(project/'packaging/sparkle.py'))['attach'](app,args.sparkle_sdk,config,project)
         manifest['update_configuration']=config
     signing_config = json.loads(args.signing_config.read_text()) if args.signing_config else {}
-    # Automatic replacement stays gated until the real three-generation TCC test.
+    # Keep ad-hoc builds manual; stable signed releases support the updater.
     import plistlib
     info_path = app/'Contents/Info.plist'
     info = plistlib.loads(info_path.read_bytes())
-    info['KDManualUpdateOnly'] = True
-    info['KDCodeSigningMode'] = 'local-certificate' if signing_config.get('identity', '-') != '-' else 'ad-hoc'
+    info.update(signing['update_policy'](signing_config, config if args.sparkle_sdk else {},
+                                          manual=args.manual_update_only))
+    manifest['manual_update_only'] = info['KDManualUpdateOnly']
     info_path.write_bytes(plistlib.dumps(info))
     manifest['code_signing'] = signing['sign_bundle'](app, signing_config)
     subprocess.run(['/usr/bin/codesign','--verify','--deep','--strict',str(app)],check=True)

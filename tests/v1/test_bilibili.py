@@ -207,7 +207,9 @@ def test_metadata_process_deadline_is_typed_and_has_no_browser_credentials(monke
         assert kwargs['start_new_session'] is True
         return Process()
     monkeypatch.setattr(bilibili.subprocess,'Popen',popen)
-    monkeypatch.setattr(bilibili.os,'killpg',lambda pid,sig:killed.append(pid))
+    monkeypatch.setattr(bilibili.sys,'platform','darwin')
+    monkeypatch.setattr(bilibili.signal,'SIGKILL',9,raising=False)
+    monkeypatch.setattr(bilibili.os,'killpg',lambda pid,sig:killed.append(pid),raising=False)
     with pytest.raises(BilibiliSourceError,match='bilibili_timeout'):
         bilibili._run_worker({'url':f'https://www.bilibili.com/video/{KEY}/'},3)
     assert killed==[12345]
