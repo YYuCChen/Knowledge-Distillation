@@ -30,23 +30,23 @@
 
 ### 下载与开始使用
 
-- **当前公开版：V1.1**（构建 `2026.09.11.8`）。以下说明以已发布版本为准，具体更新见版本记录。
-- **Mac**：[下载 Apple Silicon 安装包](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.11.8/KnowledgeDistiller-2026.09.11.8-macOS-arm64.zip)，约 1.56GB，要求 macOS 14+。解压后将应用放入「应用程序」再打开；不支持 Intel Mac。
-- **Windows**：[下载 x64 安装包](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.11.8/KnowledgeDistiller-2026.09.11.8-Windows-x64.zip)，约 1.89GB。全部解压到可写文件夹，运行 `KnowledgeDistiller.exe`；不要只复制 EXE。已验证 Windows 10 22H2，Windows 11 与 ARM64 尚未验证。
+- **当前公开版：V1.1**（构建 `2026.09.11.16`）。以下说明以已发布版本为准，具体更新见版本记录。
+- **Mac**：[下载 Apple Silicon 安装包](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.11.8/KnowledgeDistiller-2026.09.11.16-macOS-arm64.zip)，约 1.56GB，要求 macOS 14+。解压后将应用放入「应用程序」再打开；不支持 Intel Mac。
+- **Windows**：[下载 x64 安装包](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.11.8/KnowledgeDistiller-2026.09.11.16-Windows-x64.zip)，约 1.93GB。全部解压到可写文件夹，运行 `KnowledgeDistiller.exe`；不要只复制 EXE。已验证 Windows 10 22H2，Windows 11 与 ARM64 尚未验证。
 - **首次安全提示**：Mac 当前未公证，Windows 未作发行者代码签名。请核对下载来源，按系统提示处理，不关闭整体安全防护；Mac 可参考 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。GitHub 的 `Source code` 压缩包不是应用安装包。
 - **首次配置**：在设置中选择已在 Obsidian 打开过的 Vault，配置模型连接，再用一段短文本试一次蒸馏。按所用功能准备 Chrome、Codex、Obsidian 及自己的账号，无需另搭 Python 环境。
 - **按需启用**：处理有声内容前配置语音识别，可选本地 Qwen 或云端豆包；Qwen 需主动下载安装并保存启用。内容平台连接、飞书机器人按需配置。
 
 应用启动后在浏览器中使用，可在设置中自定义本地访问名称和固定端口。Windows 服务窗口需保持运行；只关闭网页不会退出后台。
 
-V1.1 优化了长内容疑点核对与保存速度、候选解释布局、飞书图片和图文确认处理，以及 Mac 更新说明与包大小展示。两端离线 OCR、PDF、EPUB 样本已检查，PDF 结构识别可能不同；Windows SSH 环境下 B 站超时清理可能延迟，普通桌面场景仍待验证。
+V1.1 优化了长内容疑点核对与保存速度、候选解释布局、飞书图片和图文确认处理，并为 Mac、Windows 增加签名差量升级：检查更新、下载差量、安装并重启，展示实际下载大小。两端离线 OCR、PDF、EPUB 样本已检查，PDF 结构识别可能不同；Windows SSH 环境下 B 站超时清理可能延迟，普通桌面场景仍待验证。
 
 ### 数据、费用与更新
 
 - **本地保存**：应用记录保存在本机 SQLite；Obsidian 保存来源型笔记。AI 新知和相关个人判断当前保留在应用内，不自动写入 Obsidian，也不做双向同步。
 - **本地优先不等于全离线**：已有内容浏览与搜索在本机完成；获取网络材料、使用云模型或飞书需要联网。云端处理会将任务所需材料交给对应服务，账号、额度及费用由你自行管理。
 - **备份两处**：同时备份应用数据与 Vault。Mac 数据位于 `~/Library/Application Support/Knowledge Distiller/`，Windows 位于 `%LOCALAPPDATA%\Knowledge Distiller`；凭据迁移可能需要重新配置。
-- **升级先看说明**：Mac 可在设置中检查并下载更新，当前发行仍需手动替换完整包，不承诺自动安装；Windows 使用下载完整 ZIP 的手动更新方式。更新前等待任务结束、退出旧服务并备份，不删除数据或 Vault，不同时运行两个版本，不用旧版打开新版数据。
+- **差量升级**：此 V1.1 构建的 Mac、Windows 均可在设置中检查更新、下载匹配的差量包、安装并重启。差量不可用或基础文件不匹配时，需要明确选择完整更新，不会静默下载完整包。先前未启用自动安装的版本需完整安装本次 V1.1 一次，之后使用差量升级。更新前等待任务结束并备份数据与 Vault；首次安装仍需完整包，不要同时运行两个版本，也不要用旧版打开新版数据。 Windows 恢复时若旧备份被其他程序占用，需解除占用后重新启动；此时已接受更新后的新数据不会回退。
 
 ### 关于项目
 
@@ -99,7 +99,7 @@ V1.1 优化了长内容疑点核对与保存速度、候选解释布局、飞书
 | 来源型笔记 | Markdown、Obsidian | 保存可独立阅读的观点、依据与来源文本 |
 | 文档与图片 | Docling；Mac 平台 OCR 使用 Apple Vision，Windows 使用 PaddleOCR | 恢复正文、结构与图片文字 |
 | 语音与生成 | Qwen3-ASR／豆包；用户配置的 LLM 连接 | 音频转写、观点提炼与知识整理 |
-| 桌面发行 | PyInstaller；Mac 更新链路使用 Sparkle 和更新签名 | 打包运行依赖、提供安装与更新入口 |
+| 桌面发行 | PyInstaller；Mac 使用 Sparkle，Windows 重建变更文件，两端校验更新签名 | 打包运行依赖、提供安装与更新入口 |
 
 SQLite 与 Markdown 分开，是因为结构化关系和独立阅读有不同需要。笔记可以脱离应用打开，但仅靠笔记无法恢复全部新知、判断与任务状态，因此备份需要同时保留应用数据和 Vault。
 
