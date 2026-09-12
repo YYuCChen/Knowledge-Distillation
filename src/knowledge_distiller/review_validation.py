@@ -139,6 +139,11 @@ def validate_response(source, raw):
         shift += len(row['replacement']) - (end-start)
 
     concerns = []
+    for start, end, index, row in located:
+        if row['meaning_may_change']:
+            shift = sum(len(r['replacement'])-(b-a) for a,b,_,r in accepted if b <= start)
+            concerns.append(ReviewConcern(start+shift,end+shift,row['original_text'],row['reason'],True,
+                (row['replacement'],)))
     blocks = SequenceMatcher(None, proposed, result, autojunk=False).get_matching_blocks()
     for index, issue in enumerate(payload['issues']):
         if isinstance(issue, dict) and issue.get('kind') in {'content_relevance', 'editorial', 'opinion'}:

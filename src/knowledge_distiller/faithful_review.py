@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from enum import StrEnum
 from typing import Mapping, Protocol
@@ -190,7 +190,23 @@ class FaithfulReviewAdapter:
             try:
                 corrected = retry(primary_text, candidate.diagnostics)
                 if corrected.stop_reason == 'end_turn':
-                    candidate = validate_response(primary_text, corrected.text)
+                    revised = validate_response(primary_text, corrected.text)
+                    # A formatting retry has no new source evidence with which
+                    # to silently resolve an already detected critical issue.
+                    retained = list(revised.concerns)
+                    for issue in candidate.concerns:
+                        if not issue.meaning_may_change or issue in retained:
+                            continue
+                        if revised.text == candidate.text:
+                            retained.append(issue)
+                        else:
+                            retained.append(ReviewConcern(0,len(revised.text),revised.text,
+                                '纠正输出后仍需核对原来源：'+issue.reason,True))
+                    retained.sort(key=lambda issue: issue.start_offset)
+                    if any(a.end_offset > b.start_offset for a,b in zip(retained,retained[1:])):
+                        retained = [ReviewConcern(0,len(revised.text),revised.text,
+                            '原文已保留；纠正输出后关键疑点仍需核对原来源。',True)]
+                    candidate = replace(revised,concerns=tuple(retained))
             except (ReviewRuntimeFailure, ReviewRuntimeUnavailable):
                 pass  # The validated baseline is already available.
         return FaithfulReview.succeeded(candidate)

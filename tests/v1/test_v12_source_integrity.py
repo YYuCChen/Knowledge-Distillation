@@ -251,3 +251,11 @@ def test_multiple_evidence_spans_checked_independently():
     spans[1]['start']-=1
     result=validate_response(source,proposal(source.replace('transcripton','transcription'),[row]))
     assert result.text==source and not result.repairs
+
+
+def test_critical_repair_cannot_silently_become_advisory():
+    source='take 15 units'
+    row=repair('15','50',source);row['meaning_may_change']=True
+    result=validate_response(source,proposal('take 50 units',[row]))
+    assert result.text==source and result.concerns[0].text=='15'
+    assert result.concerns[0].meaning_may_change
