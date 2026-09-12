@@ -106,10 +106,9 @@ class RecordedReviewer(FaithfulReviewAdapter):
         directory.mkdir(parents=True, exist_ok=True)
         if len(text) <= 2400:
             result = self._review_cached(recovery, replace(self.binding, record_path=directory / "review-response.json"))
-            if result.candidate is not None and leading:
+            if result.candidate is not None:
                 candidate = result.candidate
-                repairs = tuple({**r, 'source_start': r['source_start']+leading,
-                                 'source_end': r['source_end']+leading} for r in candidate.repairs)
+                repairs = tuple(_bind_source(r,recovery.text,leading) for r in candidate.repairs)
                 return FaithfulReview.succeeded(replace(candidate, repairs=repairs))
             return result
         parts = []
@@ -137,8 +136,8 @@ class RecordedReviewer(FaithfulReviewAdapter):
             diagnostics.extend({**d, "segment": index, "source_range": [start, end]} for d in candidate.diagnostics)
             concerns.extend(replace(c, start_offset=c.start_offset+offset, end_offset=c.end_offset+offset) for c in candidate.concerns)
             trim = len(piece.text) - len(piece.text.lstrip())
-            repairs.extend({**r, 'start': r['start']+offset, 'end': r['end']+offset,
-                            'source_start': r['source_start']+leading+start+trim, 'source_end': r['source_end']+leading+start+trim} for r in candidate.repairs)
+            repairs.extend({**_bind_source(r,recovery.text,leading+start+trim),
+                            'start': r['start']+offset, 'end': r['end']+offset} for r in candidate.repairs)
             output.append(candidate.text)
             offset += len(candidate.text) + 2
         return FaithfulReview.succeeded(FaithfulReviewCandidate('\n\n'.join(output), tuple(concerns), tuple(repairs), tuple(diagnostics)))
@@ -174,6 +173,16 @@ class RecordedReviewer(FaithfulReviewAdapter):
             except OSError:
                 return FaithfulReview.failed(ReviewFailure.CHECKPOINT_UNAVAILABLE)
         return result
+
+
+def _bind_source(repair, original, offset):
+    """Promote segment-local positions and their version to the full baseline."""
+    return {**repair, 'segment_source_sha256': repair.get('source_sha256'),
+            'source_sha256': hashlib.sha256(original.encode()).hexdigest(),
+            'source_start': repair['source_start']+offset,
+            'source_end': repair['source_end']+offset,
+            'evidence_spans': [{**s, 'start': s['start']+offset, 'end': s['end']+offset}
+                               for s in repair.get('evidence_spans', [])]}
 
 
 _REVIEW_FORMAT = {"type": "json_schema", "name": "faithful_transcript", "strict": True,

@@ -50,5 +50,7 @@ def test_repair_offsets_preserve_full_original_leading_whitespace(tmp_path,prefi
     for _ in range(2):
         result=reviewer.review_in_directory(PrimaryRecovery(original,'zh',()),tmp_path)
         repair,=result.candidate.repairs
+        import hashlib
+        assert repair['source_sha256']==hashlib.sha256(original.encode()).hexdigest()
         assert original[repair['source_start']:repair['source_end']]=='transcripton'
         assert result.candidate.text[repair['start']:repair['end']]=='transcription'
