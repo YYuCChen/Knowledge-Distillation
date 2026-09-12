@@ -126,6 +126,7 @@ class YouTubeSource:
             'captured_at': datetime.now(UTC).isoformat(), 'session_authority': authority,
             'audio_sha256': _digest(destination),
             'captions': _captions(info, work_dir / 'download'),
+            'original_language': info.get('language'),
         }
         # The selected source is audio only; the download may contain video pixels.
         shutil.rmtree(work_dir / 'download')
@@ -216,7 +217,9 @@ def _captions(info, root):
         if not text.startswith('WEBVTT'):
             raise YouTubeSourceError('youtube_caption_incomplete')
         rows.append({'language': language, 'format': 'vtt', 'text': text,
-                     'kind': 'manual' if language in (info.get('subtitles') or {}) else 'automatic'})
+                     'kind': 'manual' if language in (info.get('subtitles') or {}) else 'automatic',
+                     'source_key': info.get('id'),
+                     'translated': 'tlang=' in str(track.get('url') or '')})
     return rows
 
 

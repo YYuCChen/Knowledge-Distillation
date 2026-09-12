@@ -2,9 +2,12 @@
 from io import BytesIO
 from dataclasses import replace
 import platform
+import math
 
 from .ocr import OcrError, OcrResult, decode_image, validate_lines
 
+
+BOUNDARY_TOLERANCE_PIXELS = 1e-4
 
 VISION_REVISION = 3  # Available on the supported macOS 14+ baseline.
 VISION_MODEL = "VNRecognizeTextRequestRevision3"
@@ -52,7 +55,7 @@ def _result(observations, width, height):
         # nil is not a completed blank-image result; an actual empty NSArray is.
         if observations is None:
             raise ValueError
-        texts, scores, polygons, alternatives = [], [], [], []
+        texts, scores, polygons, alternatives, originals = [], [], [], [], []
         for observation in observations:
             candidates = observation.topCandidates_(3)
             if not candidates:
@@ -66,9 +69,16 @@ def _result(observations, width, height):
             # top-left original pixels. Keep the quadrilateral, including skew.
             points = (observation.topLeft(), observation.topRight(),
                       observation.bottomRight(), observation.bottomLeft())
-            polygons.append(tuple((point.x * width, (1 - point.y) * height) for point in points))
+            raw = tuple((point.x * width, (1 - point.y) * height) for point in points)
+            if any(not math.isfinite(v) or v < -BOUNDARY_TOLERANCE_PIXELS
+                   or v > bound + BOUNDARY_TOLERANCE_PIXELS
+                   for x,y in raw for v,bound in ((x,width),(y,height))):
+                raise ValueError
+            polygons.append(tuple((min(width,max(0,x)), min(height,max(0,y))) for x,y in raw))
+            originals.append(raw if raw != polygons[-1] else ())
         lines = validate_lines(texts, scores, polygons, width, height)
-        lines = tuple(replace(line, alternatives=choices) for line, choices in zip(lines, alternatives, strict=True))
+        lines = tuple(replace(line, alternatives=choices, original_polygon=raw)
+                      for line, choices, raw in zip(lines, alternatives, originals, strict=True))
         return OcrResult(width, height, lines, engine="apple_vision",
                          runtime_version=platform.mac_ver()[0],
                          detection_model=VISION_MODEL, recognition_model=VISION_MODEL,

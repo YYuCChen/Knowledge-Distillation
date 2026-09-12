@@ -188,3 +188,32 @@ def test_vision_half_score_alone_does_not_block_correct_text():
         'sha256':hashlib.sha256(content).hexdigest()}],Runner())
     assert fact.uncertainties[0]['status']=='advisory'
     assert lineage['image_ocr'][0]['lines'][0]['confidence']==.5
+
+
+@pytest.mark.parametrize('axis,bound', [('left',0),('right',100),('top',0),('bottom',80)])
+def test_subpixel_boundary_roundoff_is_recorded(axis,bound):
+    epsilon=0.0000021
+    pixels=[(0,0),(100,0),(100,80),(0,80)]
+    adjusted=[]
+    for x,y in pixels:
+        if axis=='left' and x==0: x=-epsilon
+        if axis=='right' and x==100: x=100+epsilon
+        if axis=='top' and y==0: y=-epsilon
+        if axis=='bottom' and y==80: y=80+epsilon
+        adjusted.append((x/100,1-y/80))
+    line=vision_ocr._result([observation(points=adjusted)],100,80).lines[0]
+    assert line.original_polygon
+    assert all(0<=x<=100 and 0<=y<=80 for x,y in line.polygon)
+    assert any(x<0 or x>100 or y<0 or y>80 for x,y in line.original_polygon)
+
+
+@pytest.mark.parametrize('value',[-.001,float('nan'),float('inf'),-float('inf')])
+def test_real_overflow_or_nonfinite_is_not_clamped(value):
+    points=((value/100,.9),(.8,.9),(.8,.6),(value/100,.6))
+    with pytest.raises(ocr.OcrError,match='ocr_invalid_output'):
+        vision_ocr._result([observation(points=points)],100,80)
+
+
+def test_clamping_must_not_make_degenerate_polygon_valid():
+    with pytest.raises(ocr.OcrError,match='ocr_invalid_output'):
+        vision_ocr._result([observation(points=((-1e-9,.9),(0,.9),(0,.6),(-1e-9,.6)))],100,80)

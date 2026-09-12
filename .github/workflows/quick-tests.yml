@@ -29,6 +29,8 @@ jobs:
         run: >-
           python -m pytest -q --junitxml=quick-tests.xml
           tests/v1/test_domain.py tests/v1/test_store.py
+          tests/test_faithful_review.py tests/v1/test_review_resume.py
+          tests/v1/test_v12_source_integrity.py tests/v1/test_vision_ocr.py
           tests/v1/test_mac_signing.py tests/v1/test_confirmation_concurrency.py
           tests/v1/test_local_secrets.py tests/v1/test_feishu_images.py
           tests/v1/test_feishu_actions.py tests/v1/test_ocr_review_policy.py

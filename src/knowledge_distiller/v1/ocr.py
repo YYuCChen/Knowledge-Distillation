@@ -35,6 +35,7 @@ class OcrLine:
     polygon: tuple[tuple[float, float], ...]
     confidence: float
     alternatives: tuple[str, ...] = ()
+    original_polygon: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -212,6 +213,14 @@ def validate_lines(texts, scores, polygons, width, height):
                            - polygon[(i + 1) % len(polygon)][0] * y
                            for i, (x, y) in enumerate(polygon))) / 2
             if area <= 0:
+                raise ValueError
+            # OCR evidence boxes must be convex, nondegenerate boundaries.
+            turns = []
+            for i,(x,y) in enumerate(polygon):
+                bx,by = polygon[(i+1)%len(polygon)]
+                cx,cy = polygon[(i+2)%len(polygon)]
+                turns.append((bx-x)*(cy-by)-(by-y)*(cx-bx))
+            if not (all(t > 0 for t in turns) or all(t < 0 for t in turns)):
                 raise ValueError
             # Preserve the engine's reading order and exact text verbatim.
             lines.append(OcrLine(text, tuple(polygon), score))

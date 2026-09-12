@@ -94,7 +94,7 @@ def make_requests(config, commit, version, product, mac_source, win_source):
         {'name':'zip','command':['ditto','-c','-k','--sequesterRsrc','--keepParent','{attempt}/build/知识蒸馏器.app','{attempt}/KnowledgeDistiller-'+version+'-Mac-arm64.zip']}
     ],artifacts=['*.zip','verification/result.json','build/build-manifest.json'])
     windows = dict(common, source=win_source, env={'PYTHONUTF8':'1','PYTHONIOENCODING':'utf-8','PYTHONPATH':'{source}/src;{source}'},steps=[
-        {'name':'native','command':[win_py,'-m','pytest','-q','tests/v1/test_windows_lifecycle.py','tests/v1/test_windows_version_metadata.py','tests/v1/test_windows_12_updates.py','tests/test_build_job.py','--basetemp','{attempt}/test-data']},
+        {'name':'native','command':[win_py,'-m','pytest','-q','tests/v1/test_v12_source_integrity.py','tests/v1/test_vision_ocr.py','tests/v1/test_windows_lifecycle.py','tests/v1/test_windows_version_metadata.py','tests/v1/test_windows_12_updates.py','tests/test_build_job.py','--basetemp','{attempt}/test-data']},
         {'name':'build','command':[win_py,'scripts/build_windows.py','--output','{attempt}/build','--version',version,'--product-version',product,'--cache-root',config['windows_cache']]},
         {'name':'verify','command':[win_py,'scripts/verify_candidate.py','--platform','windows','--build','{attempt}/build','--output','{attempt}/verification','--version',version,'--commit',commit]},
         {'name':'zip','command':[win_py,'scripts/package_windows.py','--app','{attempt}/build/KnowledgeDistiller','--output','{attempt}/delivery','--version',version,'--cache-root',config['windows_cache'],'--test-report','{attempt}/verification/support.md']}
@@ -119,7 +119,7 @@ def main():
     parser.add_argument('action', choices=['prepare','start','status','collect','cancel'])
     parser.add_argument('--config',type=Path,required=True)
     parser.add_argument('--version',required=True)
-    parser.add_argument('--product-version',default='1.1')
+    parser.add_argument('--product-version',default='1.2')
     parser.add_argument('--commit',default='HEAD')
     parser.add_argument('--retry',action='store_true')
     args=parser.parse_args()

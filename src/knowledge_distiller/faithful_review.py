@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from enum import StrEnum
 from typing import Mapping, Protocol
@@ -31,6 +31,7 @@ class FaithfulReviewCandidate:
     text: str
     concerns: tuple[ReviewConcern, ...]
     repairs: tuple[Mapping[str, object], ...] = ()
+    diagnostics: tuple[Mapping[str, object], ...] = ()
 
 
 class ReviewFailure(StrEnum):
@@ -182,13 +183,32 @@ class FaithfulReviewAdapter:
 
         if result.stop_reason != "end_turn":
             return FaithfulReview.failed(ReviewFailure.INCOMPLETE)
-        candidate = _parse_candidate(result.text)
-        if candidate is None:
-            return FaithfulReview.failed(ReviewFailure.INVALID_OUTPUT)
-        if not _repairs_have_evidence(primary_text, candidate.repairs):
-            return FaithfulReview.failed(ReviewFailure.INVALID_OUTPUT)
-        if not preserves_primary_content(primary_text, candidate.text):
-            return FaithfulReview.failed(ReviewFailure.INSUFFICIENT_COVERAGE)
+        from .review_validation import validate_response
+        candidate = validate_response(primary_text, result.text)
+        retry = getattr(self.binding, 'complete_with_feedback', None)
+        if candidate.diagnostics and callable(retry):
+            try:
+                corrected = retry(primary_text, candidate.diagnostics)
+                if corrected.stop_reason == 'end_turn':
+                    revised = validate_response(primary_text, corrected.text)
+                    # A formatting retry has no new source evidence with which
+                    # to silently resolve an already detected critical issue.
+                    retained = list(revised.concerns)
+                    for issue in candidate.concerns:
+                        if not issue.meaning_may_change or issue in retained:
+                            continue
+                        if revised.text == candidate.text:
+                            retained.append(issue)
+                        else:
+                            retained.append(ReviewConcern(0,len(revised.text),revised.text,
+                                '纠正输出后仍需核对原来源：'+issue.reason,True))
+                    retained.sort(key=lambda issue: issue.start_offset)
+                    if any(a.end_offset > b.start_offset for a,b in zip(retained,retained[1:])):
+                        retained = [ReviewConcern(0,len(revised.text),revised.text,
+                            '原文已保留；纠正输出后关键疑点仍需核对原来源。',True)]
+                    candidate = replace(revised,concerns=tuple(retained))
+            except (ReviewRuntimeFailure, ReviewRuntimeUnavailable):
+                pass  # The validated baseline is already available.
         return FaithfulReview.succeeded(candidate)
 
 
@@ -355,7 +375,7 @@ def _optional_text(value: object) -> str | None:
 
 REVIEW_SYSTEM_PROMPT = """把 Primary ASR 全文忠实整理成连续可读的候选口播，并标出仍需回听才能确定的局部疑点。
 
-可以断句、加标点、分段，删除无语义填充和机械重复，修复全文上下文已唯一确定的普通字面错误。必须保持原讲话顺序、主体、条件、因果、否定、强度、案例、边界、自我修正和作者自身的错误。
+逐字保留来源正文。仅提议有本来源可靠依据的局部拼写修复，并逐条登记；不删除填充词或真实重复，不自行调整具有含义的标点。必须保持原讲话顺序、主体、条件、因果、否定、强度、案例、边界、自我修正和作者自身的错误。
 
 不得摘要、知识蒸馏、生成标题、增加事实或逻辑、用外部常识纠正作者，也不得猜数字、专名、否定、条件或因果。无法安全确定时保留当前字面并登记 issue。
 
@@ -378,3 +398,7 @@ repairs为数组，每项格式：{"original_text":"原始字面","source_occurr
 original_text必须来自当前输入；evidence必须是支持判断的当前输入逐字片段；两个occurrence分别是原字面在输入、修复字面在candidate_text中的零起始出现次序。没有可靠依据不修复。没有修复时repairs为空。
 """
 REVIEW_SYSTEM_PROMPT += REVIEW_POLICY
+
+REVIEW_SYSTEM_PROMPT += "\nV1.2：保留输入逐字正文；每项修改都须登记 repairs。不得删除填充词、重复讲话或仅为语法补词。证据须包含原字面及支持替换的本来源用例；不确定则保留原文。程序从原文应用验收通过的修改。"
+
+REVIEW_SYSTEM_PROMPT += "\n多处依据请使用 evidence_spans 数组，逐项包含原输入 start/end 字符偏移和逐字 text；不能用分号或省略号拼成连续引文。单段依据可用 evidence，并令 evidence_spans=[]。"

@@ -38,17 +38,19 @@ def test_doubao_identity_tracks_resource_and_request_options_without_secrets(tmp
 
 @pytest.mark.parametrize('prefix',['', '普通内容。'*520], ids=['short', 'segmented'])
 def test_repair_offsets_preserve_full_original_leading_whitespace(tmp_path,prefix):
-    original=' \n  '+prefix+'今天在公圆散步。'
+    original=' \n  '+prefix+'transcripton transcription.'
     class Client:
         def complete(self, **kwargs):
             text=json.loads(kwargs['user'].split('\n',1)[1]);repairs=[]
-            if '公圆' in text:
-                repairs=[{'original_text':'公圆','source_occurrence':0,'replacement':'公园','occurrence':0,
-                          'reason':'散步地点支持同音字修复','evidence':'公圆散步','meaning_may_change':False}]
-            return json.dumps({'candidate_text':text.replace('公圆','公园'),'issues':[],'repairs':repairs})
+            if 'transcripton' in text:
+                repairs=[{'original_text':'transcripton','source_occurrence':0,'replacement':'transcription','occurrence':0,
+                          'reason':'散步地点支持同音字修复','evidence':'transcripton transcription.','meaning_may_change':False}]
+            return json.dumps({'candidate_text':text.replace('transcripton','transcription'),'issues':[],'repairs':repairs})
     reviewer=build_reviewer(Client())
     for _ in range(2):
         result=reviewer.review_in_directory(PrimaryRecovery(original,'zh',()),tmp_path)
         repair,=result.candidate.repairs
-        assert original[repair['source_start']:repair['source_end']]=='公圆'
-        assert result.candidate.text[repair['start']:repair['end']]=='公园'
+        import hashlib
+        assert repair['source_sha256']==hashlib.sha256(original.encode()).hexdigest()
+        assert original[repair['source_start']:repair['source_end']]=='transcripton'
+        assert result.candidate.text[repair['start']:repair['end']]=='transcription'

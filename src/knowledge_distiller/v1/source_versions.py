@@ -21,6 +21,8 @@ def snapshot_key(material):
         'captions': metadata.get('captions'),
         'media': media,
     }
+    if 'original_language' in metadata:
+        selected['original_language'] = metadata['original_language']
     return hashlib.sha256(json.dumps(selected, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 

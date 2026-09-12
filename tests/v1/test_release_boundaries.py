@@ -41,7 +41,7 @@ def test_release_resources_include_every_v1_asset_and_no_legacy():
     files = {Path(source) for source, _ in datas}
     package = PROJECT / 'src/knowledge_distiller'
     for folder in ('templates', 'static', 'adapters'):
-        expected = {p for p in (package / 'v1' / folder).rglob('*') if p.is_file()}
+        expected = {p for p in (package / 'v1' / folder).rglob('*') if p.is_file() and '__pycache__' not in p.parts and p.suffix != '.pyc'}
         assert expected <= files
     assert all('legacy' not in Path(source).parts for source, _ in datas)
     assert all(destination.startswith('knowledge_distiller/v1/') for _, destination in datas)

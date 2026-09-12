@@ -15,7 +15,7 @@ import tempfile
 parser=argparse.ArgumentParser(description='构建知识蒸馏器 Mac 发行候选')
 parser.add_argument('--output',type=Path,required=True)
 parser.add_argument('--version', required=True, help='递增构建号 YYYY.MM.DD.N')
-parser.add_argument('--product-version', default='1.1')
+parser.add_argument('--product-version', default='1.2')
 parser.add_argument('--signing-config', type=Path, help='显式本地证书 identity/certificate_sha1；省略则仅 ad-hoc 手动候选')
 parser.add_argument('--manual-update-only', action='store_true', help='显式构建仅手动更新候选；正式稳定签名版本默认启用差量安装')
 parser.add_argument('--sparkle-sdk',type=Path)

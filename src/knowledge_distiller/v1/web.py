@@ -507,7 +507,8 @@ def _home_context(
         _item_view(row, vault_path, store.path.parent) for row in rows if row["state"] == "working"
     )
     waiting = tuple(
-        _item_view(row, vault_path, store.path.parent) for row in rows if row["state"] == "queued"
+        _item_view(row, vault_path, store.path.parent) for row in sorted((r for r in rows if r["state"] == "queued"),
+            key=lambda r: (r["queued_at"] or "", r["item_id"]))
     )
     todo = tuple(
         _item_view(row, vault_path, store.path.parent)
@@ -579,6 +580,7 @@ def _item_view(row, vault_path: str | None, data_root=None) -> dict[str, object]
         "phase": row["phase"],
         "title": payload.get("title") or metadata.get("source_title") or metadata.get("original_description") or row["input_label"] or row["submitted_title"] or LABELS.get(kind, "未知来源") + (" 内容" if kind in {"x", "youtube"} else "内容"),
         "subtitle": payload.get("subtitle") or "",
+        "review_notice": _review_notice(row),
         "summary": payload.get("summary") or "",
         "source": "" if local else author.get("display_name") or "",
         "source_scope": metadata.get('source_scope', ''),
@@ -644,3 +646,10 @@ def _publication_file(vault_path: str | None, published_path: str | None) -> Pat
 
 def _obsidian_url(vault_path: str | None, published_path: str | None) -> str | None:
     return publication_status(vault_path, published_path)['url']
+
+
+def _review_notice(row):
+    lineage = json.loads(row['lineage_json'] or '{}') if 'lineage_json' in row.keys() else {}
+    diagnostics = lineage.get('review_diagnostics', []) + lineage.get('ocr_review_diagnostics', [])
+    count = len({(d.get('segment'), d.get('operation')) for d in diagnostics})
+    return f'已保留原文继续，{count}项修改或段落未采用。' if count else ''
