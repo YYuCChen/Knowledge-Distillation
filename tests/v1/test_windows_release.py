@@ -49,6 +49,7 @@ def test_windows_transcript_reads_utf8(tmp_path, monkeypatch):
     component = QwenComponent(tmp_path)
     monkeypatch.setattr(QwenComponent, 'supported', property(lambda self: True))
     monkeypatch.setattr(component, 'ready', lambda: True)
+    monkeypatch.setattr(component, '_probe_python', lambda *a, **kw: {'version':'3.11.16'})
     def run(command, *args, **kwargs):
         Path(command[-1]).write_text(json.dumps(dict(text='中文转写', language='Chinese',
             finish_reason='eos', truncated=False, chunks=[]), ensure_ascii=False), encoding='utf-8')

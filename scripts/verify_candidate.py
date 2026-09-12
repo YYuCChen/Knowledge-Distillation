@@ -46,6 +46,11 @@ def main():
         env.update(HF_HOME=str(output/'empty-hf'),HF_HUB_OFFLINE='1',PADDLE_PDX_CACHE_HOME=str(output/'empty-paddle'))
         if args.platform=='windows':env.update(PATH=str(Path(os.environ['SystemRoot'])/'System32'),LOCALAPPDATA=str(output/'LocalAppData'))
         else:env['PATH']='/usr/bin:/bin:/usr/sbin:/sbin'
+        helper = app/('Contents/MacOS/update-helper' if args.platform == 'mac' else 'update-helper.exe')
+        subprocess.run([str(helper), '--runtime-report', str(output/'helper-runtime.json')], env=env, cwd=output, check=True, timeout=60)
+        helper_runtime=json.loads((output/'helper-runtime.json').read_text(encoding='utf-8'))
+        assert helper_runtime['frozen'] and helper_runtime['python']['version'] == '3.11.16'
+        report['update_helper_runtime']=helper_runtime
         base=[str(exe),'--data-dir',str(output/'data'),'--no-open']
         with (output/'runtime.log').open('wb') as log:
             command=base+['--check-runtime',str(output/'runtime.json')]

@@ -27,7 +27,9 @@ def source_header(kind,metadata,url):
             try:value=datetime.fromisoformat(published.replace('Z','+00:00'))
             except ValueError:value=parsedate_to_datetime(published)
             if value.tzinfo is not None:
-                right+='<time datetime="'+escape(value.isoformat(),quote=True)+'">'+value.astimezone().strftime('%Y年%m月%d日 %H:%M')+'</time>'
+                local=value.astimezone()
+                label=f'{local.year:04d}年{local.month:02d}月{local.day:02d}日 {local.hour:02d}:{local.minute:02d}'
+                right+='<time datetime="'+escape(value.isoformat(),quote=True)+'">'+label+'</time>'
         except ValueError:pass
     return ['<div class="kd-source-meta"><div class="kd-source-meta-left">'+left+
             '</div><div class="kd-source-meta-right">'+right+'</div></div>','']
