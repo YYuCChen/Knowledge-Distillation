@@ -26,7 +26,7 @@ def ssh_options(config):
 
 
 def remote(config, ps):
-    ps = "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); " + ps
+    ps = "$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='Stop'; $env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); " + ps
     encoded = base64.b64encode(ps.encode('utf-16le')).decode()
     return call(['ssh', *ssh_options(config), config['windows_host'],
                  'powershell.exe -NoProfile -NonInteractive -EncodedCommand ' + encoded])
@@ -133,6 +133,9 @@ def main():
             commit=call(['git','rev-parse',args.commit])
             if previous['commit']!=commit or previous['product_version']!=args.product_version: raise ValueError('Version already assigned to different inputs')
             print(state_path);return
+        probe = 'import platform,sys; assert platform.python_version()=="3.11.16", sys.version; print(platform.python_version())'
+        call([config['mac_python'], '-I', '-c', probe])
+        remote_python(config, probe)
         root.mkdir(parents=True,exist_ok=True)
         commit=call(['git','rev-parse',args.commit])
         if call(['git','status','--porcelain']):raise ValueError('Commit all candidate changes before preparing immutable sources')

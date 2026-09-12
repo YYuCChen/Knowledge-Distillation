@@ -240,6 +240,11 @@ class InstalledQwenRuntime:
 
     def transcribe(self, audio_path: Path) -> QwenRuntimeResult:
         try:
+            from .v1.adapters.python_policy import check_current
+            try:
+                check_current()
+            except RuntimeError as error:
+                raise QwenRuntimeUnavailable from error
             installed_version = version("mlx-qwen3-asr")
             if installed_version != QWEN_RUNTIME_VERSION:
                 raise QwenRuntimeUnavailable

@@ -22,6 +22,7 @@ def main():
     report={'ok':False,'platform':args.platform,'version':args.version,'source_commit':args.commit,'disposable_data':True}
     try:
         manifest=json.loads((build/'build-manifest.json').read_text(encoding='utf-8'))
+        assert manifest['python'] == '3.11.16' and manifest['python_inventory']
         assert manifest['git_head']==args.commit and manifest['version']==args.version
         assert manifest['status'] in {'built','built-not-yet-accepted'}
         assert not manifest.get('changed_during_build') and not manifest.get('git_dirty')
@@ -51,6 +52,7 @@ def main():
             if args.platform=='windows':command+=['--check-offline']
             subprocess.run(command,env=env,cwd=output,stdout=log,stderr=log,check=True,timeout=180)
         runtime=json.loads((output/'runtime.json').read_text(encoding='utf-8'))
+        assert runtime['python']['version'] == '3.11.16' and runtime['python_inventory']
         assert runtime['ok'] and runtime['frozen'];report['runtime']=runtime
         ports=[]
         for iteration in range(2):

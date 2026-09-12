@@ -6,9 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "knowledge-distiller"
 version = "1.2.0"
 description = "Local-first knowledge distiller MVP"
-requires-python = ">=3.11.4"
+requires-python = ">=3.11.16,<3.12"
 dependencies = [
   "Flask>=3.1,<4",
+  "psutil==7.2.2",
+  "pywin32==312; sys_platform == 'win32'",
   "pyobjc-framework-Vision==12.2.2; sys_platform == 'darwin'",
   "jsonschema>=4.23,<5",
   "PyYAML>=6.0.2,<7",
@@ -64,6 +66,7 @@ include-package-data = false
 [tool.setuptools.package-data]
 knowledge_distiller = [
   "v1/adapters/*.mjs",
+  "v1/adapters/python_policy.py",
   "v1/adapters/qwen_worker.py",
   "v1/adapters/qwen-selftest.wav",
   "v1/adapters/qwen_windows_worker.py",

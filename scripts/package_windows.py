@@ -64,7 +64,7 @@ def main():
     (ffmpeg_sources / 'sources.json').write_text(json.dumps(selected_sources, indent=2), encoding='utf-8')
     shutil.copyfile(project / 'packaging/windows-requirements-lock.txt', release / 'windows-requirements-lock.txt')
     build_manifest = app.parent / 'build-manifest.json'
-    public_manifest = {key: manifest[key] for key in ('platform', 'architecture', 'python', 'git_head', 'version', 'product_version', 'packages', 'sources', 'status')}
+    public_manifest = {key: manifest[key] for key in ('platform', 'architecture', 'python', 'git_head', 'version', 'product_version', 'packages', 'sources', 'status', 'python_inventory')}
     (release / 'build-manifest.json').write_text(json.dumps(public_manifest, indent=2), encoding='utf-8')
     inventory = {}
     for dist in distributions():
@@ -77,7 +77,7 @@ def main():
                     target = notices / name / str(resource).replace('\\', '/').split('.dist-info/', 1)[-1]
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source, target)
-    python_license = cache / 'utf8-python/LICENSE.txt'
+    python_license = Path(sys.base_prefix) / 'LICENSE.txt'
     shutil.copyfile(python_license, notices / 'Python-LICENSE.txt')
     for source in (cache / 'tools/ffmpeg-github').rglob('*'):
         if source.is_file() and source.name.lower() in {'license', 'license.txt', 'readme.txt'}:

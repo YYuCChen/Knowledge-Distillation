@@ -1,13 +1,32 @@
-"""Owned test interpreter with the same UTF-8 Windows manifest as the release."""
+"""Create an explicit disposable UTF-8 launcher from the current 3.11 build env."""
+import argparse
 from pathlib import Path
-import zipfile
-import win32api
+import runpy
+import shutil
+import sys
 
-project = Path(__file__).resolve().parents[1]
-target = project / '.windows-build/utf8-python'
-with zipfile.ZipFile(project / '.windows-build/tools/python-3.12.10-embed-amd64.zip') as archive:
-    archive.extractall(target)
-handle = win32api.BeginUpdateResource(str(target / 'python.exe'), False)
-win32api.UpdateResource(handle, 24, 1, (project / 'packaging/windows.manifest').read_bytes(), 0)
-win32api.EndUpdateResource(handle, False)
-(target / 'python312._pth').write_text('python312.zip\n.\n' + str(project / 'src') + '\n' + str(project) + '\n' + str(project / '.venv-windows/Lib/site-packages') + '\nimport site\n', encoding='utf-8')
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--output', type=Path, required=True)
+    args = parser.parse_args()
+    project = Path(__file__).resolve().parents[1]
+    runpy.run_path(str(project/'src/knowledge_distiller/v1/adapters/python_policy.py'))['check_current']()
+    if sys.platform != 'win32':
+        parser.error('Windows only')
+    if args.output.exists():
+        parser.error('Use a new disposable output directory')
+    args.output.mkdir(parents=True)
+    # Copy the complete verified environment so this helper never patches the
+    # build interpreter or links to a historical environment.
+    shutil.copytree(Path(sys.prefix), args.output/'environment')
+    import win32api
+    target = args.output/'environment/Scripts/python.exe'
+    handle = win32api.BeginUpdateResource(str(target), False)
+    win32api.UpdateResource(handle, 24, 1, (project/'packaging/windows.manifest').read_bytes(), 0)
+    win32api.EndUpdateResource(handle, False)
+    print(target)
+
+
+if __name__ == '__main__':
+    main()

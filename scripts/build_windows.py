@@ -11,6 +11,9 @@ import re
 import subprocess
 import sys
 
+_policy = runpy.run_path(str(Path(__file__).resolve().parents[1] / "src/knowledge_distiller/v1/adapters/python_policy.py"))
+_python = _policy["check_current"]()
+
 
 def source_hashes(project):
     files = [project / 'pyproject.toml', Path(__file__).resolve()]
@@ -56,7 +59,7 @@ def main():
                PYINSTALLER_CONFIG_DIR=str(output / 'pyinstaller-config'),
                PYTHONUTF8='1', PYTHONIOENCODING='utf-8')
     manifest = dict(platform=platform.platform(), architecture=platform.machine(), python=platform.python_version(),
-                    git_head=head, version=args.version, product_version=args.product_version,
+                    python_runtime=_python, git_head=head, version=args.version, product_version=args.product_version,
                     packages={d.metadata['Name']: d.version for d in distributions()},
                     sources=source_hashes(project),
                     status='building')
@@ -81,6 +84,7 @@ def main():
         if source_hashes(project) != manifest['sources']:
             manifest['status'] = 'source-changed-during-build'
             raise RuntimeError('Build inputs changed; rebuild before release')
+        manifest['python_inventory'] = _policy['bundle_inventory'](output / 'KnowledgeDistiller')
         manifest['status'] = 'built-not-yet-accepted'
     except Exception as error:
         if manifest['status'] == 'building':
