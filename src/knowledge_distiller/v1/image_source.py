@@ -10,7 +10,13 @@ def image_source_fact(native_text, members, runner, *, inline_images=False):
     for member in members:
         if not member['mime_type'].startswith('image/'):
             continue
-        result = runner.recognize_bytes(member['content'], member['mime_type'])
+        from .ocr import OcrError
+        try:
+            result = runner.recognize_bytes(member['content'], member['mime_type'])
+        except OcrError as error:
+            error.member_id = member['member_id']
+            error.completed_members = [image['member_id'] for image in images]
+            raise
         if inline_images:
             marker = f"〔图片 {member['member_id'].split('-')[-1]}〕"
             position = native_text.find(marker, cursor)
@@ -35,6 +41,9 @@ def image_source_fact(native_text, members, runner, *, inline_images=False):
             snapshot += line.text
             entry = {'start': start, 'end': len(snapshot), 'text': line.text,
                      'polygon': line.polygon, 'confidence': line.confidence}
+            if line.original_polygon:
+                entry['original_polygon'] = line.original_polygon
+                entry['coordinate_adjustment'] = 'vision_boundary_roundoff_1e-4px'
             if line.alternatives:
                 entry['alternatives'] = list(line.alternatives)
             image['lines'].append(entry)

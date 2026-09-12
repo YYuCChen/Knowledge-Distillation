@@ -97,6 +97,13 @@ class Distiller:
         except (OcrError, SourceVersionError, ChromeSessionError, DouyinSourceError, YouTubeSourceError, BilibiliSourceError, XiaohongshuSourceError, XPostSourceError, ZhihuSourceError, WeiboSourceError, KnowledgeModelError, DistillError) as error:
             if self._item(item_id)["state"] == "waiting_user":
                 return DistillResult(item_id, "waiting_user")
+            if isinstance(error, OcrError) and hasattr(error, 'member_id'):
+                from .local_records import write_record
+                directory = self.runtime_root / "items" / str(item_id)
+                directory.mkdir(parents=True, exist_ok=True)
+                write_record(directory / 'ocr-diagnostic.json', {
+                    'code': error.code, 'member_id': error.member_id,
+                    'completed_members': error.completed_members})
             code = error.args[0] if error.args else "distill_failed"
             self.store.mark_failed(item_id, self._item(item_id)["phase"], str(code),
                                    rejection_reason=error.rejection_reason if isinstance(error, KnowledgeModelError) else None)
@@ -272,7 +279,8 @@ class Distiller:
                 next_confirmation={**pending, "review_required": False})
         else:
             state = self.store.resolve_confirmation(item_id, row["confirmation_json"],
-                fact=SourceFact(pending["snapshot"], tuple(pending.get("uncertainties", []) + pending.get("resolved", []))))
+                fact=SourceFact(pending["snapshot"], tuple(pending.get("uncertainties", []) + pending.get("resolved", []))),
+                lineage=pending.get("lineage"))
         return DistillResult(item_id, state)
 
     def transcript_audio(self, item_id: int, *, token: str) -> Path:
@@ -345,7 +353,11 @@ class Distiller:
                 except ConfirmationAudioError:
                     return None
             return aligned
-        return path if path.is_file() else None
+        if path.is_file() and not path.is_symlink():
+            return path
+        # A missing local preview must not destroy the confirmation draft.
+        original = path.parent.parent / "audio" / "standard.wav"
+        return original if original.is_file() and not original.is_symlink() else None
 
     def rerecognize(self, item_id: int, *, token: str = "") -> DistillResult:
         row = self._item(item_id)
@@ -440,9 +452,13 @@ class Distiller:
         normalized = self.normalizer.normalize(media, work_dir / "audio")
         if normalized.failure is not None or normalized.audio is None:
             raise DistillError(f"audio_{normalized.failure or 'invalid'}")
-        from .primary_cache import recognize_cached
+        from .primary_cache import recognize_segmented
+        from .subtitle_baseline import select_subtitle
+        from knowledge_distiller.primary import PrimaryRecognition
+        subtitle, source_lineage = select_subtitle(captured)
         try:
-            recognition = recognize_cached(self.recognizer, normalized.audio, work_dir)
+            recognition = (PrimaryRecognition.succeeded(subtitle) if subtitle is not None
+                else recognize_segmented(self.recognizer, normalized.audio, work_dir))
         except OSError as error:
             raise DistillError('asr_checkpoint_unavailable') from error
         if recognition.failure is not None or recognition.recovery is None:
@@ -453,15 +469,17 @@ class Distiller:
             if isinstance(self.reviewer, RecordedReviewer) else self.reviewer.review(recognition.recovery))
         if review.failure is not None or review.candidate is None:
             raise DistillError(f"review_{review.failure or 'invalid'}")
-        lineage = {'primary_asr': {'text': recognition.recovery.text,
+        lineage = {**source_lineage, ('primary_subtitle' if subtitle is not None else 'primary_asr'): {'text': recognition.recovery.text,
                                   'chunks': [asdict(c) for c in recognition.recovery.chunks]},
-                   'ai_repairs': list(review.candidate.repairs)}
+                   'ai_repairs': list(review.candidate.repairs),
+                   'review_diagnostics': list(review.candidate.diagnostics)}
         blocking = []
         generation = uuid4().hex
         for index, concern in enumerate(review.candidate.concerns, start=1):
             if not concern.meaning_may_change:
                 continue
             name = f"concern-{index}-{generation}.wav"
+            replay_note = ""
             try:
                 self.confirmation_clipper.clip(
                     normalized.audio,
@@ -470,15 +488,17 @@ class Distiller:
                     concern,
                     work_dir / "confirmation" / name,
                 )
-            except ConfirmationAudioError as error:
-                self._remove_confirmation_audio(item_id, blocking)
-                raise DistillError("confirmation_audio_unavailable") from error
+            except ConfirmationAudioError:
+                # Preserve the unresolved question and full original audio. A
+                # failed preview is not evidence that the question was resolved.
+                replay_note = " 局部回听未能准备，播放入口提供完整原音；疑点仍待确认。"
+
             blocking.append(
                 _compact_concern({
                     "start": concern.start_offset,
                     "end": concern.end_offset,
                     "text": concern.text,
-                    "reason": concern.reason,
+                    "reason": concern.reason + replay_note,
                     "candidate_explanations": dict(concern.candidate_explanations),
                     "candidates": list(
                         dict.fromkeys((concern.text, *concern.candidate_readings))

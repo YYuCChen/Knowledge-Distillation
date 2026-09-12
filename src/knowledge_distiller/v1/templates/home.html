@@ -341,6 +341,7 @@
                 <span class="knowledge-title-group">
                   <strong>{{ item.title }}</strong>
                   <small class="knowledge-subtitle">{{ item.subtitle }}</small>
+                  {% if item.review_notice %}<small class="knowledge-subtitle">{{ item.review_notice }}</small>{% endif %}
                 </span>
                 <small class="knowledge-meta">
                   <span>来源：{{ item.source_type }}{% if item.source %} · {{ item.source }}{% endif %}</span>

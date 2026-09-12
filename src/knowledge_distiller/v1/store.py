@@ -682,7 +682,7 @@ class Store:
                     )
                     SELECT i.*, ss.input_kind, ss.input_key, ss.input_label, ss.retryable, ss.content IS NOT NULL AS input_available, ss.retain_until, m.source_kind, m.canonical_url, m.metadata_json,
                            kr.knowledge_result_id, kr.payload_json,
-                           kr.published_path, kr.published_at, kr.published_vault
+                           kr.published_path, kr.published_at, kr.published_vault, sf.lineage_json
                     FROM distill_items AS i
                     LEFT JOIN submitted_sources AS ss ON ss.item_id = i.item_id
                     LEFT JOIN materials AS m ON m.material_id = i.material_id

@@ -24,12 +24,12 @@ def _valid(recovery, audio):
     previous = 0.0
     for chunk in recovery.chunks:
         if (not isinstance(chunk.text, str) or not chunk.text.strip()
-            or not all(isinstance(t, (int,float)) and math.isfinite(t) for t in (chunk.start_seconds, chunk.end_seconds))
+            or not all(type(t) in (int,float) and math.isfinite(t) for t in (chunk.start_seconds, chunk.end_seconds))
             or chunk.start_seconds < previous or chunk.end_seconds <= chunk.start_seconds
             or chunk.end_seconds > audio.duration_seconds + 0.5):
             return False
         previous = chunk.end_seconds
-    return bool(recovery.chunks)
+    return True  # Complete text may be cached without a precise replay timeline.
 
 
 def _checksum(data):
@@ -50,14 +50,64 @@ def recognize_cached(recognizer, audio, directory):
         except (OSError, ValueError, KeyError, TypeError):
             pass  # Invalid checkpoint is recomputed, never promoted to a source fact.
     result = recognizer.recognize(audio)
-    if result.recovery is not None and _valid(result.recovery, audio):
-        temporary = path.with_suffix('.tmp')
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-                json.dump({'version':1, 'identity':identity, 'recovery':asdict(result.recovery), 'checksum':_checksum(asdict(result.recovery))}, stream, ensure_ascii=False)
-                stream.flush(); os.fsync(stream.fileno())
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
+    if result.recovery is not None and not _valid(result.recovery, audio):
+        from knowledge_distiller.primary import PrimaryFailure
+        from .local_records import write_record
+        recovery = result.recovery
+        reason = ('empty_text' if not isinstance(recovery.text,str) or not recovery.text.strip() else
+                  'truncated' if recovery.truncated else
+                  'abnormal_ending' if not recovery.completed_normally else 'invalid_timeline')
+        write_record(path.with_name('primary-failure.json'), {'identity': identity,
+            'code': reason, 'recovery': asdict(recovery)})
+        return PrimaryRecognition.failed(PrimaryFailure.EMPTY_OUTPUT if reason=='empty_text' else PrimaryFailure.INCOMPLETE)
+    if result.recovery is not None:
+        from .local_records import write_record
+        write_record(path, {'version':1, 'identity':identity, 'recovery':asdict(result.recovery),
+                            'checksum':_checksum(asdict(result.recovery))})
     return result
+
+
+def recognize_segmented(recognizer, audio, directory, *, segment_seconds=300):
+    """Persist successful long-audio pieces and retry only missing/failed pieces.
+
+    Each checkpoint is bound to actual PCM bytes and recognizer identity. No
+    partial text is promoted when any segment fails or claims truncation.
+    """
+    if audio.duration_seconds <= segment_seconds:
+        return recognize_cached(recognizer, audio, directory)
+    import wave
+    from .local_records import write_record
+    from knowledge_distiller.primary import StandardAudio
+    root = Path(directory) / 'asr-segments'
+    root.mkdir(parents=True, exist_ok=True)
+    results = []; failures = []
+    with wave.open(str(audio.path), 'rb') as original:
+        rate = original.getframerate()
+        frames_per_segment = int(segment_seconds * rate)
+        if frames_per_segment <= 0:
+            raise ValueError('invalid_segment_size')
+        for index, frame in enumerate(range(0, original.getnframes(), frames_per_segment)):
+            target = root / f'{index:05d}'
+            target.mkdir(exist_ok=True)
+            path = target / 'audio.wav'
+            original.setpos(frame)
+            pcm = original.readframes(frames_per_segment)
+            count = len(pcm) // (original.getsampwidth()*original.getnchannels())
+            with wave.open(str(path), 'wb') as output:
+                output.setparams(original.getparams()); output.writeframes(pcm)
+            piece = StandardAudio(path, count/rate, rate, original.getnchannels(), original.getsampwidth())
+            result = recognize_cached(recognizer, piece, target)
+            if result.recovery is None:
+                failures.append({'segment': index, 'start_seconds': frame/rate,
+                                 'end_seconds': (frame+count)/rate, 'code': str(result.failure)})
+            else:
+                results.append((frame/rate, result.recovery))
+    write_record(root / 'status.json', {'segments_completed': len(results), 'failures': failures})
+    if failures:
+        from knowledge_distiller.primary import PrimaryFailure
+        return PrimaryRecognition.failed(PrimaryFailure(failures[0]['code']))
+    chunks = tuple(PrimaryChunk(c.text, c.start_seconds+offset, c.end_seconds+offset, c.language)
+                   for offset, recovery in results for c in recovery.chunks)
+    return PrimaryRecognition.succeeded(PrimaryRecovery(
+        '\n'.join(recovery.text for _,recovery in results),
+        results[0][1].language if results else None, chunks))

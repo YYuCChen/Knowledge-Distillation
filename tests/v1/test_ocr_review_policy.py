@@ -13,7 +13,7 @@ def test_noncore_ocr_repair_and_uncertainty_do_not_block_but_keep_evidence():
         {'index':1,'affects_core':False,'reliable':False,'replacement':'乙字','evidence':'','reason':'局部字形无法确定，但不影响主旨'},
         {'index':2,'affects_core':True,'reliable':False,'replacement':'数值三','evidence':'','reason':'数值影响结论'}]}
     result,trace=review_ocr(fact,lineage,SimpleNamespace(complete=lambda **kwargs:json.dumps(answer)))
-    assert result.snapshot=='甲正字\n乙字\n数值三'
-    assert [u['status'] for u in result.uncertainties]==['repaired','advisory','unresolved']
-    assert result.uncertainties[0]['original_text']=='甲错字'
-    assert trace['image_ocr'][0]['lines'][0]['original_text']=='甲错字'
+    assert result.snapshot==fact.snapshot
+    assert [u['status'] for u in result.uncertainties]==['unresolved','advisory','unresolved']
+    assert trace['ocr_primary_snapshot']==fact.snapshot
+    assert trace['ocr_review_diagnostics'][0]['operation']==0

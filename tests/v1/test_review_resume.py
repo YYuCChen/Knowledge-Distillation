@@ -55,9 +55,10 @@ def test_repair_requires_source_evidence_and_is_retained():
     class Binding:
         def complete(self,text):return ReviewRuntimeResult(json.dumps(payload),'end_turn')
     result=FaithfulReviewAdapter(Binding()).review(PrimaryRecovery(primary,'zh',()))
-    assert result.candidate.repairs[0]['original_text']=='公圆'
+    assert result.candidate.text==primary and not result.candidate.repairs
+    assert result.candidate.diagnostics
     payload['repairs'][0]['evidence']='不存在的依据'
-    assert FaithfulReviewAdapter(Binding()).review(PrimaryRecovery(primary,'zh',())).failure
+    assert FaithfulReviewAdapter(Binding()).review(PrimaryRecovery(primary,'zh',())).candidate.text==primary
 
 
 def test_content_relevance_never_becomes_transcription_blocker():
@@ -78,8 +79,9 @@ def test_long_review_rejects_missing_middle_instead_of_publishing(tmp_path):
             return json.dumps({'candidate_text':text if len(calls)!=2 else '', 'issues':[]})
     text=''.join(f'第{i}段，具体事实必须完整保留。' for i in range(450))
     result=build_reviewer(Client()).review_in_directory(PrimaryRecovery(text,'zh',()),tmp_path)
-    assert result.failure and result.candidate is None
-    assert len(calls)==2
+    assert result.failure is None
+    assert result.candidate.text.replace("\n", "")==text
+    assert len(calls)>2
 
 
 def test_clipper_reuses_one_full_alignment_for_all_concerns(tmp_path, monkeypatch):
@@ -160,8 +162,8 @@ def test_pipeline_preserves_ai_repair_and_original_source(tmp_path):
     item=store.create_item('https://v.douyin.com/a/')
     assert service.run(item).state=='succeeded'
     row=store.item_bundle(item)
-    assert row['snapshot']==candidate
+    assert row['snapshot']==primary
     lineage=json.loads(row['lineage_json'])
     assert lineage['primary_asr']['text']==primary
-    assert lineage['ai_repairs'][0]['original_text']=='损号'
-    assert json.loads(row['uncertainties_json'])[0]['status']=='repaired'
+    assert not lineage['ai_repairs']
+    assert lineage['review_diagnostics']

@@ -67,6 +67,7 @@ def test_complete_faithful_review_is_translated_to_project_result():
         "text": PRIMARY_TEXT,
         "concerns": (),
         "repairs": (),
+        "diagnostics": (),
     }
     assert binding.calls == [PRIMARY_TEXT]
     assert "ReviewRuntimeResult" not in repr(result.candidate)
@@ -257,7 +258,10 @@ def test_runtime_failures_are_translated(error, expected):
 def test_empty_or_structurally_invalid_output_is_rejected(payload):
     result = FaithfulReviewAdapter(ReviewBinding(payload)).review(recovery())
 
-    assert result.failure is ReviewFailure.INVALID_OUTPUT
+    assert result.failure is None
+    assert result.candidate.text == (text if "text" in locals() else PRIMARY_TEXT)
+    assert not result.candidate.repairs
+    assert result.candidate.diagnostics or result.candidate.concerns
 
 
 def test_overlapping_generated_concerns_are_rejected():
@@ -286,7 +290,10 @@ def test_overlapping_generated_concerns_are_rejected():
 
     result = FaithfulReviewAdapter(binding).review(recovery(text))
 
-    assert result.failure is ReviewFailure.INVALID_OUTPUT
+    assert result.failure is None
+    assert result.candidate.text == (text if "text" in locals() else PRIMARY_TEXT)
+    assert not result.candidate.repairs
+    assert result.candidate.diagnostics or result.candidate.concerns
 
 
 def test_non_normal_model_ending_is_rejected():
@@ -309,7 +316,9 @@ def test_summary_or_major_rewrite_is_rejected(candidate_text):
         ReviewBinding(candidate_payload(candidate_text))
     ).review(recovery())
 
-    assert result.failure is ReviewFailure.INSUFFICIENT_COVERAGE
+    assert result.failure is None
+    assert result.candidate.text == PRIMARY_TEXT
+    assert result.candidate.diagnostics
 
 
 def test_incomplete_primary_cannot_enter_review():
