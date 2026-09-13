@@ -74,6 +74,7 @@ def test_crash_recovery_restores_database_before_old_launch_path(tmp_path, monke
         with sqlite3.connect(path) as connection:
             connection.execute('CREATE TABLE facts(text TEXT)')
             connection.execute('INSERT INTO facts VALUES (?)', (text,))
+        connection.close()
     (updates / 'component-install-journal.json').write_text(json.dumps({
         'target': str(target.resolve()), 'platform': 'windows-x86_64', 'phase': 'startup',
         'target_identity': identity(target, 'windows-x86_64'), 'had_target': True, 'had_database': True}))

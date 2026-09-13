@@ -17,6 +17,7 @@ import zlib
 
 from .updates import UpdateError
 from .windows_delta import MANIFEST, digest, inventory, safe_name
+from .windows_platform import filesystem_path
 from . import windows_binary_patch as binary
 
 PLATFORM = 'windows-x86_64'
@@ -41,8 +42,8 @@ def _deflated_size(path):
 
 
 def build_payload(target, output, base=None, *, tools_dir=None):
-    target, output = Path(target), Path(output)
-    base = Path(base) if base is not None else None
+    target, output = filesystem_path(target), filesystem_path(output)
+    base = filesystem_path(base) if base is not None else None
     files, old = inventory(target), inventory(base) if base else {}
     _validate_files(files); _validate_files(old,allow_empty=True)
     version = json.loads((target/'_internal/windows-version.json').read_text())['version']
@@ -126,7 +127,8 @@ def _copy_verified(source, target, record):
 
 
 def stage_payload(archive_path,installed,stage,*,version,current,tools_dir=None):
-    installed,stage=Path(installed),Path(stage)
+    installed,stage=filesystem_path(installed),filesystem_path(stage)
+    archive_path=filesystem_path(archive_path)
     if stage.exists() or stage.is_symlink():
         raise UpdateError('上次更新暂存目录仍存在，请处理后重试。')
     started=time.monotonic()

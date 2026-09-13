@@ -1,6 +1,6 @@
 """Signed Windows update payloads: complete file manifest plus changed files only."""
 from __future__ import annotations
-from .windows_platform import is_link_or_reparse
+from .windows_platform import is_link_or_reparse, filesystem_path
 import hashlib
 import json
 import os
@@ -28,7 +28,7 @@ def digest(path):
 
 
 def inventory(root):
-    root = Path(root)
+    root = filesystem_path(root)
     if is_link_or_reparse(root):
         raise UpdateError('应用根目录含链接，不能进行差量更新。')
     result = {}
@@ -47,7 +47,8 @@ def build_payload(target, output, base=None, *, format_version=1, tools_dir=None
         return build_v2(target, output, base, tools_dir=tools_dir)
     if format_version != 1:
         raise UpdateError('未知更新格式。')
-    target, output = Path(target), Path(output)
+    target, output = filesystem_path(target), filesystem_path(output)
+    base = filesystem_path(base) if base is not None else None
     files = inventory(target)
     old = inventory(base) if base else {}
     version = json.loads((target/'_internal/windows-version.json').read_text(encoding='utf-8'))['version']
@@ -63,7 +64,8 @@ def build_payload(target, output, base=None, *, format_version=1, tools_dir=None
 
 def stage_payload(archive_path, installed, stage, *, version, current, tools_dir=None):
     """Verify source baseline and every result byte before touching the running app."""
-    installed, stage = Path(installed), Path(stage)
+    installed, stage = filesystem_path(installed), filesystem_path(stage)
+    archive_path = filesystem_path(archive_path)
     if stage.exists():
         raise UpdateError('上次更新暂存目录仍存在，请处理后重试。')
     with zipfile.ZipFile(archive_path) as archive:
@@ -126,6 +128,7 @@ def stage_payload(archive_path, installed, stage, *, version, current, tools_dir
 
 
 def stage_full(archive,stage,version):
+    stage = filesystem_path(stage)
     prefix='知识蒸馏器/'
     names=archive.namelist()
     if len(names)!=len(set(n.casefold() for n in names)) or not names or len(names)>100000:

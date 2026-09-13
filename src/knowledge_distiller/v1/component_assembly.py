@@ -11,6 +11,7 @@ from .component_download import ComponentDownloader
 from .docling_component import DoclingComponent, DoclingComponentError
 from .program_tree import identity, extract_mac_base
 from .updates import UpdateError
+from .windows_platform import filesystem_path
 
 
 class ComponentAssembly:
@@ -83,7 +84,7 @@ class ComponentAssembly:
             raise UpdateError('缺少已验证程序基线。')
         baseline_id = identity(baseline, self.platform)
         if baseline_id == release['target_identity']:
-            shutil.copytree(baseline, candidate, symlinks=True)
+            shutil.copytree(filesystem_path(baseline), filesystem_path(candidate), symlinks=True)
         else:
             delta = next((asset for asset in release['deltas'] if asset['from_identity'] == baseline_id), None)
             if delta is None or delta['sha256'] not in assets:

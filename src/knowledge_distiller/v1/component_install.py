@@ -18,6 +18,7 @@ import httpx
 from .file_lock import acquire
 from .local_records import write_record
 from .program_tree import identity
+from .windows_platform import filesystem_path
 from .updates import UpdateError, validate_install_paths, version_key
 
 
@@ -78,7 +79,7 @@ def recover(target, data_root):
             temporary.write_text('accepted')
             temporary.replace(updates / 'component-startup-handshake')
             if previous.exists():
-                shutil.rmtree(previous)
+                shutil.rmtree(filesystem_path(previous))
         else:
             with acquire(root / '.instance.lock'):
                 swapped = previous.exists() or (not state['had_target']
@@ -93,7 +94,7 @@ def recover(target, data_root):
                     if target.exists():
                         if identity(target, state['platform']) != state['target_identity']:
                             raise UpdateError('安装后的程序已发生变化，已保留恢复副本。')
-                        shutil.rmtree(target)
+                        shutil.rmtree(filesystem_path(target))
                     database = root / 'knowledge.sqlite3'
                     for suffix in ('-wal', '-shm'):
                         Path(str(database) + suffix).unlink(missing_ok=True)
@@ -106,7 +107,7 @@ def recover(target, data_root):
                     if previous.exists():
                         previous.rename(target)
                 if stage.exists():
-                    shutil.rmtree(stage)
+                    shutil.rmtree(filesystem_path(stage))
         backup.unlink(missing_ok=True)
         journal.unlink()
     return {'recovered': True, 'accepted': state['phase'] == 'accepted'}
@@ -162,7 +163,7 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
             raise UpdateError('请先正常退出知识蒸馏器，再继续安装；已下载内容会保留。') from error
         try:
             write_record(journal, state)
-            shutil.copytree(candidate, stage, symlinks=True)
+            shutil.copytree(filesystem_path(candidate), filesystem_path(stage), symlinks=True)
             if identity(stage, platform) != target_identity:
                 raise UpdateError('同盘暂存程序校验失败。')
             if had_database:
@@ -190,7 +191,7 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
             temporary.write_text('accepted')
             temporary.replace(handshake)
             if previous.exists():
-                shutil.rmtree(previous)
+                shutil.rmtree(filesystem_path(previous))
             backup.unlink(missing_ok=True)
             journal.unlink()
             return {'version': version, 'target_identity': target_identity, 'accepted': True}
@@ -202,7 +203,7 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
                 process.wait(timeout=60)
             if swapped:
                 if target.exists():
-                    shutil.rmtree(target)
+                    shutil.rmtree(filesystem_path(target))
                 for suffix in ('-wal', '-shm'):
                     Path(str(database) + suffix).unlink(missing_ok=True)
                 if had_database and backup.exists():
@@ -212,7 +213,7 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
                 if previous.exists():
                     previous.rename(target)
             if stage.exists():
-                shutil.rmtree(stage)
+                shutil.rmtree(filesystem_path(stage))
             backup.unlink(missing_ok=True)
             journal.unlink(missing_ok=True)
             raise
