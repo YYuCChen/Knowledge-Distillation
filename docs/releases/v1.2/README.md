@@ -1,5 +1,7 @@
 # V1.2 来源完整性与恢复
 
+最新交付见 [构建 2026.09.14.1：来源恢复与组件发行](reissue-20260914.md)。下方保留此前版本的历史证据。
+
 本页保留构建 `2026.09.13.3` 的历史发行与功能验收。后续 [Python 3.11 统一重做](python311.md) 的运行环境证据单独记录，不能沿用旧版结论；重发已正式发布为 [v2026.09.13.9](https://github.com/YYuCChen/Knowledge-Distillation/releases/tag/v2026.09.13.9)，下文 `.3` 记录仅属历史。
 
 状态：2026-09-13 经用户确认已正式发布，[Release v2026.09.13.3](https://github.com/YYuCChen/Knowledge-Distillation/releases/tag/v2026.09.13.3)。PR #4 已合并，合并提交为 `951715fa22649ada0df7a33acd22b8cefd44bcd6`。基线为公开 main `ff407bab14929c9142775af267ae5244fb5bb049`。产品版本 1.2，正式构建号 2026.09.13.3，构建源码提交为 `7dffcec82bd1b3aa2938e44edcde35f753c696ba`。其后的 CI 与交付文档提交不改变应用源码。前两轮候选已被替代，不能从版本号推断已经通过。

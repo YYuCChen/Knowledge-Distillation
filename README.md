@@ -30,16 +30,16 @@
 
 ### 下载与开始使用
 
-- **当前公开版：V1.2**（构建 `2026.09.13.9`）。以下说明以已发布版本为准，具体更新见版本记录。
-- **Mac**：[下载 Apple Silicon 安装包](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.13.9/KnowledgeDistiller-2026.09.13.9-macOS-arm64.zip)，约 1.55GB，要求 macOS 14+。解压后将应用放入「应用程序」再打开；不支持 Intel Mac。
-- **Windows**：[下载 x64 安装包](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.13.9/KnowledgeDistiller-2026.09.13.9-Windows-x64.zip)，约 1.86GB。全部解压到可写文件夹，运行 `KnowledgeDistiller.exe`；不要只复制 EXE。已验证 Windows 10 22H2，Windows 11 与 ARM64 尚未验证。
+- **当前公开版：V1.2**（构建 `2026.09.14.1`）。[发行与验收说明](docs/releases/v1.2/reissue-20260914.md)。
+- **Mac**：[下载 Apple Silicon 安装器](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.14.1/KnowledgeDistillerInstaller-macos-arm64.zip)，约 28 MB，要求 macOS 14+。解压并打开安装器，选择应用和数据目录；不支持 Intel Mac。
+- **Windows**：[下载 x64 安装器](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.14.1/KnowledgeDistillerInstaller-windows-x86_64.exe)，约 43 MB。运行安装器并选择可写的程序与数据目录。已验证 Windows 10 22H2，Windows 11 与 ARM64 尚未验证。
 - **首次安全提示**：Mac 当前未公证，Windows 未作发行者代码签名。请核对下载来源，按系统提示处理，不关闭整体安全防护；Mac 可参考 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。GitHub 的 `Source code` 压缩包不是应用安装包。
 - **首次配置**：在设置中选择已在 Obsidian 打开过的 Vault，配置模型连接，再用一段短文本试一次蒸馏。按所用功能准备 Chrome、Codex、Obsidian 及自己的账号，无需另搭 Python 环境。
 - **按需启用**：处理有声内容前配置语音识别，可选本地 Qwen 或云端豆包；Qwen 需主动下载安装并保存启用。内容平台连接、飞书机器人按需配置。
 
 应用启动后在浏览器中使用，可在设置中自定义本地访问名称和固定端口。Windows 服务窗口需保持运行；只关闭网页不会退出后台。
 
-本次重发统一 Mac、Windows 主程序、更新辅助程序及 Qwen 环境到 CPython 3.11.16。旧 Qwen 组件不符合新契约时，请在设置中重新安装并启用；具体证据与支持边界见 [Python 3.11 重发验收](docs/releases/v1.2/python311.md)。
+本版沿用 CPython 3.11.16，主程序、Qwen、更新辅助程序与安装器均自带运行环境。首次安装另需下载约 1.55 GB（Mac）或 1.85 GB（Windows）的程序及文档模型资源；可选 Qwen 另计。文档模型与固定平台基座在后续发布中复用。
 
 V1.2 加强来源修改与证据校验，无效提议保留原文，关键疑点继续确认；优先采用合格原语言字幕，支持分段识别恢复，并修复等待队列顺序和 Apple Vision 极小边界舍入问题。Mac、Windows 均支持签名差量升级：检查更新、下载差量、安装并重启，展示实际下载大小。两端离线 OCR、PDF、EPUB 样本已检查，PDF 结构识别可能不同；Windows SSH 环境下 B 站超时清理可能延迟，普通桌面场景仍待验证。
 
@@ -48,12 +48,12 @@ V1.2 加强来源修改与证据校验，无效提议保留原文，关键疑点
 - **本地保存**：应用记录保存在本机 SQLite；Obsidian 保存来源型笔记。AI 新知和相关个人判断当前保留在应用内，不自动写入 Obsidian，也不做双向同步。
 - **本地优先不等于全离线**：已有内容浏览与搜索在本机完成；获取网络材料、使用云模型或飞书需要联网。云端处理会将任务所需材料交给对应服务，账号、额度及费用由你自行管理。
 - **备份两处**：同时备份应用数据与 Vault。Mac 数据位于 `~/Library/Application Support/Knowledge Distiller/`，Windows 位于 `%LOCALAPPDATA%\Knowledge Distiller`；凭据迁移可能需要重新配置。
-- **差量升级**：V1.2 的 Mac、Windows 均可在设置中检查更新、下载匹配的差量包、安装并重启。差量不可用或基础文件不匹配时，需要明确选择完整更新，不会静默下载完整包。从 V1.1 构建 `2026.09.11.16` 升级本版时，Mac 差量约 18MB、Windows 约 409MB。先前未启用自动安装的版本需完整安装 V1.2 一次，之后使用差量升级。更新前等待任务结束并备份数据与 Vault；首次安装仍需完整包，不要同时运行两个版本，也不要用旧版打开新版数据。 Windows 恢复时若旧备份被其他程序占用，需解除占用后重新启动；此时已接受更新后的新数据不会回退。
+- **升级**：V1.1、V1.2 .3 和 .9 使用上述安装器完成一次性迁移，选择原程序与原数据目录，合格旧文档模型会复用；旧应用更新器不会自动桥接新协议。迁移后可在设置中检查更新，使用固定基座到目标版本的签名差量。Windows 已使用文件内二进制补丁，本次差量约 3.15 MB，Mac 约 2.40 MB，不承诺每版同样大小。安装前正常退出旧应用，等待任务结束；不要同时运行两个版本或用旧版打开新版数据。
 
 ### 关于项目
 
 - 从个人使用需求出发，持续打磨来源质量、阅读、整理与桌面体验；当前不提供团队协作、跨设备自动同步或通用知识库聊天。
-- 此仓库现在同时用于源码、发行与反馈。源码快照按 Apache-2.0 发布；第三方组件、模型与资源遵循各自许可，请保留随包声明。源码快照与已经发布的安装包不承诺逐字节对应，具体发行范围以 Releases 为准。
+- 此仓库现在同时用于源码、发行与反馈。源码快照按 Apache-2.0 发布；第三方组件、模型与资源遵循各自许可，请保留随包声明。发行标签对应经过验收的构建源码；具体资产及验证范围以 Releases 为准，跨环境重建不承诺二进制逐字节复现。
 - 欢迎在 [Issues](https://github.com/YYuCChen/Knowledge-Distillation/issues) 留下使用场景与问题，附上版本、系统和复现步骤；请先移除密钥、Cookie、私人材料等敏感信息。
 
 ---
@@ -117,11 +117,11 @@ PYTHONPATH=src .venv/bin/python -m pytest -p no:cacheprovider
 | 来源型笔记 | Markdown、Obsidian | 保存可独立阅读的观点、依据与来源文本 |
 | 文档与图片 | Docling；Mac 平台 OCR 使用 Apple Vision，Windows 使用 PaddleOCR | 恢复正文、结构与图片文字 |
 | 语音与生成 | Qwen3-ASR／豆包；用户配置的 LLM 连接 | 音频转写、观点提炼与知识整理 |
-| 桌面发行 | PyInstaller；Mac 使用 Sparkle，Windows 重建变更文件，两端校验更新签名 | 打包运行依赖、提供安装与更新入口 |
+| 桌面发行 | PyInstaller；固定平台基座、独立文档模型、签名清单；Mac Sparkle 解码与 Windows HDiffPatch 文件内补丁 | 自带环境的安装器及差量更新 |
 
 SQLite 与 Markdown 分开，是因为结构化关系和独立阅读有不同需要。笔记可以脱离应用打开，但仅靠笔记无法恢复全部新知、判断与任务状态，因此备份需要同时保留应用数据和 Vault。
 
-解析、识别与推导也分开处理：原文中的疑点不能被后续生成悄悄修饰掉。Qwen 采用按需安装，Mac 使用 MLX，Windows 当前使用 Transformers CPU；基础发行包则携带运行依赖与文档处理资源。这些选择影响安装体积、首次配置和本地资源占用，不代表各平台拥有完全相同的处理表现。
+解析、识别与推导也分开处理：原文中的疑点不能被后续生成悄悄修饰掉。Qwen 采用按需安装，Mac 使用 MLX，Windows 当前使用 Transformers CPU；运行依赖归平台基座，文档模型作为独立固定资源由安装器校验并安装。这些选择影响安装体积、首次配置和本地资源占用，不代表各平台拥有完全相同的处理表现。
 
 ### 项目历程
 
