@@ -62,3 +62,23 @@ def test_offline_first_install_and_current_direct_delta_share_plan(tmp_path, mon
     candidate, _ = assembler.assemble(verified, plan, tmp_path / 'upgrade', installed=old)
     assert identity(candidate, 'windows-x86_64') == release['target_identity']
     assert (old / 'KnowledgeDistiller.exe').read_bytes() == b'business-1'
+
+    # Publisher signs only the exact candidate and locally verified asset set.
+    publisher = runpy.run_path(str(Path(__file__).parents[2] / 'scripts/prepare_component_release.py'))['prepare']
+    provenance = tmp_path / 'build-manifest.json'
+    provenance.write_text(json.dumps({'git_head': 'a'*40, 'version': '2',
+        'python': '3.11.16', 'status': 'built-not-yet-accepted'}))
+    paths = {entry['sha256']: cache / entry['sha256'] for entry in
+             [release['docling'], release['base'], *release['deltas']]}
+    def signer(path):
+        return base64.b64encode(eddsa.new(key, 'rfc8032').sign(path.read_bytes())).decode()
+    signed = tmp_path / 'release.json'
+    result = publisher(release, paths, target, provenance, signed,
+        base64.b64encode(key.public_key().export_key(format='raw')).decode(), signer)
+    assert result['published'] is False and signed.is_file()
+    import pytest
+    (target / 'KnowledgeDistiller.exe').write_bytes(b'changed after acceptance')
+    with pytest.raises(ValueError, match='target differs'):
+        publisher(release, paths, target, provenance, tmp_path / 'wrong.json',
+            base64.b64encode(key.public_key().export_key(format='raw')).decode(), signer)
+    assert not (tmp_path / 'wrong.json').exists()

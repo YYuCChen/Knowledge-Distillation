@@ -17,6 +17,7 @@ from .adapters.python_policy import check_current
 from .component_assembly import ComponentAssembly
 from .component_install import install, recover
 from .component_release import MAX_MANIFEST
+from .component_download import ComponentDownloader
 from .updates import UpdateError, validate_install_paths
 
 
@@ -29,6 +30,7 @@ PAGE = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="vi
 {% if not state.busy and not state.complete %}<form method="post"><input type="hidden" name="token" value="{{ token }}">
 {% if not state.ready %}<label>程序安装位置<input name="target" value="{{ target }}" required></label>
 <label>现有数据目录<input name="data_root" value="{{ data_root }}" required></label>
+<label>离线发行清单（可选）<input name="manifest_path" value="{{ manifest_path }}" placeholder="已下载清单的完整路径；组件放在同一目录"></label>
 <button name="action" value="prepare">检查安装内容</button>
 {% else %}<p>目标版本：{{ state.version }}<br>需要下载：{{ state.download }}<br>安装位置：{{ target }}</p>
 <button name="action" value="install">安装此版本</button>{% endif %}
@@ -41,12 +43,12 @@ PAGE = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="vi
 
 
 def create_installer(*, target, data_root, platform, public_key, manifest_url,
-                     binary_delta=None, windows_tools=None):
+                     binary_delta=None, windows_tools=None, manifest_path=None):
     app = Flask(__name__)
     token = secrets.token_urlsafe(32)
     state = {'busy': False, 'ready': False, 'complete': False, 'error': '',
              'message': '检查当前版本和可复用组件后，显示本次需要下载的内容。'}
-    context = {'target': Path(target), 'root': Path(data_root), 'candidate': None}
+    context = {'target': Path(target), 'root': Path(data_root), 'candidate': None, 'manifest_path': Path(manifest_path) if manifest_path else None}
     operation = threading.Lock()
     cancelled = threading.Event()
 
@@ -66,20 +68,34 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                         current = plistlib.loads((target / 'Contents/Info.plist').read_bytes())['CFBundleVersion']
                     else:
                         current = json.loads((target / '_internal/windows-version.json').read_text())['version']
-                chunks, count = [], 0
-                with httpx.stream('GET', manifest_url, follow_redirects=True, timeout=60) as response:
-                    response.raise_for_status()
-                    for chunk in response.iter_bytes(65536):
-                        count += len(chunk)
-                        if count > MAX_MANIFEST:
-                            raise UpdateError('发行清单过大。')
-                        chunks.append(chunk)
-                assembler = ComponentAssembly(root / 'components', root / 'updates/component-cache',
-                    platform=platform, public_key=public_key, binary_delta=binary_delta, windows_tools=windows_tools)
-                release, plan = assembler.prepare(b''.join(chunks),
+                offline = context['manifest_path']
+                if offline is not None:
+                    with offline.open('rb') as stream:
+                        envelope = stream.read(MAX_MANIFEST + 1)
+                    if len(envelope) > MAX_MANIFEST:
+                        raise UpdateError('发行清单过大。')
+                else:
+                    chunks, count = [], 0
+                    with httpx.stream('GET', manifest_url, follow_redirects=True, timeout=60) as response:
+                        response.raise_for_status()
+                        for chunk in response.iter_bytes(65536):
+                            if cancelled.is_set():
+                                raise InterruptedError('安装准备已取消。')
+                            count += len(chunk)
+                            if count > MAX_MANIFEST:
+                                raise UpdateError('发行清单过大。')
+                            chunks.append(chunk)
+                    envelope = b''.join(chunks)
+                cache = root / 'updates/component-cache'
+                assembler = ComponentAssembly(root / 'components', cache,
+                    platform=platform, public_key=public_key, binary_delta=binary_delta, windows_tools=windows_tools,
+                    downloader=ComponentDownloader(cache, offline_root=offline.parent if offline else None))
+                release, plan = assembler.prepare(envelope,
                     installed=target if target.exists() else None, current=current)
                 if cancelled.is_set():
                     raise InterruptedError('安装准备已取消，已有下载会保留。')
+                if offline and plan.download_bytes:
+                    raise UpdateError('离线目录缺少本次所需组件，尚未开始安装。请补齐发行文件后重试。')
                 context.update(assembler=assembler, release=release, plan=plan, candidate=None)
                 state.update(ready=True, version=release['version'],
                     download=f'{plan.download_bytes / 1024**2:.1f} MB',
@@ -153,13 +169,18 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                     if not target.is_absolute() or not root.is_absolute():
                         operation.release()
                         return '请填写完整的本地路径。', 400
-                    context.update(target=target, root=root)
+                    offline = request.form.get('manifest_path', '').strip()
+                    if offline and not Path(offline).expanduser().is_absolute():
+                        operation.release()
+                        return '请填写离线清单的完整路径。', 400
+                    context.update(target=target, root=root, manifest_path=Path(offline).expanduser() if offline else None)
                 state.update(busy=True, error='', cancellable=True)
                 threading.Thread(target=task, args=(action,), daemon=True).start()
             return redirect('/')
         state['recovery'] = (context['root'] / 'updates/component-install-journal.json').exists()
         return render_template_string(PAGE, state=state, token=token,
-                                      target=context['target'], data_root=context['root'])
+                                      target=context['target'], data_root=context['root'],
+                                      manifest_path=context['manifest_path'] or '')
     return app
 
 
@@ -169,6 +190,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', type=Path, default=AppPaths.system_default().data_root)
     parser.add_argument('--target', type=Path)
+    parser.add_argument('--release-manifest', type=Path, help='离线签名清单；组件文件须放在同一目录')
     parser.add_argument('--no-open', action='store_true')
     parser.add_argument('--check-runtime', type=Path)
     args = parser.parse_args(argv)
@@ -190,7 +212,7 @@ def main(argv=None):
             'public_key_present': bool(config['public_key'])}, indent=2))
         return
     app = create_installer(target=target, data_root=args.data_dir, platform=platform,
-        public_key=config['public_key'],
+        public_key=config['public_key'], manifest_path=args.release_manifest,
         manifest_url=config['feed_url'].rsplit('/', 1)[0] + '/release-' + platform + '.json',
         binary_delta=tools / 'BinaryDelta', windows_tools=tools)
     server = make_server('127.0.0.1', 0, app, threaded=True)

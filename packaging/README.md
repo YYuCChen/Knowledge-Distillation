@@ -79,3 +79,14 @@ they are not the ordinary component release upload list.
 Runtime checks the component at startup in the background and before conversion.
 Missing or corrupt models show a repair instruction; no implicit model download
 is performed. Existing data and prior model versions remain intact.
+
+For offline installation, put the signed `release-<platform>.json` and its named
+assets in one directory and select that manifest in the installer. The same
+publisher signature, inventory and target checks apply; missing assets stop the
+operation without falling back to the network. Already verified cache entries
+can also be reused. `prepare_component_release.py` validates local build provenance
+and asset bytes before using the existing publisher signing identity. Uploading
+and switching Latest remain separate release steps.
+
+Sparkle attachment reconstructs its SDK from the pinned archive on each build,
+so changed or flattened unpacked framework trees cannot become build inputs.

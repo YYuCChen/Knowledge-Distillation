@@ -1,5 +1,7 @@
 """Attach the pinned Sparkle runtime after PyInstaller's bundle assembly."""
 import hashlib
+from io import BytesIO
+import tarfile
 from pathlib import Path
 import plistlib
 import subprocess
@@ -11,13 +13,27 @@ SDK_SHA256 = '52bf9e88cdd972fc0c81501377a880e90d47031bd8ca5462488f843e2609e192'
 
 
 def attach(app, sdk, config, project):
-    sdk, app = Path(sdk), Path(app)
+    # Only the pinned archive is authoritative. Reusing an unpacked tree can
+    # silently flatten framework symlinks or introduce changed build inputs.
+    archive = Path(sdk) / 'Sparkle-2.9.6.tar.xz'
+    data = archive.read_bytes()
+    if hashlib.sha256(data).hexdigest() != SDK_SHA256:
+        raise ValueError('Sparkle SDK checksum mismatch')
+    with tempfile.TemporaryDirectory(prefix='kd-sparkle-sdk-') as temporary:
+        verified = Path(temporary)
+        with tarfile.open(fileobj=BytesIO(data), mode='r:xz') as tar:
+            tar.extractall(verified, filter='data')
+        return _attach_verified(Path(app), verified, config, project)
+
+
+def _attach_verified(app, sdk, config, project):
     sdk_info = plistlib.loads((sdk/'Sparkle.framework/Resources/Info.plist').read_bytes())
     if sdk_info['CFBundleShortVersionString'] != '2.9.6':
         raise ValueError('Sparkle 2.9.6 is required')
-    archive = sdk/'Sparkle-2.9.6.tar.xz'
-    if SDK_SHA256 and hashlib.sha256(archive.read_bytes()).hexdigest() != SDK_SHA256:
-        raise ValueError('Sparkle SDK checksum mismatch')
+    for name in ('Sparkle', 'Resources', 'Versions/Current'):
+        path = sdk / 'Sparkle.framework' / name
+        if not path.is_symlink() or not path.resolve().is_relative_to(sdk):
+            raise ValueError('Sparkle framework links are invalid')
     contents = app/'Contents'
     subprocess.run(['ditto', str(sdk/'Sparkle.framework'), str(contents/'Frameworks/Sparkle.framework')], check=True)
     source = project/'packaging/sparkle-cli'

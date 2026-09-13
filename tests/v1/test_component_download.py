@@ -52,3 +52,33 @@ def test_bad_response_does_not_activate(tmp_path, bad):
         with pytest.raises(UpdateError):
             ComponentDownloader(tmp_path, client=client).fetch(record)
     assert not (tmp_path / record['sha256']).exists()
+
+
+def test_offline_import_never_calls_network_and_keeps_source(tmp_path):
+    source = tmp_path / 'offline'
+    source.mkdir()
+    data = b'authenticated local component'
+    record = asset(data)
+    (source / 'asset.zip').write_bytes(data)
+    class NoNetwork:
+        def stream(self, *args, **kwargs):
+            pytest.fail('offline installer attempted network')
+    downloader = ComponentDownloader(tmp_path / 'cache', client=NoNetwork(), offline_root=source)
+    assert downloader.offline_asset(record) == source / 'asset.zip'
+    assert downloader.fetch(record).read_bytes() == data
+    assert (source / 'asset.zip').read_bytes() == data
+    (source / 'asset.zip').unlink()
+    assert downloader.fetch(record).read_bytes() == data
+
+
+def test_offline_missing_and_tampered_components_fail_without_network(tmp_path):
+    source = tmp_path / 'offline'
+    source.mkdir()
+    record = asset(b'the expected bytes')
+    downloader = ComponentDownloader(tmp_path / 'cache', offline_root=source)
+    for content in (None, b'bad bytes'):
+        if content is not None:
+            (source / 'asset.zip').write_bytes(content)
+        with pytest.raises(UpdateError, match='离线组件缺失或校验失败'):
+            downloader.fetch(record)
+    assert not (tmp_path / 'cache' / record['sha256']).exists()

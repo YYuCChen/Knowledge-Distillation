@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import tempfile
+from urllib.parse import urlsplit, unquote
 
 import httpx
 from .component_release import _asset
@@ -15,26 +17,75 @@ from .updates import UpdateError
 
 
 class ComponentDownloader:
-    def __init__(self, root, *, client=None):
+    def __init__(self, root, *, client=None, offline_root=None):
         self.root = Path(root)
         self.client = client
+        self.offline_root = Path(offline_root) if offline_root is not None else None
 
     @staticmethod
     def valid(path, asset):
-        if not path.is_file() or path.is_symlink() or path.stat().st_size != asset['size']:
+        if not path.is_file() or path.is_symlink() or getattr(path.lstat(), 'st_file_attributes', 0) & 0x400 or path.stat().st_size != asset['size']:
             return False
         with path.open('rb') as source:
             return hashlib.file_digest(source, 'sha256').hexdigest() == asset['sha256']
+
+    def offline_asset(self, asset):
+        if self.offline_root is None:
+            return None
+        root = self.offline_root
+        if root.is_symlink() or (root.exists() and getattr(root.lstat(), 'st_file_attributes', 0) & 0x400):
+            raise UpdateError('离线组件目录无效。')
+        filename = unquote(urlsplit(asset['url']).path.rsplit('/', 1)[-1])
+        names = [asset['sha256']]
+        if filename and filename not in {'.', '..'} and not any(c in filename for c in '/\\:'):
+            names.append(filename)
+        return next((root / name for name in names if self.valid(root / name, asset)), None)
+
+    def _import_offline(self, asset, cancelled, progress):
+        target = self.root / asset['sha256']
+        if self.valid(target, asset):
+            return target
+        source = self.offline_asset(asset)
+        if source is None:
+            raise UpdateError('离线组件缺失或校验失败，请将发行清单及其列出的组件放在同一目录后重试。')
+        if shutil.disk_usage(self.root).free < asset['size'] + 16 * 1024**2:
+            raise UpdateError('组件缓存空间不足。')
+        handle, name = tempfile.mkstemp(prefix='.offline-', dir=self.root)
+        temporary = Path(name)
+        try:
+            with os.fdopen(handle, 'wb') as dst, source.open('rb') as src:
+                count = 0
+                while block := src.read(1024 * 1024):
+                    if cancelled():
+                        raise InterruptedError('component_download_cancelled')
+                    count += len(block)
+                    if count > asset['size']:
+                        raise UpdateError('离线组件已变化。')
+                    dst.write(block)
+                    progress(count, asset['size'])
+                dst.flush()
+                os.fsync(dst.fileno())
+            if not self.valid(temporary, asset):
+                raise UpdateError('离线组件已变化。')
+            temporary.replace(target)
+            return target
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def fetch(self, asset, *, cancelled=lambda: False, progress=lambda received, total: None):
         # Asset must already belong to an authenticated release; this method
         # validates bytes and transport, it is not publisher authentication.
         _asset(asset)
         self.root.mkdir(parents=True, exist_ok=True)
-        if self.root.is_symlink():
+        if self.root.is_symlink() or getattr(self.root.lstat(), 'st_file_attributes', 0) & 0x400:
             raise UpdateError('组件缓存目录无效。')
         name = asset['sha256']
-        with closing(acquire(self.root / (name + '.lock'))):
+        lock_path = self.root / (name + '.lock')
+        if lock_path.is_symlink() or (lock_path.exists() and getattr(lock_path.lstat(), 'st_file_attributes', 0) & 0x400):
+            raise UpdateError('组件缓存锁路径无效。')
+        with closing(acquire(lock_path)):
+            if self.offline_root is not None:
+                return self._import_offline(asset, cancelled, progress)
             if self.client is not None:
                 return self._fetch(asset, self.client, cancelled, progress)
             with httpx.Client(follow_redirects=True, timeout=60) as client:

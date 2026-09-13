@@ -43,7 +43,8 @@ class ComponentAssembly:
         if installed is not None and Path(installed).is_dir():
             current_id = identity(installed, self.platform)
         cached = {asset['sha256'] for asset in [release['docling'], release['base'], *release['deltas']]
-            if self.downloader.valid(self.downloader.root / asset['sha256'], asset)}
+            if self.downloader.valid(self.downloader.root / asset['sha256'], asset)
+            or self.downloader.offline_asset(asset) is not None}
         return release, plan_release(release, verified_current_identity=current_id,
             verified_model_identity=model_id, verified_cached_assets=cached)
 
