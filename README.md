@@ -63,12 +63,12 @@ V1.2 加强来源修改与证据校验，无效提议保留原文，关键疑点
 ~~~bash
 git clone https://github.com/YYuCChen/Knowledge-Distillation.git
 cd Knowledge-Distillation
-uv venv
+uv venv --python 3.11.16
 uv pip install --python .venv/bin/python -e '.[test]'
 PYTHONPATH=src .venv/bin/python -m pytest -p no:cacheprovider
 ~~~
 
-要求 Python 3.11.4 或更高版本。完整来源采集、OCR、语音和桌面打包功能还需要项目依赖中列出的系统组件、浏览器登录态或用户自己的服务凭据；源码不会提供任何账号、Cookie、API Key、数据库或 Vault。
+本次源码、构建与运行环境统一使用 CPython 3.11.16，具体版本及下载校验契约见 [Python 运行环境](docs/engineering/python-runtime.md)。完整来源采集、OCR、语音和桌面打包功能还需要项目依赖中列出的系统组件、浏览器登录态或用户自己的服务凭据；源码不会提供任何账号、Cookie、API Key、数据库或 Vault。
 
 开发时请使用独立的测试数据目录，不要把个人 SQLite、Obsidian Vault、浏览器资料、模型缓存或凭据复制到仓库。提交 Issue 或日志前，也请先移除来源文本、账号标识、Cookie、路径和其他私人信息。安全问题请参阅 [SECURITY.md](SECURITY.md)。
 

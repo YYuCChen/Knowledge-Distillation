@@ -22,9 +22,11 @@ from knowledge_distiller.primary import (
     QwenRuntimeResult, QwenRuntimeUnavailable, QwenRuntimeFailure,
 )
 
-PYTHON_URL = ('https://github.com/astral-sh/python-build-standalone/releases/download/20260901/'
-              'cpython-3.11.16%2B20260901-aarch64-apple-darwin-install_only_stripped.tar.gz')
-PYTHON_SHA256 = '768f05cf200273bbdda9a5955a5a6892a4b22f2a0b1e4b0a9160f5c7fce86816'
+from .adapters.python_policy import PYTHON_VERSION, RUNTIMES
+from .windows_platform import is_link_or_reparse
+
+PYTHON_URL = RUNTIMES['mac']['url']
+PYTHON_SHA256 = RUNTIMES['mac']['sha256']
 ASSETS = Path(__file__).parent / 'adapters'
 BUSY = {'downloading_runtime', 'installing_runtime', 'downloading_model', 'verifying_runtime'}
 LABELS = {'not_installed':'尚未安装', 'downloading_runtime':'正在下载运行组件',
@@ -43,6 +45,11 @@ def _read(path):
         return json.loads(path.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return {}
+
+
+def _digest(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
 def _atomic_json(path, value):
@@ -82,6 +89,7 @@ class QwenComponent:
         self._thread = None
         self._stop = threading.Event()
         self._process = None
+        self._python_cache = None
 
     @property
     def supported(self):
@@ -108,6 +116,8 @@ class QwenComponent:
         runtime_version, revision = self.identity()
         if not isinstance(manifest, dict) or manifest.get('version') != runtime_version or manifest.get('revision') != revision:
             return False
+        if manifest.get('python', {}).get('version') != PYTHON_VERSION or manifest.get('self_test_passed') is not True:
+            return False
         if not self.python_path(self.active).is_file():
             return False
         files = manifest.get('files')
@@ -122,6 +132,10 @@ class QwenComponent:
                     return False
             except OSError:
                 return False
+        try:
+            self._probe_python(self.active)
+        except (OSError, ValueError, ComponentError, subprocess.SubprocessError):
+            return False
         return True
 
     def _disk_free(self):
@@ -226,14 +240,18 @@ class QwenComponent:
                 return
             staging=self.root/'installing'
             staging.mkdir(exist_ok=True)
+            self._prepare_staging(staging)
             python=staging/'python/bin/python3'
-            if not (staging/'python-ready').is_file():
+            marker = staging/'python-ready'
+            if not marker.is_file() or marker.read_text() != PYTHON_SHA256:
+                self._reset_staging_python(staging)
                 archive=self.root/'python.tar.gz'
                 self._download_python(archive)
                 # data filter rejects escaping paths and unsafe links/devices.
                 with tarfile.open(archive) as source:
                     source.extractall(staging,filter='data')
                 (staging/'python-ready').write_text(PYTHON_SHA256)
+            self._probe_python(staging)
             self._state('installing_runtime')
             self._run([str(python),'-I','-m','pip','install','--disable-pip-version-check',
                        '--no-input','--only-binary=:all:','--require-hashes','--index-url','https://pypi.org/simple',
@@ -250,25 +268,11 @@ class QwenComponent:
             self._state('verifying_runtime')
             self._verify_runtime(staging)
             _atomic_json(staging/'component.json',{'version':QWEN_RUNTIME_VERSION,
-                          'revision':QWEN_MODEL_REVISION,'files':files,'self_test_passed':True})
+                          'revision':QWEN_MODEL_REVISION,'files':files,'self_test_passed':True,
+                          'python':self._probe_python(staging)})
             if self._stop.is_set():
                 raise ComponentError('interrupted')
-            # Standalone Python is relocatable; use its binary directly, never
-            # pip-generated console scripts which embed the staging prefix.
-            if self.active.exists():
-                # Invalid installation is application-owned, retained for diagnosis.
-                previous=self.root/'previous'
-                if previous.exists():
-                    shutil.rmtree(previous)  # Prior inactive, application-owned copy.
-                self.active.rename(previous)
-            try:
-                staging.rename(self.active)
-            except OSError:
-                previous=self.root/'previous'
-                if not self.active.exists() and previous.exists():
-                    previous.rename(self.active)
-                raise
-            self._state('ready')
+            self._activate(staging)
         except Exception as error:
             phase=_read(self.root/'state.json').get('state')
             self._state('interrupted' if self._stop.is_set() else 'failed',detail=self._failure_detail(error,phase))
@@ -277,7 +281,132 @@ class QwenComponent:
         finally:
             lock.close()
 
+    def _probe_python(self, root, *, force=False):
+        python = self.python_path(root)
+        stat = python.stat()
+        key = (str(python.resolve()), stat.st_mtime_ns, stat.st_size)
+        if not force and self._python_cache and self._python_cache[0] == key:
+            return self._python_cache[1]
+        from .subprocess_environment import external_process
+        code = "import json,platform,sys;print(json.dumps(dict(version=platform.python_version(),executable=sys.executable,architecture=platform.machine(),implementation=platform.python_implementation())))"
+        with external_process():
+            result = subprocess.run([str(python), '-I', '-c', code],
+                env=_environment(root), capture_output=True, text=True, encoding='utf-8',
+                timeout=30, check=True, **({'creationflags':subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}))
+        record = json.loads(result.stdout)
+        if record.get('version') != PYTHON_VERSION or record.get('implementation') != 'CPython':
+            raise ComponentError('python_version_mismatch')
+        if Path(record['executable']).resolve() != python.resolve():
+            raise ComponentError('python_location_mismatch')
+        self._python_cache = (key, record)
+        return record
+
+    def _runtime_in_use(self, root):
+        import psutil
+        target = (root/'python').resolve()
+        for process in psutil.process_iter(['exe']):
+            try:
+                executable = process.info['exe']
+                if executable and Path(executable).resolve().is_relative_to(target):
+                    return True
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                continue
+            except psutil.AccessDenied:
+                # Unknown process ownership must never authorize removal.
+                return True
+        return False
+
+    def _prepare_staging(self, staging):
+        lock = ASSETS/('qwen-windows-lock.json' if self.windows else 'qwen-mac-requirements.txt')
+        contract = PYTHON_VERSION + ':' + _digest(lock)
+        marker = staging/'install-contract'
+        if not marker.is_file() or marker.read_text() != contract:
+            self._reset_staging_python(staging)
+            marker.write_text(contract)
+
+    def _reset_staging_python(self, staging):
+        python = staging/'python'
+        if is_link_or_reparse(python) or is_link_or_reparse(staging):
+            raise ComponentError('unsafe_runtime_path')
+        if python.exists():
+            if self._runtime_in_use(staging):
+                raise ComponentError('runtime_in_use')
+            shutil.rmtree(python)
+        (staging/'python-ready').unlink(missing_ok=True)
+        self._python_cache = None
+
+    def _activate(self, staging):
+        # Installation lock also excludes new-version transcription. Check old
+        # versions' actual processes before moving their interpreter directory.
+        if is_link_or_reparse(self.active) or is_link_or_reparse(staging):
+            raise ComponentError('unsafe_runtime_path')
+        if self.active.exists() and self._runtime_in_use(self.active):
+            raise ComponentError('runtime_in_use')
+        previous = self.root/('previous-' + str(time.time_ns()))
+        if self.active.exists():
+            self.active.rename(previous)
+        try:
+            staging.rename(self.active)
+            self._python_cache = None
+            self._verify_runtime(self.active)  # Prove relocation before retirement.
+            manifest = _read(self.active/'component.json')
+            manifest['python'] = self._probe_python(self.active)
+            _atomic_json(self.active/'component.json', manifest)
+        except Exception:
+            if self.active.exists():
+                self.active.rename(staging)
+            if previous.exists():
+                previous.rename(self.active)
+            self._python_cache = None
+            raise
+        self._state('ready')
+        self._retire_previous()
+        for cache in (self.root/'downloads', self.active/'pip-cache', self.active/'cache'):
+            if cache.is_dir() and not is_link_or_reparse(cache):
+                shutil.rmtree(cache)
+        (self.root/'python.tar.gz').unlink(missing_ok=True)
+
+    def _retire_previous(self):
+        # Only known installer-created copies; preserve unique model files and
+        # unknown material. A retained copy is never selected for execution.
+        records = []
+        for old in [self.root/'previous', *self.root.glob('previous-*')]:
+            if not old.is_dir() or is_link_or_reparse(old):
+                continue
+            manifest = _read(old/'component.json')
+            if not isinstance(manifest, dict) or not manifest.get('version'):
+                continue
+            if self._runtime_in_use(old):
+                records.append({'directory':old.name,'status':'in-use'})
+                continue
+            python = old/'python'
+            if python.exists() and not is_link_or_reparse(python):
+                shutil.rmtree(python)
+            model = old/'model'
+            unique = is_link_or_reparse(model)
+            if model.exists() and not is_link_or_reparse(model):
+                for path in model.rglob('*'):
+                    if not path.is_file() or '.cache' in path.relative_to(model).parts:
+                        continue
+                    replacement = self.active/'model'/path.relative_to(model)
+                    if is_link_or_reparse(path) or not replacement.is_file() or _digest(path) != _digest(replacement):
+                        unique = True
+                        break
+                if not unique and not is_link_or_reparse(model):
+                    shutil.rmtree(model)
+            for cache in (old/'cache', old/'pip-cache'):
+                if cache.is_dir() and not is_link_or_reparse(cache):
+                    shutil.rmtree(cache)
+            for name in ('python-ready','install-result.json','install-contract'):
+                (old/name).unlink(missing_ok=True)
+            if {p.name for p in old.iterdir()} == {'component.json'}:
+                (old/'component.json').unlink()
+                old.rmdir()
+            records.append({'directory':old.name,'status':'unique-files-retained' if old.exists() else 'retired'})
+        _atomic_json(self.root/'retirement.json', {'python':PYTHON_VERSION,'records':records})
+
     def _verify_runtime(self,root):
+        self._probe_python(root, force=True)
         with tempfile.TemporaryDirectory(dir=self.root,prefix='selftest-') as temporary:
             output=Path(temporary)/'result.json'
             worker = 'qwen_windows_worker.py' if self.windows else 'qwen_worker.py'
@@ -301,6 +430,8 @@ class QwenComponent:
         if isinstance(error,PermissionError):return '无法写入安装目录。请检查应用数据目录的访问权限。'
         if isinstance(error,(urllib.error.URLError,TimeoutError)):
             return '下载连接失败。请检查网络后继续安装。'
+        if str(error)=='runtime_in_use':return '旧运行组件仍在使用。请等待识别结束或关闭其他应用实例后重试。'
+        if str(error)=='python_version_mismatch':return '运行组件 Python 版本不匹配，请重新安装组件。'
         if str(error)=='download_checksum_mismatch':return '运行组件校验未通过，重试会重新下载。'
         if phase=='verifying_runtime':return '文件已下载，但本机识别自检未通过。请关闭占用较多内存的程序后重试；已有下载保留。'
         if phase=='downloading_model':return '模型下载未完成。请检查网络和磁盘空间后继续；已有可用文件会复用。'
@@ -381,6 +512,17 @@ class ComponentQwenRuntime:
         self.component=component
 
     def transcribe(self,audio_path):
+        from .file_lock import acquire
+        if not self.component.root.is_dir():
+            raise QwenRuntimeUnavailable
+        try:
+            with acquire(self.component.root/'install.lock'):
+                self.component._probe_python(self.component.active, force=True)
+                return self._transcribe(audio_path)
+        except (BlockingIOError, OSError, ComponentError, subprocess.SubprocessError, ValueError) as error:
+            raise QwenRuntimeUnavailable from error
+
+    def _transcribe(self,audio_path):
         if not self.component.supported or not self.component.ready():
             raise QwenRuntimeUnavailable
         active=self.component.active

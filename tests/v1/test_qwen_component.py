@@ -20,6 +20,7 @@ def component(tmp_path,monkeypatch):
     # its own wheel/embedded-runtime installer tests.
     monkeypatch.setattr(module.QwenComponent,'windows',property(lambda self:False))
     monkeypatch.setattr(module.QwenComponent,'supported',property(lambda self:True))
+    monkeypatch.setattr(module.QwenComponent, '_probe_python', lambda self, root, **kw: {'version':module.PYTHON_VERSION,'executable':str(self.python_path(root)), 'implementation':'CPython'})
     result=module.QwenComponent(tmp_path/'qwen')
     def download(path):
         with tarfile.open(path,'w:gz') as archive:

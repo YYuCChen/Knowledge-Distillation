@@ -7,6 +7,8 @@ import sys
 
 
 def main():
+    import runpy
+    runpy.run_path(str(Path(__file__).with_name("python_policy.py")))["check_current"]()
     action, model, model_id, revision, runtime_version = sys.argv[1:6]
     from importlib.metadata import version
     if version('mlx-qwen3-asr') != runtime_version:

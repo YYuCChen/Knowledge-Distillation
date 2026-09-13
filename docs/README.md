@@ -10,7 +10,8 @@
 | 哪些知识和用户数据边界必须保留 | [知识语义](product/semantics.md) |
 | 界面修改如何保持用户意图 | [设计维护](product/design.md) |
 | 代码职责在哪里 | [架构](engineering/architecture.md) |
-| 怎样证明完成 | [测试与证据](engineering/testing.md) |
+| 工作纪律、怎样证明完成 | [测试与证据](engineering/testing.md) |
+| Python共同基线与旧环境退役 | [运行环境契约](engineering/python-runtime.md) |
 | 源码、构建和发行如何对应 | [发布](engineering/release.md) |
 | 什么保留、什么清理 | [存储](engineering/storage.md) |
 | 哪些后续优化已提出 | [版本优化待办](roadmap/next-version.md) |

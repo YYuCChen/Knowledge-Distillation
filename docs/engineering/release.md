@@ -23,3 +23,8 @@ Mac与Windows分别进行原生验证。双平台流程使用 `scripts/dual_buil
 标签 `v2026.09.13.3` 与构建 `2026.09.13.3` 对应，标签直接指向已验收源码 `7dffcec82bd1b3aa2938e44edcde35f753c696ba`。PR #4 合并提交 `951715fa22649ada0df7a33acd22b8cefd44bcd6` 还包含后续 CI 与交付文档；这些提交未改变应用代码。
 
 完整包、两平台签名更新源、从正式构建 `2026.09.11.16` 生成的差量包，以及 SHA256SUMS 和 release-manifest 均放在 [Release](https://github.com/YYuCChen/Knowledge-Distillation/releases/tag/v2026.09.13.3)。具体测试与限制见 [V1.2 验收记录](../releases/v1.2/README.md)。
+
+
+## 发行附件大小门禁
+
+Windows完整ZIP严格小于2,000,000,000字节；全部附件严格小于2,147,483,648字节。数值唯一配置为 `packaging/release_policy.json`。打包后与上传前执行 `scripts/check_release_sizes.py <全部实际附件> --report <验收文件>`，检查真实大小及剩余额度，等于上限即失败。禁止删除必要功能、依赖、许可或改为隐含联网/分卷安装来缩包。

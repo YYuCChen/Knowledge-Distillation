@@ -47,4 +47,6 @@ def main():
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()
+    from knowledge_distiller.v1.adapters.python_policy import check_current
+    check_current()
     raise SystemExit(main())

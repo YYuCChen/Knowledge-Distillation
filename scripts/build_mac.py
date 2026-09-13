@@ -12,6 +12,9 @@ import subprocess
 import sys
 import tempfile
 
+_policy = runpy.run_path(str(Path(__file__).resolve().parents[1] / "src/knowledge_distiller/v1/adapters/python_policy.py"))
+_python = _policy["check_current"]()
+
 parser=argparse.ArgumentParser(description='构建知识蒸馏器 Mac 发行候选')
 parser.add_argument('--output',type=Path,required=True)
 parser.add_argument('--version', required=True, help='递增构建号 YYYY.MM.DD.N')
@@ -49,7 +52,7 @@ def source_fingerprints():
     return {str(p.relative_to(project)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted(files)}
 
-manifest={'architecture':platform.machine(),'build_macos':platform.mac_ver()[0],
+manifest={'python':_python['version'], 'python_runtime':_python, 'architecture':platform.machine(),'build_macos':platform.mac_ver()[0],
           'version':args.version, 'product_version':args.product_version,
           'git_head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=project,text=True).strip(),
           'git_dirty':bool(subprocess.check_output(['git','status','--porcelain'],cwd=project,text=True).strip()),
@@ -81,6 +84,7 @@ try:
                                           manual=args.manual_update_only))
     manifest['manual_update_only'] = info['KDManualUpdateOnly']
     info_path.write_bytes(plistlib.dumps(info))
+    manifest['python_inventory'] = _policy['bundle_inventory'](app)
     manifest['code_signing'] = signing['sign_bundle'](app, signing_config)
     subprocess.run(['/usr/bin/codesign','--verify','--deep','--strict',str(app)],check=True)
     manifest['status']='built'

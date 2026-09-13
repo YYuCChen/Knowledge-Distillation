@@ -6,12 +6,14 @@ import shutil
 import sys
 import urllib.request
 import zipfile
+import tarfile
+from .adapters.python_policy import RUNTIMES, PYTHON_VERSION
 
 MODEL_ID = 'Qwen/Qwen3-ASR-1.7B-hf'
 MODEL_REVISION = 'bcd2b5b7f32b480ab5790554cfa8347f246a14f3'
-RUNTIME_VERSION = 'windows-transformers-5.16.1-cpu-v1'
-PYTHON_URL = 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip'
-PYTHON_SHA256 = '4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3'
+RUNTIME_VERSION = 'windows-transformers-5.16.1-cpu-python311-v2'
+PYTHON_URL = RUNTIMES['windows']['url']
+PYTHON_SHA256 = RUNTIMES['windows']['sha256']
 
 
 def copy_vc_runtime(python):
@@ -52,16 +54,24 @@ def install(component):
     from .qwen_component import ASSETS, _atomic_json
     staging = component.root / 'installing'
     staging.mkdir(exist_ok=True)
+    component._prepare_staging(staging)
     cache = component.root / 'downloads'
     cache.mkdir(exist_ok=True)
-    archive = cache / 'python.zip'
+    archive = cache / 'python-3.11.16.tar.gz'
     download(component, PYTHON_URL, archive, PYTHON_SHA256)
+    marker = staging/'python-ready'
+    if not marker.is_file() or marker.read_text() != PYTHON_SHA256:
+        component._reset_staging_python(staging)
+        with tarfile.open(archive) as source:
+            source.extractall(staging, filter='data')
+        marker.write_text(PYTHON_SHA256)
     python = staging / 'python'
-    extract(archive, python)
     copy_vc_runtime(python)
-    (python / 'python312._pth').write_text('python312.zip\n.\nLib/site-packages\nimport site\n', encoding='ascii')
+    component._probe_python(staging)
     component._state('installing_runtime')
     lock = json.loads((ASSETS / 'qwen-windows-lock.json').read_text(encoding='utf-8'))
+    if lock.get('python') != PYTHON_VERSION:
+        raise RuntimeError('wheel_lock_python_mismatch')
     site = python / 'Lib/site-packages'
     for item in lock['wheels']:
         archive = cache / item['filename']
@@ -84,18 +94,7 @@ def install(component):
                     'import torch; from transformers import Qwen3ASRForConditionalGeneration, AutoProcessor; import librosa'], staging)
     component._state('verifying_runtime')
     component._verify_runtime(staging)
-    _atomic_json(staging / 'component.json', dict(version=RUNTIME_VERSION, revision=MODEL_REVISION, files=files, self_test_passed=True))
+    _atomic_json(staging / 'component.json', dict(version=RUNTIME_VERSION, revision=MODEL_REVISION, files=files, self_test_passed=True, python=component._probe_python(staging)))
     if component._stop.is_set():
         raise RuntimeError('interrupted')
-    previous = None
-    if component.active.exists():
-        import time
-        previous = component.root / ('previous-' + str(time.time_ns()))
-        component.active.rename(previous)
-    try:
-        staging.rename(component.active)
-    except OSError:
-        if previous is not None and not component.active.exists():
-            previous.rename(component.active)
-        raise
-    component._state('ready')
+    component._activate(staging)

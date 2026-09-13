@@ -12,6 +12,8 @@ def main():
     p.add_argument('--version',required=True)
     p.add_argument('--commit',required=True)
     args=p.parse_args()
+    import runpy
+    runpy.run_path(str(Path(__file__).with_name('check_release_sizes.py')))['check_files']([args.archive])
     with zipfile.ZipFile(args.archive) as archive:
         names=archive.namelist()
         for name in names:

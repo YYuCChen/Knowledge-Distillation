@@ -19,3 +19,13 @@ def system_label():
     version = sys.getwindowsversion()
     release = '11' if version.major == 10 and version.build >= 22000 else str(version.major)
     return f'Windows {release} · {machine()}'
+
+
+def is_link_or_reparse(path):
+    """Python 3.11 has no Path.is_junction; reject native reparse points too."""
+    import stat
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)

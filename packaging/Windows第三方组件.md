@@ -4,7 +4,7 @@
 
 | 组件 | 本次版本与用途 | 来源与许可声明 |
 | --- | --- | --- |
-| Python | 3.12.10，基础运行时 | [Python](https://www.python.org/downloads/release/python-31210/)，PSF 及其附带第三方许可，见 `licenses/Python-LICENSE.txt`。 |
+| Python | 3.11.16，基础运行时 | [Python](https://github.com/astral-sh/python-build-standalone/releases/tag/20260901)，PSF 及其附带第三方许可，见 `licenses/Python-LICENSE.txt`。 |
 | Node.js | 24.19.0，OpenCLI JavaScript 运行时 | [对应版本完整 LICENSE](https://github.com/nodejs/node/blob/v24.19.0/LICENSE)，Node.js 自身采用 MIT，内置依赖各自条款见该文件；补充副本为 `licenses/models/Node-v24.19.0-LICENSE.txt`。 |
 | FFmpeg / FFprobe | 9.0.1 essentials，音视频恢复与转换 | [Gyan Windows builds](https://www.gyan.dev/ffmpeg/builds/)。实际二进制声明 `--enable-gpl --enable-version3 --enable-static`，随构建 README 标注 **GPL v3**；见 `licenses/FFmpeg-LICENSE`、`licenses/FFmpeg-README.txt`。源码定位为上游提交 [bf1b838f2a](https://github.com/FFmpeg/FFmpeg/commit/bf1b838f2a)。 |
 | PaddlePaddle / PaddleOCR / PaddleX | 3.3.0 / 3.7.0 / 3.7.2，Windows OCR | [PaddlePaddle](https://github.com/PaddlePaddle/Paddle)、[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)、[PaddleX](https://github.com/PaddlePaddle/PaddleX)，对应已安装 wheel 声明 Apache-2.0；许可证在 `licenses` 对应发行名目录。 |

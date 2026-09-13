@@ -1,5 +1,6 @@
 """Signed Windows update payloads: complete file manifest plus changed files only."""
 from __future__ import annotations
+from .windows_platform import is_link_or_reparse
 import hashlib
 import json
 import os
@@ -30,7 +31,7 @@ def inventory(root):
     root = Path(root)
     result = {}
     for path in sorted(root.rglob('*')):
-        if path.is_symlink() or (hasattr(path, 'is_junction') and path.is_junction()):
+        if is_link_or_reparse(path):
             raise UpdateError('应用目录含链接，不能进行差量更新。')
         if path.is_file():
             name = safe_name(path.relative_to(root).as_posix())

@@ -64,6 +64,7 @@ coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='Knowledge
 
 # A small onefile helper runs outside the replaced application directory.
 u = Analysis([str(project / 'packaging/windows_update_entry.py')], pathex=[str(project / 'src')],
+             datas=[(str(project/'src/knowledge_distiller/v1/adapters/python-runtime.json'),'knowledge_distiller/v1/adapters')],
              hiddenimports=['cryptography.hazmat.primitives.asymmetric.ed25519'],
              excludes=['torch','paddle','docling','flask','tkinter','pytest'])
 upyz = PYZ(u.pure)

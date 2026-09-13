@@ -44,6 +44,7 @@ def attach(app, sdk, config, project):
         with (work/'build.log').open('w') as log:
             subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--onefile',
                 '--name', 'update-helper', '--paths', str(project/'src'),
+                '--add-data', str(project/'src/knowledge_distiller/v1/adapters/python-runtime.json')+':knowledge_distiller/v1/adapters',
                 '--distpath', str(work/'dist'), '--workpath', str(work/'work'), '--specpath', str(work),
                 str(project/'packaging/update_entry.py')], stdout=log, stderr=subprocess.STDOUT, check=True)
         shutil.copy2(work/'dist/update-helper', contents/'MacOS/update-helper')

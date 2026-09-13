@@ -11,8 +11,13 @@ from importlib.metadata import version
 
 def check(destination, audio=None, *, ocr_image=None, pdf=None, epub=None, component_root=None):
     report = {'frozen':bool(getattr(sys,'frozen',False)),'checks':{}}
-    stage = 'binaries'
+    stage = 'python'
     try:
+        from .adapters.python_policy import check_current, bundle_inventory
+        report['python'] = check_current()
+        if getattr(sys, 'frozen', False):
+            report['python_inventory'] = bundle_inventory(Path(sys._MEIPASS))
+        stage = 'binaries'
         for tool in ('node','ffmpeg','ffprobe'):
             result=subprocess.run([tool,'--version' if tool=='node' else '-version'],capture_output=True,text=True,check=True,timeout=15)
             report['checks'][tool]=result.stdout.splitlines()[0]
@@ -64,6 +69,7 @@ def check(destination, audio=None, *, ocr_image=None, pdf=None, epub=None, compo
             if component_root is None:
                 raise ValueError('Explicit component root is required for ASR checks')
             result=ComponentQwenRuntime(QwenComponent(component_root)).transcribe(Path(audio))
+            report['qwen_python'] = QwenComponent(component_root)._probe_python(QwenComponent(component_root).active)
             report['checks']['asr']={'text':result.text,'chunks':len(result.chunks or [])}
         if ocr_image:
             stage = 'ocr'
