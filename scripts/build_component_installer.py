@@ -29,12 +29,13 @@ def main():
     if not tool.is_file():
         parser.error('缺少固定版本差量解码器。')
     resources = project / 'src/knowledge_distiller/v1/adapters'
-    command = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--onefile',
+    command = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--noupx', '--onefile',
         '--name', 'KnowledgeDistillerInstaller', '--paths', str(project / 'src'),
         '--distpath', str(args.output / 'dist'), '--workpath', str(args.output / 'work'),
         '--specpath', str(args.output), '--add-binary', str(tool) + os.pathsep + 'tools']
     for source, destination in [
         (project / 'packaging/update_config.json', 'knowledge_distiller/v1/adapters'),
+        (resources / 'update-codec-notices.txt', 'knowledge_distiller/v1/adapters'),
         (resources / 'python-runtime.json', 'knowledge_distiller/v1/adapters'),
         (resources / 'docling-models-manifest.json', 'knowledge_distiller/v1/adapters')]:
         command += ['--add-data', str(source) + os.pathsep + destination]
