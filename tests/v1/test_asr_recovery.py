@@ -120,13 +120,18 @@ def test_decoder_padding_does_not_expand_source_timeline(tmp_path):
 
 
 def test_recovery_rejects_linked_child_root(tmp_path):
-    import pytest
+    import os
+    import subprocess
     audio = audio_fixture(tmp_path)
     recognizer = Recognizer()
     recognize_resumable(recognizer, audio, tmp_path)
     other = tmp_path / 'untouched'
     other.mkdir()
-    (tmp_path / 'asr-recovery').symlink_to(other, target_is_directory=True)
+    if os.name == 'nt':
+        subprocess.run(['cmd', '/c', 'mklink', '/J', str(tmp_path / 'asr-recovery'),
+                        str(other)], check=True, capture_output=True)
+    else:
+        (tmp_path / 'asr-recovery').symlink_to(other, target_is_directory=True)
     with pytest.raises(OSError, match='asr_recovery_directory_link'):
         recognize_resumable(recognizer, audio, tmp_path)
     assert list(other.iterdir()) == []

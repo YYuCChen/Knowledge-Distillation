@@ -9,6 +9,7 @@ import sys
 
 from knowledge_distiller.primary import PrimaryFailure, PrimaryRecognition, StandardAudio
 from .local_records import write_record
+from .windows_platform import filesystem_path, is_link_or_reparse
 
 # A retry may perform bounded extra inference. Successful children do not spend
 # this budget, so later retries can always reach the remaining failed leaves.
@@ -19,7 +20,7 @@ DECODER_PADDING_SECONDS = 0.25
 
 def _record(path, identity):
     from .primary_cache import _checksum
-    if path.is_symlink():
+    if is_link_or_reparse(path):
         raise OSError('asr_recovery_checkpoint_link')
     try:
         value = json.loads(path.read_text(encoding='utf-8'))
@@ -74,7 +75,10 @@ def _cut(original):
 
 
 def recognize_resumable(recognizer, audio, directory):
-    return _recognize(recognizer, audio, Path(directory), [MAX_RECOVERY_CALLS], False)
+    directory = filesystem_path(directory)
+    if is_link_or_reparse(directory):
+        raise OSError('asr_recovery_directory_link')
+    return _recognize(recognizer, audio, directory, [MAX_RECOVERY_CALLS], False)
 
 
 def _decode_child(recognizer, audio, directory):
@@ -82,7 +86,7 @@ def _decode_child(recognizer, audio, directory):
     from .primary_cache import recognize_cached, qualify_timeline
     padded_path = directory / 'decoder.wav'
     decoder_cache = directory / 'decoder-cache'
-    if padded_path.is_symlink() or decoder_cache.is_symlink():
+    if is_link_or_reparse(padded_path) or is_link_or_reparse(decoder_cache):
         raise OSError('asr_decoder_path_link')
     decoder_cache.mkdir(exist_ok=True)
     with wave.open(str(audio.path), 'rb') as original:
@@ -154,12 +158,12 @@ def _recognize(recognizer, audio, directory, budget, subdivision):
         for index, (start, end) in enumerate(((0, cut), (cut, count))):
             children = directory / 'asr-recovery'
             child = children / f'{index:05d}'
-            if children.is_symlink() or child.is_symlink():
+            if is_link_or_reparse(children) or is_link_or_reparse(child):
                 raise OSError('asr_recovery_directory_link')
             child.mkdir(parents=True, exist_ok=True)
             path = child / 'audio.wav'
             temporary = child / 'audio.tmp'
-            if path.is_symlink() or temporary.is_symlink():
+            if is_link_or_reparse(path) or is_link_or_reparse(temporary):
                 raise OSError('asr_recovery_audio_link')
             original.setpos(start)
             pcm = original.readframes(end - start)
