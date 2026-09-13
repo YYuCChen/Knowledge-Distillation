@@ -38,11 +38,11 @@ def parse_vtt(raw, duration, language):
         text = html.unescape(re.sub(r'<[^>]*>', '', '\n'.join(lines[timing+1:]))).strip()
         if not text or not 0 <= start < end <= duration+1:
             raise ValueError('invalid_cue')
-        if rows and (start < rows[-1][0] or start > max(r[1] for r in rows)+5):
-            raise ValueError('coverage_gap_or_order')
+        if rows and start < rows[-1][0]:
+            raise ValueError('cue_order')
         rows.append((start, end, text))
-    if not rows or rows[0][0] > 5 or max(r[1] for r in rows) < duration-5:
-        raise ValueError('incomplete_coverage')
+    if not rows:
+        raise ValueError('empty_caption')
     chunks = []; mapping = []; previous = None; offset = 0
     for index, (start, end, text) in enumerate(rows):
         original = text
@@ -64,7 +64,43 @@ def parse_vtt(raw, duration, language):
     return PrimaryRecovery('\n'.join(c.text for c in chunks), language, tuple(chunks)), mapping
 
 
-def select_subtitle(captured):
+def _uncovered(chunks,duration):
+    cursor=0.0
+    result=[]
+    for chunk in chunks:
+        if chunk.start_seconds>cursor:result.append((cursor,chunk.start_seconds))
+        cursor=max(cursor,chunk.end_seconds)
+    if cursor<duration:result.append((cursor,duration))
+    return result
+
+
+def _digital_silence(audio,gaps):
+    """Zero-valued PCM proves no recorded sound; noise is explicitly unknown.
+
+    No duration threshold or VAD score is allowed to assert speech completeness.
+    Nonzero/unsupported gaps conservatively use the existing ASR fallback.
+    """
+    import wave
+    if audio is None:return False
+    try:
+        with wave.open(str(audio.path),'rb') as stream:
+            rate=stream.getframerate()
+            if stream.getsampwidth()!=2 or stream.getnchannels()!=1:return False
+            for start,end in gaps:
+                left,right=int(start*rate),min(stream.getnframes(),int(end*rate+.999999))
+                if left>=stream.getnframes() or right<=left:return False
+                stream.setpos(left)
+                remaining=right-left
+                while remaining:
+                    count=min(remaining,rate)
+                    data=stream.readframes(count)
+                    if len(data)!=count*2 or any(data):return False
+                    remaining-=count
+            return True
+    except (OSError,ValueError,EOFError,wave.Error):return False
+
+
+def select_subtitle(captured, audio=None):
     metadata = captured.metadata
     language = metadata.get('original_language')
     diagnostics = []
@@ -88,8 +124,14 @@ def select_subtitle(captured):
             recovery, mapping = parse_vtt(track['text'], captured.duration_seconds, track['language'])
         except (KeyError, TypeError, ValueError, IndexError):
             diagnostics.append({'language': track.get('language'), 'code': 'invalid_or_incomplete_vtt'}); continue
+        gaps=_uncovered(recovery.chunks,captured.duration_seconds)
+        if gaps and not _digital_silence(audio,gaps):
+            diagnostics.append({'language':track['language'],'code':'caption_gap_needs_audio_recognition',
+                                'gaps':gaps})
+            continue
         return recovery, {'caption_selection': diagnostics, 'subtitle_baseline': {
             'source_key': captured.source_key, 'language': track['language'], 'kind': track['kind'],
             'raw_sha256': hashlib.sha256(track['text'].encode()).hexdigest(),
-            'text': recovery.text, 'cue_map': mapping, 'verification': 'structural_only_not_listened'}}
+            'text': recovery.text, 'cue_map': mapping, 'verification': 'structural_only_not_listened',
+            'gaps':gaps,'gap_verification':'zero_pcm' if gaps else 'no_uncovered_interval'}}
     return None, {'caption_selection': diagnostics or [{'code': 'no_captions'}]}

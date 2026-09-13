@@ -1,0 +1,176 @@
+import hashlib
+import json
+import zipfile
+
+import pytest
+
+from knowledge_distiller.v1.docling_component import DoclingComponent, DoclingComponentError
+
+
+def fixture(tmp_path):
+    source = tmp_path / 'old-app-models'
+    (source / 'family').mkdir(parents=True)
+    data = b'fixed model bytes'
+    (source / 'family/model.bin').write_bytes(data)
+    manifest = {'docling_version': '2.126.0', 'files': {'family/model.bin': {
+        'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}}}
+    return source, DoclingComponent(tmp_path / 'components', manifest=manifest)
+
+
+def test_import_checks_bytes_without_trusting_source_manifest(tmp_path):
+    source, component = fixture(tmp_path)
+    (source / 'manifest.json').write_text('{"files":{}}')
+    target = component.import_existing(source)
+    assert target == component.active
+    assert component.verify() == target
+    assert json.loads((target / 'manifest.json').read_text()) == component.manifest
+    (source / 'family/model.bin').write_bytes(b'changed old application')
+    assert component.verify() == target
+    assert not list(component.root.glob('.import-*'))
+
+
+def test_corruption_does_not_activate_or_modify_source(tmp_path):
+    source, component = fixture(tmp_path)
+    (source / 'family/model.bin').write_bytes(b'corrupt')
+    with pytest.raises(DoclingComponentError, match='corrupt'):
+        component.import_existing(source)
+    assert not component.active.exists()
+    assert (source / 'family/model.bin').read_bytes() == b'corrupt'
+
+
+def test_failed_copy_keeps_previous_component_and_cleans_stage(tmp_path, monkeypatch):
+    source, component = fixture(tmp_path)
+    old = component.root / 'previous-version'
+    old.mkdir(parents=True)
+    (old / 'model').write_bytes(b'keep')
+    def fail(*args, **kwargs):
+        raise OSError('disk full')
+    monkeypatch.setattr('knowledge_distiller.v1.docling_component.shutil.copyfileobj', fail)
+    with pytest.raises(OSError, match='disk full'):
+        component.import_existing(source)
+    assert not component.active.exists()
+    assert (old / 'model').read_bytes() == b'keep'
+    assert not list(component.root.glob('.import-*'))
+
+
+def test_symlink_model_is_rejected(tmp_path):
+    source, component = fixture(tmp_path)
+    model = source / 'family/model.bin'
+    outside = tmp_path / 'outside'
+    model.rename(outside)
+    try:
+        model.symlink_to(outside)
+    except OSError:
+        pytest.skip('symlink creation unavailable')
+    with pytest.raises(DoclingComponentError, match='unsafe_path'):
+        component.import_existing(source)
+
+
+@pytest.mark.parametrize('name', ['../outside', '/absolute', 'a\\b', 'C:drive', 'a//b'])
+def test_invalid_inventory_paths(tmp_path, name):
+    with pytest.raises(DoclingComponentError, match='invalid_inventory'):
+        DoclingComponent(tmp_path, manifest={'files': {name: {'size': 0, 'sha256': '0'*64}}})
+
+
+@pytest.mark.parametrize('bad', [None, 'extra', 'duplicate', 'corrupt'])
+def test_archive_activation_accepts_only_trusted_bytes(tmp_path, bad):
+    source, component = fixture(tmp_path)
+    archive = tmp_path / 'component.zip'
+    with zipfile.ZipFile(archive, 'w') as target:
+        target.writestr('family/model.bin', b'bad' if bad == 'corrupt' else
+                        (source / 'family/model.bin').read_bytes())
+        if bad == 'extra':
+            target.writestr('../escape', b'bad')
+        if bad == 'duplicate':
+            target.writestr('family/model.bin', b'bad')
+    if bad:
+        with pytest.raises(DoclingComponentError):
+            component.import_archive(archive)
+        assert not component.active.exists()
+    else:
+        assert component.import_archive(archive) == component.active
+        assert component.verify() == component.active
+    assert not list(component.root.glob('.import-*'))
+
+
+def test_repair_keeps_corrupt_component_as_recoverable_evidence(tmp_path):
+    source, component = fixture(tmp_path)
+    component.import_existing(source)
+    (component.active / 'family/model.bin').write_bytes(b'corrupt old bytes')
+    component.import_existing(source)
+    component.verify()
+    retained, = component.root.glob('.retained-corrupt-*')
+    assert (retained / 'family/model.bin').read_bytes() == b'corrupt old bytes'
+
+
+def test_converter_detects_model_damage_after_prior_success(tmp_path, monkeypatch):
+    from knowledge_distiller.v1.docling_source import DoclingSourceConverter, DoclingSourceError
+    import knowledge_distiller.v1.docling_component as module
+    calls = []
+    def verify(self, root=None):
+        calls.append(1)
+        if len(calls) > 1:
+            raise module.DoclingComponentError('docling_component_corrupt')
+        return self.active
+    monkeypatch.setattr(module.DoclingComponent, 'verify', verify)
+    converter = DoclingSourceConverter(components_root=tmp_path, converter_factory=lambda: None)
+    converter.check_component()
+    assert converter.readiness['state'] == 'ready'
+    with pytest.raises(DoclingSourceError, match='docling_component_corrupt'):
+        converter.check_component()
+    assert converter.readiness['state'] == 'unavailable'
+    assert '安装器' in converter.readiness['message']
+
+
+def test_import_and_reopen_long_model_paths(tmp_path):
+    from knowledge_distiller.v1.windows_platform import filesystem_path
+    source, first = fixture(tmp_path)
+    nested = tmp_path / ('long-model-parent-' * 5) / ('preserved-user-directory-' * 4)
+    component = DoclingComponent(nested / 'components', manifest=first.manifest)
+    target = component.import_existing(source)
+    assert len(str(target / 'family/model.bin')) > 260
+    assert (target / 'family/model.bin').read_bytes() == b'fixed model bytes'
+    reopened = DoclingComponent(nested / 'components', manifest=first.manifest)
+    assert reopened.verify() == target
+    assert filesystem_path(target) == target
+
+
+@pytest.mark.parametrize('valid', [True, False])
+def test_archive_notices_are_exact_trusted_bytes(tmp_path, valid):
+    source, component = fixture(tmp_path)
+    archive = tmp_path / 'models-with-notices.zip'
+    with zipfile.ZipFile(archive, 'w') as output:
+        output.write(source / 'family/model.bin', 'family/model.bin')
+        output.writestr('NOTICE.txt', component.notices if valid else b'changed license text')
+    if valid:
+        target = component.import_archive(archive)
+        assert (target / 'NOTICE.txt').read_bytes() == component.notices
+    else:
+        with pytest.raises(DoclingComponentError):
+            component.import_archive(archive)
+        assert not component.active.exists()
+
+
+@pytest.mark.parametrize('tampered', [False, True])
+def test_shared_notice_archive_is_independent_of_checkout_line_endings(tmp_path, monkeypatch, tampered):
+    import zipfile
+    from knowledge_distiller.v1 import docling_component as module
+    adapter = tmp_path / 'checkout/adapters'
+    adapter.mkdir(parents=True)
+    notice = b'License notice\nKeep attribution.\n'
+    (adapter / 'docling-model-notices.txt').write_bytes(notice.replace(b'\n', b'\r\n'))
+    monkeypatch.setattr(module, '__file__', str(adapter.parent / 'docling_component.py'))
+    payload = b'model'
+    manifest = {'files': {'model.bin': {'size':len(payload), 'sha256':hashlib.sha256(payload).hexdigest()}}}
+    component = module.DoclingComponent(tmp_path / 'components', manifest=manifest)
+    archive = tmp_path / 'shared.zip'
+    with zipfile.ZipFile(archive, 'w') as package:
+        package.writestr('model.bin', payload)
+        package.writestr('NOTICE.txt', notice.replace(b'License', b'Changed') if tampered else notice)
+    if tampered:
+        with pytest.raises(module.DoclingComponentError):component.import_archive(archive)
+        assert not component.active.exists()
+    else:
+        component.import_archive(archive)
+        assert (component.active / 'NOTICE.txt').read_bytes() == notice
+        assert (component.active / 'model.bin').read_bytes() == payload

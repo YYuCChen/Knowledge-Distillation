@@ -3,6 +3,22 @@ import ctypes
 import sys
 
 
+def filesystem_path(path):
+    """Use Win32 extended paths without requiring machine-wide policy changes.
+
+    abspath is lexical: resolving junctions here would hide them from the
+    caller's subsequent ordinary-file and reparse-point checks.
+    """
+    import os
+    from pathlib import Path
+    if os.name != 'nt':
+        return Path(path)
+    value = os.path.abspath(path)
+    if not value.startswith('\\\\?\\'):
+        value = ('\\\\?\\UNC\\' + value[2:]) if value.startswith('\\\\') else '\\\\?\\' + value
+    return Path(value)
+
+
 def machine():
     # GetNativeSystemInfo's first WORD is wProcessorArchitecture. A buffer of
     # the documented SYSTEM_INFO size preserves the remaining native fields.

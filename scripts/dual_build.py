@@ -90,7 +90,7 @@ def make_requests(config, commit, version, product, mac_source, win_source):
     mac_py = config['mac_python']; win_py = config['windows_python']
     common = dict(source_commit=commit, version=version, product_version=product)
     mac = dict(common, source=str(mac_source), env={'LANG':'en_US.UTF-8','LC_ALL':'en_US.UTF-8','PYTHONUTF8':'1','PYTHONPATH':'{source}/src:{source}'}, steps=[
-        {'name':'build','command':[mac_py,'scripts/build_mac.py','--output','{attempt}/build','--version',version,'--product-version',product,'--signing-config',config['signing_config'],'--sparkle-sdk',config['sparkle_sdk'],'--update-config','packaging/update_config.json','--docling-models',config['mac_models']]},
+        {'name':'build','command':[mac_py,'scripts/build_mac.py','--output','{attempt}/build','--version',version,'--product-version',product,'--signing-config',config['signing_config'],'--sparkle-sdk',config['sparkle_sdk'],'--update-config','packaging/update_config.json']},
         {'name':'verify','command':[mac_py,'scripts/verify_candidate.py','--platform','mac','--build','{attempt}/build','--output','{attempt}/verification','--version',version,'--commit',commit]},
         {'name':'zip','command':['ditto','-c','-k','--sequesterRsrc','--keepParent','{attempt}/build/知识蒸馏器.app','{attempt}/KnowledgeDistiller-'+version+'-Mac-arm64.zip']}
     ],artifacts=['*.zip','verification/result.json','build/build-manifest.json'])

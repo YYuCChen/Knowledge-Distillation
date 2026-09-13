@@ -10,7 +10,7 @@ import subprocess
 
 
 def main():
-    parser = argparse.ArgumentParser(description='制作可解压运行的 Mac 文件包')
+    parser = argparse.ArgumentParser(description='制作本地验收用 Mac 文件包；运行时需已就绪的独立模型组件')
     parser.add_argument('--app', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--version', required=True)
@@ -20,8 +20,6 @@ def main():
     if not (app / 'Contents/MacOS/KnowledgeDistiller').is_file():
         parser.error('缺少构建完成的应用')
     project = Path(__file__).resolve().parents[1]
-    runpy.run_path(str(project/'packaging/docling_models.py'))['model_datas'](
-        app/'Contents/Frameworks/docling-models')
     info = plistlib.loads((app/'Contents/Info.plist').read_bytes())
     if args.version != info['CFBundleShortVersionString']:
         parser.error('--version 必须匹配包内产品版本')
@@ -40,7 +38,7 @@ def main():
     (folder / '版本信息.json').write_text(json.dumps({
         'version': args.version, 'build_version': info['CFBundleVersion'], 'platform': 'macOS', 'architecture': 'arm64',
         'minimum_macos': minimum, 'signing': info.get('KDCodeSigningMode', 'ad-hoc'), 'notarized': False,
-        'qwen': 'optional', 'docling': 'included', 'docling_models': 'included',
+        'qwen': 'optional', 'docling': 'included', 'docling_models': 'external-component-required',
     }, ensure_ascii=False, indent=2), encoding='utf-8')
     archive = output / (name + '.zip')
     subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent',

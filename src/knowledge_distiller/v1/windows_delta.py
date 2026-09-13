@@ -1,6 +1,6 @@
 """Signed Windows update payloads: complete file manifest plus changed files only."""
 from __future__ import annotations
-from .windows_platform import is_link_or_reparse
+from .windows_platform import is_link_or_reparse, filesystem_path
 import hashlib
 import json
 import os
@@ -28,7 +28,9 @@ def digest(path):
 
 
 def inventory(root):
-    root = Path(root)
+    root = filesystem_path(root)
+    if is_link_or_reparse(root):
+        raise UpdateError('应用根目录含链接，不能进行差量更新。')
     result = {}
     for path in sorted(root.rglob('*')):
         if is_link_or_reparse(path):
@@ -39,8 +41,14 @@ def inventory(root):
     return result
 
 
-def build_payload(target, output, base=None):
-    target, output = Path(target), Path(output)
+def build_payload(target, output, base=None, *, format_version=1, tools_dir=None):
+    if format_version == 2:
+        from .windows_delta_v2 import build_payload as build_v2
+        return build_v2(target, output, base, tools_dir=tools_dir)
+    if format_version != 1:
+        raise UpdateError('未知更新格式。')
+    target, output = filesystem_path(target), filesystem_path(output)
+    base = filesystem_path(base) if base is not None else None
     files = inventory(target)
     old = inventory(base) if base else {}
     version = json.loads((target/'_internal/windows-version.json').read_text(encoding='utf-8'))['version']
@@ -54,9 +62,10 @@ def build_payload(target, output, base=None):
     return {'version':version, 'base_version':previous, 'changed_files':len(changed), 'total_files':len(files), 'size':output.stat().st_size}
 
 
-def stage_payload(archive_path, installed, stage, *, version, current):
+def stage_payload(archive_path, installed, stage, *, version, current, tools_dir=None):
     """Verify source baseline and every result byte before touching the running app."""
-    installed, stage = Path(installed), Path(stage)
+    installed, stage = filesystem_path(installed), filesystem_path(stage)
+    archive_path = filesystem_path(archive_path)
     if stage.exists():
         raise UpdateError('上次更新暂存目录仍存在，请处理后重试。')
     with zipfile.ZipFile(archive_path) as archive:
@@ -66,6 +75,9 @@ def stage_payload(archive_path, installed, stage, *, version, current):
         if entry.file_size > 32*1024*1024:
             raise UpdateError('更新文件清单过大。')
         manifest = json.loads(archive.read(entry))
+        if manifest.get('format') == 2:
+            from .windows_delta_v2 import stage_payload as stage_v2
+            return stage_v2(archive_path,installed,stage,version=version,current=current,tools_dir=tools_dir)
         files, old, changed = manifest['files'], manifest['base'], manifest['changed']
         if manifest.get('format') != 1 or manifest['version'] != version or manifest['base_version'] not in (None,current):
             raise UpdateError('差量更新基线不匹配，当前版本已保留。')
@@ -116,6 +128,7 @@ def stage_payload(archive_path, installed, stage, *, version, current):
 
 
 def stage_full(archive,stage,version):
+    stage = filesystem_path(stage)
     prefix='知识蒸馏器/'
     names=archive.namelist()
     if len(names)!=len(set(n.casefold() for n in names)) or not names or len(names)>100000:

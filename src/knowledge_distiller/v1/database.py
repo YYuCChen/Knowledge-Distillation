@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 TOPIC_STATEMENTS = (
     """CREATE TABLE topic_entries (
         topic_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,7 +175,7 @@ def initialize(path: Path) -> None:
             connection.execute(SUBMITTED_SCHEMA)
             connection.execute("ALTER TABLE source_facts ADD COLUMN lineage_json TEXT NOT NULL DEFAULT '{}'")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, SCHEMA_VERSION):
+        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, SCHEMA_VERSION):
             raise RuntimeError(f"unsupported database version: {version}")
 
         if version < 6:
@@ -306,4 +306,29 @@ def initialize(path: Path) -> None:
             if trigger and "'image'" not in trigger[0]:
                 connection.execute('DROP TRIGGER source_media_no_update')
                 connection.execute(trigger[0].replace("'bilibili'", "'bilibili','image'"))
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+        if version < 18:
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in connection.execute('PRAGMA table_info(distill_items)')}
+            if 'review_revision' not in columns:
+                connection.execute("ALTER TABLE distill_items ADD COLUMN review_revision INTEGER NOT NULL DEFAULT 0")
+            connection.execute("""CREATE TRIGGER IF NOT EXISTS distill_review_revision AFTER UPDATE ON distill_items
+                WHEN NEW.review_revision = OLD.review_revision AND (
+                    NEW.state IS NOT OLD.state OR NEW.phase IS NOT OLD.phase
+                    OR NEW.material_id IS NOT OLD.material_id
+                    OR NEW.submitted_url IS NOT OLD.submitted_url
+                    OR NEW.confirmation_json IS NOT OLD.confirmation_json
+                    OR NEW.platform_authority_json IS NOT OLD.platform_authority_json
+                ) BEGIN
+                UPDATE distill_items SET review_revision = OLD.review_revision + 1
+                WHERE item_id = NEW.item_id;
+            END""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS source_review_results (
+                item_id INTEGER NOT NULL REFERENCES distill_items(item_id),
+                revision INTEGER NOT NULL, identity TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('complete','failed')),
+                result_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                PRIMARY KEY(item_id, revision))""")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

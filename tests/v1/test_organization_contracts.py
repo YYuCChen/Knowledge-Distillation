@@ -137,3 +137,51 @@ def test_only_exact_schema_echo_is_unwrapped():
     tampered={**schema,'additionalProperties':True,'ids':[1]}
     with pytest.raises(ValidationError):
         Draft202012Validator(schema).validate(_response_value(json.dumps(tampered),schema))
+
+
+def test_topic_numeric_gaps_are_normalized_without_changing_membership_or_order():
+    points = [SimpleNamespace(knowledge_result_id=8, point_id=f'p{i}') for i in range(2)]
+    value = {'topics': [{'key': 'a', 'topic_id': None, 'name': '题目', 'scope': '范围'}],
+             'decisions': {'0': [{'topic_key': 'a', 'position': 20}],
+                           '1': [{'topic_key': 'a', 'position': 10}]}}
+    original = deepcopy(value)
+    result = topic_plan(value, points)
+    assert [p['point_id'] for p in result['topics'][0]['members']] == ['p1', 'p0']
+    assert value == original
+    value['decisions']['0'][0]['position'] = 10
+    with pytest.raises(ValueError, match='unique'):
+        topic_plan(value, points)
+    value = deepcopy(original)
+    value['decisions']['0'][0]['topic_key'] = 'unknown'
+    with pytest.raises(ValueError, match='unknown'):
+        topic_plan(value, points)
+    value = deepcopy(original)
+    value['decisions']['2'] = []
+    with pytest.raises(ValueError, match='exactly'):
+        topic_plan(value, points)
+    del value['decisions']['2']
+    del value['decisions']['1']
+    with pytest.raises(ValueError, match='exactly'):
+        topic_plan(value, points)
+
+
+def test_pending_label_recovery_reuses_exact_candidate_across_restart(tmp_path):
+    class Client:
+        model = 'fixture'
+        base_url = 'fixture://local'
+        count = 0
+        def complete(self, **kwargs):
+            self.count += 1
+            return '{"candidate":"original complete candidate"}'
+    client = Client()
+    calls = StructuredCalls(client, tmp_path)
+    schema = {'type': 'object', 'properties': {'candidate': {'type': 'string'}},
+              'required': ['candidate'], 'additionalProperties': False}
+    original = calls.complete('growth', 'system', {'input': 1}, schema, 256)
+    calls.records['growth']['field_recovery_pending'] = True
+    calls.save('growth')
+    resumed = StructuredCalls(client, tmp_path)
+    assert resumed.complete('growth', 'system', {'input': 1}, schema, 256) == original
+    assert client.count == 1
+    resumed.complete('growth', 'system', {'input': 2}, schema, 256)
+    assert client.count == 2

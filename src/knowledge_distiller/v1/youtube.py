@@ -207,19 +207,51 @@ def download_youtube(key, canonical, cookies, work_dir):
         raise YouTubeSourceError('youtube_upstream_failed') from error
 
 
+def _caption_provenance(info, language, track):
+    url = track.get('url')
+    if not isinstance(url, str) or not url:
+        return 'unverified', None
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return 'unverified', None
+    if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
+        return 'unverified', None
+    matches = []
+    for key, kind in [('subtitles', 'manual'), ('automatic_captions', 'automatic')]:
+        inventory = info.get(key)
+        variants = inventory.get(language, []) if isinstance(inventory, dict) else []
+        if isinstance(variants, list) and any(isinstance(row, dict) and row.get('url') == url for row in variants):
+            matches.append(kind)
+    kind = matches[0] if len(matches) == 1 else 'unverified'
+    translated = any(key.lower() == 'tlang' for key in parse_qs(parsed.query, keep_blank_values=True))
+    return kind, translated
+
+
 def _captions(info, root):
     rows = []
-    for language, track in (info.get('requested_subtitles') or {}).items():
-        path = Path(track.get('filepath') or '')
-        if not path.is_file() or path.resolve().parent != root.resolve():
-            raise YouTubeSourceError('youtube_caption_incomplete')
-        text = path.read_text(encoding='utf-8')
-        if not text.startswith('WEBVTT'):
-            raise YouTubeSourceError('youtube_caption_incomplete')
+    requested = info.get('requested_subtitles') or {}
+    if not isinstance(requested, dict):
+        return [{'error': 'invalid_caption_inventory'}]
+    for language, track in requested.items():
+        try:
+            if not isinstance(track, dict):
+                raise ValueError('invalid_track')
+            path = Path(track.get('filepath') or '')
+            if (not path.is_file() or path.is_symlink() or path.resolve().parent != root.resolve()
+                    or path.stat().st_size > 16 * 1024 * 1024):
+                raise ValueError('invalid_caption_file')
+            text = path.read_text(encoding='utf-8')
+            if not text.startswith('WEBVTT'):
+                raise ValueError('invalid_vtt')
+        except (OSError, ValueError, TypeError):
+            rows.append({'language': language, 'source_key': info.get('id'),
+                         'error': 'optional_caption_unavailable'})
+            continue
+        kind, translated = _caption_provenance(info, language, track)
         rows.append({'language': language, 'format': 'vtt', 'text': text,
-                     'kind': 'manual' if language in (info.get('subtitles') or {}) else 'automatic',
-                     'source_key': info.get('id'),
-                     'translated': 'tlang=' in str(track.get('url') or '')})
+                     'kind': kind, 'source_key': info.get('id'),
+                     'translated': translated, 'provenance': 'exact_inventory_url' if kind != 'unverified' else 'unverified'})
     return rows
 
 

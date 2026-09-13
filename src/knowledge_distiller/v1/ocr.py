@@ -142,8 +142,10 @@ def decode_image(data, mime):
             if image.format != _MIMES[mime] or getattr(image, "n_frames", 1) != 1:
                 raise OcrError("ocr_invalid_image")
             width, height = image.size
-            if width <= 0 or height <= 0 or width * height > 40_000_000:
+            if width <= 0 or height <= 0:
                 raise OcrError("ocr_invalid_image")
+            if width * height > 40_000_000:
+                raise OcrError("ocr_image_too_large")
             # No EXIF transpose/unwarping: evidence boxes remain in original pixels.
             if "A" in image.getbands() or "transparency" in image.info:
                 rgba = image.convert("RGBA")
@@ -154,7 +156,9 @@ def decode_image(data, mime):
         return rgb
     except OcrError:
         raise
-    except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError) as error:
+    except Image.DecompressionBombError as error:
+        raise OcrError("ocr_image_too_large") from error
+    except (OSError, ValueError, UnidentifiedImageError) as error:
         raise OcrError("ocr_invalid_image") from error
 
 
@@ -186,6 +190,36 @@ def _parse(results, width, height):
 
 
 def validate_lines(texts, scores, polygons, width, height):
+    """Retain per-line text diagnostics when evidence coordinates are unusable."""
+    try:
+        texts, scores, polygons = map(_sequence, (texts, scores, polygons))
+    except (TypeError, ValueError) as cause:
+        raise OcrError('ocr_invalid_output') from cause
+    lines, diagnostics = [], []
+    failed = not len(texts) == len(scores) == len(polygons)
+    for index in range(max(len(texts), len(scores), len(polygons))):
+        text = texts[index] if index < len(texts) else None
+        diagnostic = {'line_index': index, 'text': text if isinstance(text, str) else None,
+                      'text_available': isinstance(text, str) and bool(text.strip()),
+                      'evidence_valid': False}
+        try:
+            line = _validate_lines([text], [scores[index]], [polygons[index]], width, height)[0]
+            lines.append(line)
+            diagnostic['evidence_valid'] = True
+            diagnostic['polygon'] = line.polygon
+            diagnostic['confidence'] = line.confidence
+        except (OcrError, IndexError):
+            failed = True
+            diagnostic['code'] = 'ocr_invalid_output'
+        diagnostics.append(diagnostic)
+    if failed:
+        error = OcrError('ocr_invalid_output')
+        error.line_diagnostics = diagnostics
+        raise error
+    return tuple(lines)
+
+
+def _validate_lines(texts, scores, polygons, width, height):
     """Validate engine output once before freezing text and original-pixel evidence."""
     try:
         texts, scores, polygons = map(_sequence, (texts, scores, polygons))

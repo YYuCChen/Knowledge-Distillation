@@ -95,8 +95,15 @@ ERROR_TEXT = {
     "ocr_model_unavailable": "图片文字识别模型暂不可用，请检查网络后重试。",
     "ocr_inference_failed": "图片文字识别失败，请重试。",
     "ocr_invalid_output": "图片识别结果或坐标不完整，未建立来源事实。",
+    "ocr_checkpoint_unavailable": "图片识别进度暂时无法保存。请检查可用空间和数据目录权限后重试。",
     "ocr_invalid_image": "图片无法解码，未建立来源事实。",
+    "ocr_image_too_large": "图片超过当前识别的像素资源上限（4000 万像素）。请分割图片或降低分辨率后重试；这不表示图片内容无效。",
     "ocr_legacy_source_requires_review": "该图片来源使用旧版提取方式，已保留原始记录，需要检查后重新采集。",
+    "docling_component_missing": "文档模型缺失或校验失败，请使用安装器选择当前数据目录修复，再重试本条任务。",
+    "docling_component_corrupt": "文档模型缺失或校验失败，请使用安装器选择当前数据目录修复，再重试本条任务。",
+    "docling_component_unsafe_path": "文档模型缺失或校验失败，请使用安装器选择当前数据目录修复，再重试本条任务。",
+    "docling_component_unreadable": "文档模型缺失或校验失败，请使用安装器选择当前数据目录修复，再重试本条任务。",
+    "docling_component_invalid_inventory": "文档模型缺失或校验失败，请使用安装器选择当前数据目录修复，再重试本条任务。",
     "docling_runtime_unavailable": "本地文档读取组件不可用，请修复 Docling 安装后重试。",
     "docling_conversion_failed": "文档转换暂未完成，原文件已保留，可以重试。",
     "docling_incomplete": "文档转换不完整，未建立来源事实。",
@@ -155,7 +162,9 @@ ERROR_TEXT = {
     "douyin_media_invalid": "取得的来源媒体不完整，本次没有继续。",
     "llm_not_configured": "请先在设置中配置语言模型。",
     "llm_secret_unavailable": "无法读取模型密钥，请重新配置。",
-    "llm_config_unavailable": "当前语言模型配置不可用，请重新配置。",
+    "llm_config_unavailable": "模型服务未通过身份认证（HTTP 401），请检查密钥及对应账号配置。",
+    "llm_access_denied": "模型服务拒绝了本次访问（HTTP 403），请检查该模型或资源的使用权限；原配置已保留。",
+    "llm_endpoint_or_model_unavailable": "模型端点或型号未找到（HTTP 404），请核对 Base URL 和模型 ID；原配置已保留。",
     "llm_request_failed": "语言模型本次调用失败，可以重新尝试。",
     "review_checkpoint_unavailable": "来源整理检查点无法保存，请检查可用空间和目录权限后重试。",
     "asr_configuration_changed": "语音识别配置已变化；旧任务仍需完成临时资源清理，请恢复原配置后重试。",
@@ -166,6 +175,9 @@ ERROR_TEXT = {
     "llm_request_timeout": "语言模型响应超时，未保存不完整结果，可以重试。",
     "llm_fast_unavailable": "此型号暂不支持 Fast，请在设置中更新型号或选择标准速度。",
     "knowledge_not_qualified": "本次未生成知识，旧记录未保存具体原因。来源已保留，可重新提炼查看新的判断。",
+    "insight_labels_incomplete": "阅读标签尚未准备完成，完整候选与依据已保留，重试只继续准备标签。",
+    "knowledge_presentation_incomplete": "展示字段尚未准备完成，原候选、观点和证据已保留，重试会继续恢复展示字段。",
+    "knowledge_checkpoint_unavailable": "候选保存未完成，请检查空间和目录权限后重试；来源已保留。",
     "knowledge_json_invalid": "模型结果未形成可靠知识，可以重新尝试。",
     "knowledge_structure_invalid": "模型结果未通过证据校验，可以重新尝试。",
     "knowledge_evidence_invalid": "生成的证据引用了尚未确认的图片文字或无效图片依据，本次未保存知识。",
@@ -402,6 +414,15 @@ def create_app(
         response = send_file(path, mimetype="audio/wav", conditional=True)
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    @app.post('/items/<int:item_id>/recover-confirmation-audio')
+    def recover_confirmation_audio(item_id: int):
+        try:
+            service().recover_confirmation_audio(item_id, token=request.form.get('token', ''),
+                                                 concern_id=request.form.get('concern_id', ''))
+        except (ValueError, LookupError) as error:
+            return str(error), 409
+        return redirect(url_for('home', item=item_id))
 
     @app.post("/items/<int:item_id>/continue")
     def continue_knowledge(item_id: int):

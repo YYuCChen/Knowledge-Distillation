@@ -24,7 +24,7 @@ class TopicModel:
             'existing_topics': [asdict(topic) for topic in existing_topics],
         }
         system = TOPIC_SYSTEM_PROMPT.split("只返回一个JSON对象")[0]
-        system += "\n输出topics定义主题：key是本次局部标识；复用主题填写topic_id，新主题填null。decisions必须逐一覆盖points的input_key。每项为所属主题的topic_key和在该主题内的position（从0连续编号），明确不归入任何主题时填写空数组。不要输出codec、members或unassigned_points；程序会根据完整决定构造它们。"
+        system += "\n输出topics定义主题：key是本次局部标识；复用主题填写topic_id，新主题填null。decisions必须逐一覆盖points的input_key。每项为所属主题的topic_key和在该主题内的position（非负且互不重复的排序值，最终连续编号由程序构造），明确不归入任何主题时填写空数组。不要输出codec、members或unassigned_points；程序会根据完整决定构造它们。"
         try:
             value = self.calls.complete('topics', system, payload, topic_contract(points, existing_topics), 8192)
             text = json.dumps(topic_plan(value, points), ensure_ascii=False)

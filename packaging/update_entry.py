@@ -7,6 +7,9 @@ from knowledge_distiller.v1.update_installer import run
 
 if __name__ == '__main__':
     runtime = check_current()
+    if len(sys.argv) == 3 and sys.argv[1] == '--component':
+        from knowledge_distiller.v1.component_update_helper import run as component_run
+        raise SystemExit(component_run(sys.argv[2]))
     if len(sys.argv) == 3 and sys.argv[1] == '--runtime-report':
         Path(sys.argv[2]).write_text(json.dumps(dict(python=runtime, frozen=bool(getattr(sys, 'frozen', False)))), encoding='utf-8')
         raise SystemExit(0)

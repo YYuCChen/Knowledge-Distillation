@@ -101,7 +101,7 @@ def test_v9_upgrade_preserves_published_fact_and_media_references(tmp_path):
         assert db.execute('PRAGMA foreign_key_check').fetchall()==[]
         assert db.execute('SELECT material_id,content FROM source_media').fetchone()[:]==(material,b'\x01\x02\x03')
         assert db.execute('PRAGMA foreign_keys').fetchone()[0]==1
-        assert db.execute('PRAGMA user_version').fetchone()[0]==17
+        assert db.execute('PRAGMA user_version').fetchone()[0]==18
         assert db.execute('SELECT snapshot_key FROM materials').fetchone()[0]=='legacy'
     # A new capture can coexist; a legacy row isn't fabricated into a new hash.
     new=store.attach_material(store.create_item(URL),capture(tmp_path,'new.mp4','新描述'))

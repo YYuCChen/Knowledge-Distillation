@@ -286,7 +286,7 @@ def test_v8_migration_preserves_existing_facts_and_connections(tmp_path,image):
     assert store.connection('douyin')['account_label']=='原连接'
     assert store.connection('douyin')['browser_context'] is None
     with connect(path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0]==17
+        assert db.execute('PRAGMA user_version').fetchone()[0]==18
         assert db.execute('PRAGMA foreign_key_check').fetchall()==[]
 
 
@@ -294,6 +294,36 @@ class FakeOcr:
     def recognize_bytes(self, content, mime):
         from knowledge_distiller.v1.ocr import OcrLine, OcrResult
         return OcrResult(64,64,(OcrLine('图片文字',((0,0),(60,0),(60,20),(0,20)),.99),))
+
+
+def test_ocr_line_failure_retains_diagnostics_and_completed_image_across_retry(store,state,image,tmp_path):
+    from PIL import Image
+    from knowledge_distiller.v1.ocr import OcrResult, validate_lines
+    class Ocr:
+        calls = 0
+        def recognize_bytes(self, content, mime):
+            self.calls += 1
+            polygon = ((-1 if self.calls == 2 else 0,0),(30,0),(30,20),(0,20))
+            return OcrResult(32,32,validate_lines(['已识别的文字'],
+                [.4 if self.calls == 3 else .99],[polygon],32,32))
+    def download(url,path):
+        Image.new('RGB',(32,32),'red' if url.endswith('one') else 'blue').save(path,'PNG')
+    ocr = Ocr()
+    service = Distiller(store=store,source=None,normalizer=None,recognizer=None,reviewer=None,
+        confirmation_clipper=None,knowledge_model=None,runtime_root=tmp_path/'runtime',vault=tmp_path,
+        xiaohongshu_source=source(store,state,image,download),ocr=ocr)
+    item = store.create_item(URL)
+    assert service.run(item).state == 'failed'
+    directory = tmp_path/'runtime/items'/str(item)
+    diagnostic = json.loads((directory/'ocr-diagnostic.json').read_text())
+    assert diagnostic['line_diagnostics'][0]['text_available']
+    assert not diagnostic['line_diagnostics'][0]['evidence_valid']
+    assert diagnostic['completed_images'][0]['lines'][0]['text'] == '已识别的文字'
+    assert len(list((directory/'ocr').glob('*.json'))) == 1
+    assert store.item_bundle(item)['source_fact_id'] is None
+    store.retry_item(item)
+    assert service.run(item).state == 'waiting_user'
+    assert ocr.calls == 3  # Restart recognizes only the unfinished second image.
 
 
 def test_ocr_failure_retry_and_low_confidence_preserve_source_boundaries(store,state,image,tmp_path):

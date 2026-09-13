@@ -167,3 +167,44 @@ def test_pipeline_preserves_ai_repair_and_original_source(tmp_path):
     assert lineage['primary_asr']['text']==primary
     assert not lineage['ai_repairs']
     assert lineage['review_diagnostics']
+
+
+def test_failed_middle_retains_prefix_issues_in_full_source_coordinates(tmp_path):
+    from knowledge_distiller.faithful_review import FaithfulReview, FaithfulReviewCandidate, ReviewConcern, ReviewFailure
+    from dataclasses import replace
+    reviewer = build_reviewer(object())
+    source = PrimaryRecovery('甲' * 2400 + '乙' * 2400 + '丙' * 300, 'zh', ())
+    calls = []
+    def review_piece(recovery, binding):
+        calls.append(binding.source_range)
+        issue = ReviewConcern(10, 11, recovery.text[10:11], '待听辨', True)
+        candidate = FaithfulReviewCandidate(recovery.text, (issue,))
+        if len(calls) == 1:
+            return replace(FaithfulReview.succeeded(candidate), response_chain=({'piece': 0},))
+        return replace(FaithfulReview.failed(ReviewFailure.REQUEST_TIMEOUT, candidate),
+                       response_chain=({'piece': 1},))
+    reviewer._review_cached = review_piece
+    result = reviewer.review_in_directory(source, tmp_path)
+    assert result.candidate is None and result.failure == ReviewFailure.REQUEST_TIMEOUT
+    retained = result.incomplete_candidate
+    assert retained.text == source.text
+    assert [(c.start_offset, c.end_offset) for c in retained.concerns] == [(10, 11), (2410, 2411)]
+    assert all(retained.text[c.start_offset:c.end_offset] == c.text for c in retained.concerns)
+    assert retained.diagnostics[-1]['unreviewed_source_range'] == [4800, 5100]
+    assert result.response_chain == ({'piece': 0}, {'piece': 1})
+    assert len(calls) == 2
+
+
+def test_result_checkpoint_failure_keeps_completed_candidate(tmp_path, monkeypatch):
+    from knowledge_distiller.v1 import local_records
+    class Client:
+        def complete(self, **kwargs):
+            return json.dumps({'candidate_text': '完整来源。', 'issues': []})
+    def fail(*args, **kwargs):
+        raise OSError('independent checkpoint failure')
+    monkeypatch.setattr(local_records, 'write_record', fail)
+    result = build_reviewer(Client()).review_in_directory(PrimaryRecovery('完整来源。', 'zh', ()), tmp_path)
+    assert str(result.failure) == 'checkpoint_unavailable'
+    assert result.candidate is None
+    assert result.incomplete_candidate.text == '完整来源。'
+    assert result.response_chain[0]['primary_text'] == '完整来源。'

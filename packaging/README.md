@@ -14,15 +14,12 @@ uv venv
 uv pip install --python .venv/bin/python -e '.[mac,build,secondary]'
 ~~~
 
-Prepare the pinned document-processing resources in a disposable directory, then
-build into another empty disposable directory:
+Build the program into an empty disposable directory. Docling weights are a
+separate, content-addressed component; neither platform embeds them in its base:
 
 ~~~sh
-PYTHONPATH=src .venv/bin/python scripts/prepare_docling_models.py \
-  --output <docling-models-directory>
 PYTHONPATH=src .venv/bin/python scripts/build_mac.py \
-  --docling-models <docling-models-directory> \
-  --output <empty-output-directory>
+  --version <YYYY.MM.DD.N> --output <empty-output-directory>
 ~~~
 
 The build must not include user databases, Obsidian Vaults, browser profiles,
@@ -63,3 +60,41 @@ coordination using a private configuration derived from
 
 The source reconciliation does not rebuild or replace existing Releases. Record
 the actual candidate commit and native verification before releasing new binaries.
+
+## Component candidate flow
+
+The application and installer share `DoclingComponent`, the signed release parser,
+download cache and assembly verifier. Build models with
+`scripts/package_docling_component.py` from separately verified input; build each
+platform base with `scripts/package_platform_base.py`. The base contains runtime
+code and platform resources (including Windows Paddle models), while the common
+Docling weights remain external. Qwen stays optional and independent.
+
+Use `scripts/build_component_installer.py` on each native platform. Verify actual
+frozen runtime, offline PDF/EPUB, old full-bundle model import, installation and
+rollback before publishing. These scripts alone do not constitute release acceptance.
+The older `package_mac.py` and `package_windows.py` create local validation archives;
+they are not the ordinary component release upload list.
+
+Runtime checks the component at startup in the background and before conversion.
+Missing or corrupt models show a repair instruction; no implicit model download
+is performed. Existing data and prior model versions remain intact.
+
+For offline installation, put the signed `release-<platform>.json` and its named
+assets in one directory and select that manifest in the installer. The same
+publisher signature, inventory and target checks apply; missing assets stop the
+operation without falling back to the network. Already verified cache entries
+can also be reused. `prepare_component_release.py` validates local build provenance
+and asset bytes before using the existing publisher signing identity. Uploading
+and switching Latest remain separate release steps.
+
+Sparkle attachment reconstructs its SDK from the pinned archive on each build,
+so changed or flattened unpacked framework trees cannot become build inputs.
+
+Component-enabled app metadata selects `ComponentUpdates`. Its settings UI uses
+the shared signature/parser/download plan; the copied standalone update helper
+rechecks the manifest, reconstructs and verifies the candidate before asking the
+reserved application instance to exit. A process/token check binds that request
+to the initiating app. The existing rollback journal and paused startup accept
+only a matching build with a ready document component. Old XML clients keep their
+old protocol; they require a separately verified migration installer path.

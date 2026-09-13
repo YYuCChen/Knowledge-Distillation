@@ -29,34 +29,7 @@ from .zhihu import ZhihuSource
 from .weibo import WeiboSource
 
 
-@dataclass(frozen=True)
-class AppPaths:
-    data_root: Path
-
-    @property
-    def database(self) -> Path:
-        return self.data_root / "knowledge.sqlite3"
-
-    @property
-    def runtime(self) -> Path:
-        return self.data_root / "runtime"
-
-    @classmethod
-    def mac_default(cls) -> AppPaths:
-        return cls(
-            Path.home()
-            / "Library"
-            / "Application Support"
-            / "Knowledge Distiller"
-        )
-
-    @classmethod
-    def system_default(cls) -> AppPaths:
-        import os
-        if os.name == 'nt':
-            return cls(Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData' / 'Local')) / 'Knowledge Distiller')
-        return cls.mac_default()
-
+from .paths import AppPaths
 
 def create_application(
     paths: AppPaths | None = None,
@@ -74,7 +47,7 @@ def create_application(
     from .ocr import default_ocr_runner
     from .docling_source import DoclingSourceConverter
     local_ocr = default_ocr_runner()
-    local_documents = DoclingSourceConverter()
+    local_documents = DoclingSourceConverter(components_root=selected_paths.data_root / 'components')
 
     def build_distiller() -> Distiller:
         values = store.settings()
@@ -113,6 +86,15 @@ def create_application(
         wake_worker=worker.wake,
         organization=build_organization,
     )
+    import sys
+    if getattr(sys, 'frozen', False):
+        local_documents.begin_component_check()
+    app.context_processor(lambda: {'document_component': local_documents.readiness})
+    app.extensions['document_component'] = local_documents
+    # create_app initializes the database. Metadata checks must neither read a
+    # missing database during Settings construction nor block the UI startup.
+    if start_workers and store.setting('asr_model') == QWEN_MODEL_ID:
+        settings_service.qwen_component.begin_legacy_validation()
     from .desktop_pages import install as install_desktop_pages
     install_desktop_pages(app)
     from .feishu_service import FeishuService
@@ -150,10 +132,9 @@ class ConfiguredQwenRecognizer:
 
     @property
     def cache_identity(self):
-        from . import qwen_component
         return {'provider': 'qwen', 'model': self.model, 'enabled': self._recognizer is not None,
-                'revision': qwen_component.QWEN_MODEL_REVISION,
-                'runtime': qwen_component.QWEN_RUNTIME_VERSION}
+                'runtime_identity': (self._recognizer.binding.cache_identity
+                                     if self._recognizer is not None else None)}
 
     def recognize(self, audio) -> PrimaryRecognition:
         if self._recognizer is None:

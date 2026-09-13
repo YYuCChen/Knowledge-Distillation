@@ -167,6 +167,10 @@ def test_v7_upgrade_preserves_queue_and_connections(tmp_path):
             db.execute('DROP TABLE '+table)
         db.execute('DROP TABLE source_media')
         db.execute('ALTER TABLE source_connections DROP COLUMN browser_context')
+        # A historical v7 database has none of the v18 review objects.
+        db.execute('DROP TRIGGER distill_review_revision')
+        db.execute('DROP TABLE source_review_results')
+        db.execute('ALTER TABLE distill_items DROP COLUMN review_revision')
         db.execute('ALTER TABLE distill_items DROP COLUMN platform_authority_json')
         db.execute('PRAGMA user_version=7')
     store.initialize()
@@ -174,7 +178,7 @@ def test_v7_upgrade_preserves_queue_and_connections(tmp_path):
     row=store.item_bundle(item)
     assert row['state']=='queued' and row['platform_authority_json']=='{}'
     with connect(path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0]==17
+        assert db.execute('PRAGMA user_version').fetchone()[0]==18
         assert not db.execute('PRAGMA foreign_key_check').fetchall()
 
 
@@ -186,6 +190,20 @@ def test_expired_audio_is_reacquired_without_overwriting_formal_fact(store, medi
     old['captured_at']=(datetime.now(UTC)-timedelta(hours=73)).isoformat()
     assert source.reuse_retained(source_key=KEY,submitted_url=URL,canonical_url=URL,
         metadata=old,work_dir=tmp_path/'work') is None
+
+
+def test_broken_optional_caption_keeps_audio_fallback_available(tmp_path):
+    from knowledge_distiller.v1.youtube import _captions
+    from knowledge_distiller.v1.subtitle_baseline import select_subtitle
+    from types import SimpleNamespace
+    path = tmp_path / 'broken.vtt'
+    path.write_bytes(b'\xff\xfeinvalid utf8')
+    tracks = _captions({'id': KEY, 'requested_subtitles': {'en': {'filepath': str(path)}}}, tmp_path)
+    assert tracks[0]['error'] == 'optional_caption_unavailable'
+    selected, diagnostics = select_subtitle(SimpleNamespace(source_key=KEY,
+        duration_seconds=20, metadata={'original_language':'en', 'captions':tracks}))
+    assert selected is None
+    assert diagnostics['caption_selection']
 
 
 def test_new_generation_retry_reacquires_unfinished_material(store, media, tmp_path):
@@ -210,3 +228,37 @@ def test_queued_youtube_item_is_not_labeled_douyin(store):
     view=_item_view(store.item_bundle(item),None,store.path.parent)
     assert view['title']=='YouTube 内容'
     assert view['source_type']=='YouTube'
+
+
+def test_caption_identity_requires_exact_inventory_and_exposes_missing_language(tmp_path):
+    from types import SimpleNamespace
+    from knowledge_distiller.v1.youtube import _captions
+    from knowledge_distiller.v1.subtitle_baseline import select_subtitle
+    path = tmp_path / 'caption.vtt'
+    path.write_text('WEBVTT\n\n00:00.000 --> 00:01.000\nsource text\n')
+    url = 'https://captions.example/video?lang=en'
+    info = {'id': KEY, 'requested_subtitles': {'en': {'filepath': str(path), 'url': url}},
+            'subtitles': {'en': [{'url': url}]}}
+    tracks = _captions(info, tmp_path)
+    assert tracks[0]['kind'] == 'manual' and tracks[0]['translated'] is False
+    selected, detail = select_subtitle(SimpleNamespace(source_key=KEY, duration_seconds=1,
+        metadata={'captions': tracks, 'original_language': None}))
+    assert selected is None and detail['caption_selection'][0]['code'] == 'original_language_unverified'
+    info['subtitles']['en'][0]['url'] = 'https://captions.example/other'
+    assert _captions(info, tmp_path)[0]['kind'] == 'unverified'
+    translated = 'https://captions.example/video?lang=es&%74lang=en'
+    info['requested_subtitles']['en']['url'] = translated
+    info['automatic_captions'] = {'en': [{'url': translated}]}
+    track = _captions(info, tmp_path)[0]
+    assert track['kind'] == 'automatic' and track['translated'] is True
+
+
+def test_invalid_optional_caption_url_does_not_abort_audio_fallback(tmp_path):
+    from knowledge_distiller.v1.youtube import _captions
+    path = tmp_path / 'caption.vtt'
+    path.write_text('WEBVTT\n\n00:00.000 --> 00:01.000\nsource text\n')
+    url = 'https://[invalid/video'
+    info = {'id': KEY, 'requested_subtitles': {'en': {'filepath': str(path), 'url': url}},
+            'subtitles': {'en': [{'url': url}]}}
+    track = _captions(info, tmp_path)[0]
+    assert track['translated'] is None

@@ -258,6 +258,13 @@
                         </form>
                         {% endif %}
                         <audio controls preload="metadata" aria-label="疑点 {{ loop.index }} 原音" src="{{ url_for('confirmation_audio', item_id=item.id, concern_id=concern.audio_name) }}"></audio>
+                        {% if concern.audio_recovery_required|default(false) %}
+                        <form action="{{ url_for('recover_confirmation_audio', item_id=item.id) }}" method="post" data-recover-audio>
+                          <input type="hidden" name="token" value="{{ item.confirmation.token }}">
+                          <input type="hidden" name="concern_id" value="{{ concern.audio_name }}">
+                          <button type="submit" class="secondary-small">重试局部原音恢复</button>
+                        </form>
+                        {% endif %}
                         <span class="source-actions">
                           <form action="{{ url_for('rerecognize', item_id=item.id) }}" method="post" data-rerecognize>
                             <input type="hidden" name="token" value="{{ item.confirmation.token }}">

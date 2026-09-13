@@ -1,11 +1,11 @@
 """Reuse successful primary ASR for the same normalized audio and recognizer."""
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
-from knowledge_distiller.primary import PrimaryChunk, PrimaryRecovery, PrimaryRecognition
+from knowledge_distiller.primary import PrimaryChunk, PrimaryRecovery, PrimaryRecognition, qualify_primary_timeline as qualify_timeline
 
 
 def _identity(recognizer, audio):
@@ -13,42 +13,50 @@ def _identity(recognizer, audio):
         digest = hashlib.file_digest(stream, 'sha256').hexdigest()
     binding = getattr(recognizer, 'binding', None)
     # Public model identity only: never serialize callable credential providers.
-    return [digest, audio.duration_seconds, audio.sample_rate_hz, audio.channels, audio.sample_width_bytes, type(recognizer).__module__, type(recognizer).__qualname__,
+    identity = [digest, audio.duration_seconds, audio.sample_rate_hz, audio.channels, audio.sample_width_bytes, type(recognizer).__module__, type(recognizer).__qualname__,
             getattr(recognizer, 'model', None), getattr(binding, 'model', None),
             getattr(recognizer, 'cache_identity', None)]
+    runtime_identity = getattr(binding, 'cache_identity', None)
+    if runtime_identity is not None:
+        identity.append(runtime_identity)
+    return identity
 
 
 def _valid(recovery, audio):
     if not isinstance(recovery.text, str) or not recovery.text.strip() or recovery.truncated is not False or recovery.completed_normally is not True:
         return False
-    previous = 0.0
-    for chunk in recovery.chunks:
-        if (not isinstance(chunk.text, str) or not chunk.text.strip()
-            or not all(type(t) in (int,float) and math.isfinite(t) for t in (chunk.start_seconds, chunk.end_seconds))
-            or chunk.start_seconds < previous or chunk.end_seconds <= chunk.start_seconds
-            or chunk.end_seconds > audio.duration_seconds + 0.5):
-            return False
-        previous = chunk.end_seconds
-    return True  # Complete text may be cached without a precise replay timeline.
+    return True
+
+
 
 
 def _checksum(data):
     return hashlib.sha256(json.dumps(data, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
-def recognize_cached(recognizer, audio, directory):
-    identity = _identity(recognizer, audio)
-    path = Path(directory) / 'primary-recovery.json'
+def _read_recovery(path, identity, audio):
     if path.is_file() and not path.is_symlink():
         try:
             payload = json.loads(path.read_text(encoding='utf-8'))
+            if not isinstance(payload, dict):
+                return None
             if payload.get('version') == 1 and payload.get('identity') == identity:
                 data = payload['recovery']
                 if payload.get('checksum') != _checksum(data): raise ValueError('checkpoint corrupt')
-                recovery = PrimaryRecovery(**{**data, 'chunks': tuple(PrimaryChunk(**chunk) for chunk in data['chunks'])})
-                if _valid(recovery, audio): return PrimaryRecognition.succeeded(recovery)
+                recovery = PrimaryRecovery(**{**data, 'chunks': tuple(PrimaryChunk(**chunk) for chunk in data['chunks']),
+                    'timeline_diagnostics':tuple(data.get('timeline_diagnostics',()))})
+                if _valid(recovery, audio): return PrimaryRecognition.succeeded(qualify_timeline(recovery,audio))
         except (OSError, ValueError, KeyError, TypeError):
             pass  # Invalid checkpoint is recomputed, never promoted to a source fact.
+    return None
+
+
+def recognize_cached(recognizer, audio, directory):
+    identity = _identity(recognizer, audio)
+    path = Path(directory) / 'primary-recovery.json'
+    cached = _read_recovery(path, identity, audio)
+    if cached is not None:
+        return cached
     result = recognizer.recognize(audio)
     if result.recovery is not None and not _valid(result.recovery, audio):
         from knowledge_distiller.primary import PrimaryFailure
@@ -62,6 +70,11 @@ def recognize_cached(recognizer, audio, directory):
         return PrimaryRecognition.failed(PrimaryFailure.EMPTY_OUTPUT if reason=='empty_text' else PrimaryFailure.INCOMPLETE)
     if result.recovery is not None:
         from .local_records import write_record
+        qualified=qualify_timeline(result.recovery,audio)
+        if qualified.timeline_status=='needs_recovery' and result.recovery.chunks:
+            write_record(path.with_name('primary-timeline.json'), {'identity':identity,
+                'recovery':asdict(result.recovery),'status':'needs_recovery'})
+        result=PrimaryRecognition.succeeded(qualified)
         write_record(path, {'version':1, 'identity':identity, 'recovery':asdict(result.recovery),
                             'checksum':_checksum(asdict(result.recovery))})
     return result
@@ -73,8 +86,9 @@ def recognize_segmented(recognizer, audio, directory, *, segment_seconds=300):
     Each checkpoint is bound to actual PCM bytes and recognizer identity. No
     partial text is promoted when any segment fails or claims truncation.
     """
+    from .asr_recovery import recognize_resumable
     if audio.duration_seconds <= segment_seconds:
-        return recognize_cached(recognizer, audio, directory)
+        return recognize_resumable(recognizer, audio, directory)
     import wave
     from .local_records import write_record
     from knowledge_distiller.primary import StandardAudio
@@ -96,7 +110,7 @@ def recognize_segmented(recognizer, audio, directory, *, segment_seconds=300):
             with wave.open(str(path), 'wb') as output:
                 output.setparams(original.getparams()); output.writeframes(pcm)
             piece = StandardAudio(path, count/rate, rate, original.getnchannels(), original.getsampwidth())
-            result = recognize_cached(recognizer, piece, target)
+            result = recognize_resumable(recognizer, piece, target)
             if result.recovery is None:
                 failures.append({'segment': index, 'start_seconds': frame/rate,
                                  'end_seconds': (frame+count)/rate, 'code': str(result.failure)})
@@ -106,8 +120,17 @@ def recognize_segmented(recognizer, audio, directory, *, segment_seconds=300):
     if failures:
         from knowledge_distiller.primary import PrimaryFailure
         return PrimaryRecognition.failed(PrimaryFailure(failures[0]['code']))
+    return _merge_recognitions(results, audio)
+
+
+def _merge_recognitions(results, audio):
     chunks = tuple(PrimaryChunk(c.text, c.start_seconds+offset, c.end_seconds+offset, c.language)
                    for offset, recovery in results for c in recovery.chunks)
-    return PrimaryRecognition.succeeded(PrimaryRecovery(
+    merged=PrimaryRecovery(
         '\n'.join(recovery.text for _,recovery in results),
-        results[0][1].language if results else None, chunks))
+        results[0][1].language if results else None, chunks)
+    if any(recovery.timeline_status!='available' for _,recovery in results):
+        merged=replace(merged,chunks=(),timeline_status='needs_recovery',
+                       timeline_diagnostics=('segment_timeline_incomplete',))
+    else:merged=qualify_timeline(merged,audio)
+    return PrimaryRecognition.succeeded(merged)

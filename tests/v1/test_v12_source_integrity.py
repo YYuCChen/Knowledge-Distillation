@@ -17,6 +17,16 @@ def repair(original, replacement, evidence, **kw):
                 source_occurrence=0,occurrence=0,meaning_may_change=False,**kw)
 
 
+def spelling_assessment():
+    # Synthetic protocol fixture; not evidence of real-model semantic accuracy.
+    return {'kind':'recognition_error','original_reading_possible':False,
+        'original_reading_analysis':'The first occurrence has a missing i in the same term.',
+        'same_referent_analysis':'Both occurrences refer to transcription in this fixture.',
+        'source_support_analysis':'The source supplies the expanded spelling transcription.',
+        'competing_readings':[], 'alternatives_analysis':'No other referent in this fixture.',
+        'meaning_changes':[]}
+
+
 @pytest.mark.parametrize('source,candidate',[
     ('Do not take 15 units at -5 degrees.','Do take 15 units at -5 degrees.'),
     ('Take 15 units.','Take 50 units.'),('Set -5 degrees.','Set +5 degrees.'),
@@ -38,7 +48,7 @@ def test_grammar_addition_is_rejected_even_with_declared_repair(basis):
 
 def test_mixed_operations_keep_good_edit_and_reject_bad_evidence():
     source='transcripton transcription. other typo stays.'
-    rows=[repair('transcripton','transcription','transcripton transcription.'),
+    rows=[repair('transcripton','transcription','transcripton transcription.', assessment=spelling_assessment()),
           repair('typo','type','not in the source')]
     proposed=source.replace('transcripton','transcription').replace('typo','type')
     result=validate_response(source,proposal(proposed,rows))
@@ -72,7 +82,10 @@ def test_bad_json_returns_exact_baseline_and_replay_diagnostic():
 def test_critical_issue_survives_invalid_proposal_mapping():
     result=validate_response('take 15 units',proposal('take 50 units', issues=[{
         'issue_text':'50','occurrence':0,'reason':'number unclear','meaning_may_change':True}]))
-    assert result.text=='take 15 units' and result.concerns[0].meaning_may_change
+    # P06: preserve the actual question as an incomplete localization step;
+    # do not manufacture a whole-source question to replace its missing span.
+    assert result.text=='take 15 units' and not result.concerns
+    assert any(d.get('issue',{}).get('issue_text') == '50' for d in result.diagnostics)
 
 
 def test_retry_is_bounded_and_cache_keeps_raw_baseline(tmp_path):
@@ -86,11 +99,16 @@ def test_retry_is_bounded_and_cache_keeps_raw_baseline(tmp_path):
     recovery=PrimaryRecovery('baseline','en',())
     for _ in range(2):
         result=reviewer.review_in_directory(recovery,tmp_path)
-        assert result.candidate.text=='baseline'
-    assert len(calls)==2
+        # P09: retry may resume a failed technical step, never cache success.
+        assert result.failure == 'invalid_output'
+        assert result.candidate is None
+        assert result.incomplete_candidate.text=='baseline'
+    assert len(calls)==4
     assert 'invalid_json_or_shape' in calls[1]['system']
     assert json.loads((tmp_path/'review-response.json').read_text())['primary_text']=='baseline'
-    assert (tmp_path/'review-response.validation.json').exists()
+    recorded=json.loads((tmp_path/'review-response.result.json').read_text())
+    assert recorded['result']['failure']=='invalid_output'
+    assert recorded['result']['incomplete_candidate']['diagnostics']
 
 
 def test_complete_text_without_timeline_is_cached(tmp_path):
@@ -167,7 +185,8 @@ def test_ocr_invalid_operation_retains_other_decisions():
         {'index':1,'reliable':False,'affects_core':False,'replacement':'other','reason':'noncore','evidence':''}]}
     result,trace=review_ocr(fact,{'image_ocr':[]},SimpleNamespace(complete=lambda **kw:json.dumps(answer)))
     assert result.snapshot==fact.snapshot
-    assert [u['status'] for u in result.uncertainties]==['unresolved','advisory']
+    # Edit refusal and core importance are separate (P05); no repair is applied.
+    assert [u['status'] for u in result.uncertainties]==['advisory','advisory']
     assert trace['ocr_review_diagnostics'][0]['operation']==0
 
 
@@ -202,7 +221,11 @@ def test_failed_audio_clip_retains_question_and_full_audio(tmp_path):
     assert pending['concerns'] and pending['lineage']['primary_asr']
     audio=service.runtime_root/'items'/str(item)/'audio'/'standard.wav'
     audio.parent.mkdir(parents=True,exist_ok=True);audio.write_bytes(b'synthetic original audio')
-    assert service.confirmation_audio(item).name=='standard.wav'
+    # P01 keeps original media but never turns a failed local preview into a
+    # full-recording listening assignment.
+    assert service.confirmation_audio(item) is None
+    assert audio.read_bytes() == b'synthetic original audio'
+    assert '定位恢复未完成' in pending['concerns'][0]['reason']
 
 
 def test_subtitle_pipeline_does_not_require_full_asr(tmp_path):
@@ -245,7 +268,7 @@ def test_multiple_evidence_spans_checked_independently():
     source='transcripton here. Far away we say transcription.'
     spans=[{'start':0,'end':12,'text':source[:12]},
            {'start':source.index('transcription'),'end':len(source)-1,'text':'transcription'}]
-    row=repair('transcripton','transcription','',evidence_spans=spans)
+    row=repair('transcripton','transcription','',evidence_spans=spans,assessment=spelling_assessment())
     result=validate_response(source,proposal(source.replace('transcripton','transcription'),[row]))
     assert len(result.repairs)==1
     spans[1]['start']-=1

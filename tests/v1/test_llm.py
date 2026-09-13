@@ -273,3 +273,21 @@ def test_review_records_and_reuses_only_matching_valid_result(tmp_path):
     assert len(calls) == 2
     assert build_reviewer(Client('model-b')).review_in_directory(source, tmp_path).candidate
     assert len(calls) == 3
+
+
+@pytest.mark.parametrize('client_type', ['anthropic', 'responses'])
+@pytest.mark.parametrize('status,code,invalidated', [
+    (401, 'llm_config_unavailable', True),
+    (403, 'llm_access_denied', False),
+    (404, 'llm_endpoint_or_model_unavailable', False),
+])
+def test_resource_and_endpoint_failures_do_not_invalidate_login(monkeypatch, client_type, status, code, invalidated):
+    from knowledge_distiller.v1.llm import OpenAIResponsesClient
+    monkeypatch.setattr(httpx, 'post', lambda *a, **k: Response(status))
+    marks = []
+    cls = AnthropicMessagesClient if client_type == 'anthropic' else OpenAIResponsesClient
+    client = cls('https://models.example.com', 'test-model', lambda: 'synthetic-key',
+                 lambda: marks.append(True))
+    with pytest.raises(LLMRequestError, match=code):
+        client.complete(system='test', user='synthetic source', max_tokens=10)
+    assert bool(marks) == invalidated

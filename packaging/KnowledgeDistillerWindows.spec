@@ -8,13 +8,14 @@ project = Path(SPECPATH).parent
 tools = Path(os.environ['KD_BUILD_WINDOWS_CACHE']) / 'tools'
 resources = runpy.run_path(str(project / 'packaging/resources.py'))
 datas = resources['application_datas'](project)
+codec = Path(os.environ['KD_BUILD_HDIFFPATCH']) / 'hpatchz.exe'
+datas += [(str(codec), 'tools')]
 datas += [(os.environ['KD_BUILD_WINDOWS_VERSION'], '.')]
 datas += [(str(project / 'packaging/assets/app-icon.ico'), 'assets')]
 datas += resources['opencli_datas'](tools / 'opencli/node_modules/@jackwener/opencli')
 modules = tools / 'opencli/node_modules'
 datas += [(str(p), str(Path('opencli/node_modules') / p.relative_to(modules).parent))
           for p in modules.rglob('*') if p.is_file() and '@jackwener' not in p.relative_to(modules).parts]
-datas += runpy.run_path(str(project / 'packaging/docling_models.py'))['model_datas'](os.environ['KD_BUILD_DOCLING_MODELS'])
 paddle = Path(os.environ['KD_BUILD_PADDLE_MODELS'])
 if not (paddle / 'manifest.json').is_file():
     raise RuntimeError('Verified Paddle model inventory required')
@@ -64,8 +65,13 @@ coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='Knowledge
 
 # A small onefile helper runs outside the replaced application directory.
 u = Analysis([str(project / 'packaging/windows_update_entry.py')], pathex=[str(project / 'src')],
-             datas=[(str(project/'src/knowledge_distiller/v1/adapters/python-runtime.json'),'knowledge_distiller/v1/adapters')],
-             hiddenimports=['cryptography.hazmat.primitives.asymmetric.ed25519'],
+             datas=[(str(project/'src/knowledge_distiller/v1/adapters/update-codec-notices.txt'),'knowledge_distiller/v1/adapters'),
+                    (str(project/'src/knowledge_distiller/v1/adapters/docling-model-notices.txt'),'knowledge_distiller/v1/adapters'),
+                    (str(project/'src/knowledge_distiller/v1/adapters/python-runtime.json'),'knowledge_distiller/v1/adapters'),
+                    (str(codec),'tools'),
+                    (str(project/'packaging/update_config.json'),'knowledge_distiller/v1/adapters'),
+                    (str(project/'src/knowledge_distiller/v1/adapters/docling-models-manifest.json'),'knowledge_distiller/v1/adapters')],
+             hiddenimports=['cryptography.hazmat.primitives.asymmetric.ed25519','win32job'],
              excludes=['torch','paddle','docling','flask','tkinter','pytest'])
 upyz = PYZ(u.pure)
 uexe = EXE(upyz,u.scripts,u.binaries,u.datas, [('X utf8',None,'OPTION')],

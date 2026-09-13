@@ -4,7 +4,7 @@ import logging
 import math
 import os
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -182,6 +182,23 @@ class PrimaryRecovery:
     chunks: tuple[PrimaryChunk, ...]
     completed_normally: bool = True
     truncated: bool = False
+    timeline_status: str = 'unverified'
+    timeline_diagnostics: tuple[str, ...] = ()
+
+
+def qualify_primary_timeline(recovery, audio):
+    if not recovery.chunks:
+        return replace(recovery,timeline_status='needs_recovery')
+    previous = 0.0
+    for index,chunk in enumerate(recovery.chunks):
+        if (not isinstance(chunk.text, str) or not chunk.text.strip()
+            or not all(type(t) in (int,float) and math.isfinite(t) for t in (chunk.start_seconds, chunk.end_seconds))
+            or chunk.start_seconds < previous-1e-6 or chunk.end_seconds <= chunk.start_seconds
+            or chunk.end_seconds > audio.duration_seconds + 0.25):
+            return replace(recovery,chunks=(),timeline_status='needs_recovery',
+                timeline_diagnostics=(f'invalid_timeline_chunk:{index}',))
+        previous = chunk.end_seconds
+    return replace(recovery,timeline_status='available')
 
 
 class PrimaryFailure(StrEnum):
@@ -312,14 +329,16 @@ class QwenPrimaryAdapter:
             return PrimaryRecognition.failed(PrimaryFailure.EMPTY_OUTPUT)
         chunks = _translate_qwen_chunks(result.chunks)
         if chunks is None:
-            return PrimaryRecognition.failed(PrimaryFailure.INCOMPLETE)
-        return PrimaryRecognition.succeeded(
-            PrimaryRecovery(
-                text=text,
-                language=result.language,
-                chunks=chunks,
-            )
-        )
+            # Explicitly interrupted pieces are incomplete even when a global
+            # marker claims eos. Bad/missing positioning alone is not truncation.
+            if isinstance(result.chunks, list) and any(isinstance(c, Mapping) and (
+                    c.get('truncated') is True or c.get('finish_reason') not in (None, 'eos'))
+                    for c in result.chunks):
+                return PrimaryRecognition.failed(PrimaryFailure.INCOMPLETE)
+            return PrimaryRecognition.succeeded(PrimaryRecovery(text,result.language,(),
+                timeline_status='needs_recovery',timeline_diagnostics=('qwen_timeline_invalid_or_missing',)))
+        return PrimaryRecognition.succeeded(qualify_primary_timeline(
+            PrimaryRecovery(text=text, language=result.language, chunks=chunks), audio))
 
 
 def build_qwen_primary(model: str | None = None) -> QwenPrimaryAdapter:

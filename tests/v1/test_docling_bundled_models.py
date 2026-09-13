@@ -8,6 +8,27 @@ import pytest
 from knowledge_distiller.v1.docling_source import _bundled_artifacts, DoclingSourceError
 
 
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows extended-path semantics')
+def test_tableformer_reads_mixed_separator_extended_config(tmp_path):
+    from knowledge_distiller.v1.docling_source import _normalize_tableformer_config_paths
+    from knowledge_distiller.v1.windows_platform import filesystem_path
+    from docling_ibm_models.tableformer import common
+    root = filesystem_path(tmp_path / ('a' * 120) / ('b' * 120))
+    root.mkdir(parents=True)
+    (root / 'tm_config.json').write_text('{"fixture": true}')
+    mixed = str(root) + '/tm_config.json'
+    assert len(mixed) > 260
+    original = common.read_config
+    try:
+        _normalize_tableformer_config_paths()
+        adapted = common.read_config
+        _normalize_tableformer_config_paths()
+        assert common.read_config is adapted
+        assert common.read_config(mixed) == {'fixture': True}
+    finally:
+        common.read_config = original
+
+
 def test_frozen_documents_require_bundled_models_not_user_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, 'frozen', True, raising=False)
     monkeypatch.setattr(sys, '_MEIPASS', str(tmp_path), raising=False)
@@ -44,7 +65,7 @@ def test_build_refuses_incomplete_or_changed_model_assets(tmp_path):
         collect(tmp_path)
 
 
-def test_archive_step_rejects_an_old_app_without_docling_models(tmp_path):
+def test_archive_step_rejects_an_incomplete_app_metadata(tmp_path):
     import subprocess
     app = tmp_path/'old.app'
     binary = app/'Contents/MacOS/KnowledgeDistiller'
@@ -55,5 +76,5 @@ def test_archive_step_rejects_an_old_app_without_docling_models(tmp_path):
     result = subprocess.run([sys.executable,str(script),'--app',str(app),
                              '--output',str(output),'--version','test'],capture_output=True,text=True)
     assert result.returncode != 0
-    assert 'docling-models' in result.stderr
+    assert 'Info.plist' in result.stderr
     assert not output.exists()

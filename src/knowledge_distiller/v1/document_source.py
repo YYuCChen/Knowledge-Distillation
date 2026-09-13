@@ -9,7 +9,9 @@ def convert_document(content, kind, converter=None):
         return (converter or DoclingSourceConverter()).convert_bytes(content, kind)
     except DoclingSourceError as error:
         raise SourceReadError(str(error), retryable=str(error) in {
-            'docling_runtime_unavailable', 'docling_conversion_failed'}) from error
+            'docling_runtime_unavailable', 'docling_conversion_failed',
+            'docling_component_missing', 'docling_component_corrupt',
+            'docling_component_unreadable', 'docling_component_unsafe_path'}) from error
 
 
 @dataclass(frozen=True)

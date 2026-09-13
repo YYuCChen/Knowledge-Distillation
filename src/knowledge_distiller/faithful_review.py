@@ -49,6 +49,8 @@ class ReviewFailure(StrEnum):
 class FaithfulReview:
     candidate: FaithfulReviewCandidate | None = None
     failure: ReviewFailure | None = None
+    incomplete_candidate: FaithfulReviewCandidate | None = None
+    response_chain: tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         if (self.candidate is None) == (self.failure is None):
@@ -59,8 +61,8 @@ class FaithfulReview:
         return cls(candidate=candidate)
 
     @classmethod
-    def failed(cls, failure: ReviewFailure) -> FaithfulReview:
-        return cls(failure=failure)
+    def failed(cls, failure: ReviewFailure, incomplete_candidate=None) -> FaithfulReview:
+        return cls(failure=failure, incomplete_candidate=incomplete_candidate)
 
 
 class FaithfulReviewer(Protocol):
@@ -168,8 +170,8 @@ class FaithfulReviewAdapter:
         self.binding = binding
 
     def review(self, recovery: PrimaryRecovery) -> FaithfulReview:
-        primary_text = recovery.text.strip()
-        if recovery.truncated or not recovery.completed_normally or not primary_text:
+        primary_text = recovery.text
+        if recovery.truncated or not recovery.completed_normally or not primary_text.strip():
             return FaithfulReview.failed(ReviewFailure.INPUT_INVALID)
         try:
             result = self.binding.complete(primary_text)
@@ -187,28 +189,17 @@ class FaithfulReviewAdapter:
         candidate = validate_response(primary_text, result.text)
         retry = getattr(self.binding, 'complete_with_feedback', None)
         if candidate.diagnostics and callable(retry):
+            from .review_validation import retry_context, merge_retry
             try:
-                corrected = retry(primary_text, candidate.diagnostics)
+                corrected = retry(primary_text, retry_context(primary_text, candidate))
                 if corrected.stop_reason == 'end_turn':
                     revised = validate_response(primary_text, corrected.text)
-                    # A formatting retry has no new source evidence with which
-                    # to silently resolve an already detected critical issue.
-                    retained = list(revised.concerns)
-                    for issue in candidate.concerns:
-                        if not issue.meaning_may_change or issue in retained:
-                            continue
-                        if revised.text == candidate.text:
-                            retained.append(issue)
-                        else:
-                            retained.append(ReviewConcern(0,len(revised.text),revised.text,
-                                '纠正输出后仍需核对原来源：'+issue.reason,True))
-                    retained.sort(key=lambda issue: issue.start_offset)
-                    if any(a.end_offset > b.start_offset for a,b in zip(retained,retained[1:])):
-                        retained = [ReviewConcern(0,len(revised.text),revised.text,
-                            '原文已保留；纠正输出后关键疑点仍需核对原来源。',True)]
-                    candidate = replace(revised,concerns=tuple(retained))
+                    candidate = merge_retry(primary_text, candidate, revised, corrected.text)
             except (ReviewRuntimeFailure, ReviewRuntimeUnavailable):
-                pass  # The validated baseline is already available.
+                pass  # Retain the actual first assessment and its diagnostics.
+        if any(d.get('code') in {'invalid_json_or_shape', 'invalid_issue', 'issue_mapping_failed'}
+               for d in candidate.diagnostics):
+            return FaithfulReview.failed(ReviewFailure.INVALID_OUTPUT, candidate)
         return FaithfulReview.succeeded(candidate)
 
 
@@ -397,6 +388,8 @@ REVIEW_POLICY = """
 repairs为数组，每项格式：{"original_text":"原始字面","source_occurrence":0,"replacement":"修复字面","occurrence":0,"reason":"修复原因","evidence":"输入中的逐字依据","meaning_may_change":false}。
 original_text必须来自当前输入；evidence必须是支持判断的当前输入逐字片段；两个occurrence分别是原字面在输入、修复字面在candidate_text中的零起始出现次序。没有可靠依据不修复。没有修复时repairs为空。
 """
+from .semantic_support import ASSESSMENT_PROMPT
+REVIEW_POLICY += ASSESSMENT_PROMPT
 REVIEW_SYSTEM_PROMPT += REVIEW_POLICY
 
 REVIEW_SYSTEM_PROMPT += "\nV1.2：保留输入逐字正文；每项修改都须登记 repairs。不得删除填充词、重复讲话或仅为语法补词。证据须包含原字面及支持替换的本来源用例；不确定则保留原文。程序从原文应用验收通过的修改。"

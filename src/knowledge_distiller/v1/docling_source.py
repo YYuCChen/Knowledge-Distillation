@@ -2,7 +2,7 @@
 
 Callers retain exact input bytes and EPUB spine/link completeness qualification.
 Docling does not retain EPUB chapter anchors; chapter=None explicitly reflects it.
-Frozen releases read all document models from their bundled artifact directory.
+Frozen releases use the explicitly selected, verified external model component.
 Source development retains upstream caches unless an explicit artifacts path is supplied.
 """
 from __future__ import annotations
@@ -14,6 +14,7 @@ from itertools import chain
 import math
 from pathlib import Path
 import sys
+import threading
 from numbers import Real
 from typing import Callable
 
@@ -70,15 +71,50 @@ class DoclingSourceResult:
 
 
 class DoclingSourceConverter:
-    def __init__(self, *, converter_factory: Callable | None = None):
-        self._factory = converter_factory or _build_converter
+    def __init__(self, *, converter_factory: Callable | None = None, components_root=None):
+        self._factory = converter_factory or (lambda: _build_converter(components_root))
         self._converter = None
+        self._components_root = components_root
+        self._readiness = {'state': 'unchecked', 'message': ''}
+        self._check_lock = threading.Lock()
+
+    @property
+    def readiness(self):
+        return dict(self._readiness)
+
+    def check_component(self):
+        if self._components_root is None:
+            return
+        from .docling_component import DoclingComponent, DoclingComponentError
+        with self._check_lock:
+            self._readiness = {'state': 'checking', 'message': '正在检查本地文档模型，完成前文档任务会等待。'}
+            try:
+                DoclingComponent(self._components_root).verify()
+            except (DoclingComponentError, OSError) as error:
+                self._readiness = {'state': 'unavailable', 'message':
+                    '本地文档模型缺失或校验失败。请使用知识蒸馏器安装器，选择当前程序和数据目录重新检查并修复，然后重试文档任务。'}
+                code = str(error) if isinstance(error, DoclingComponentError) else 'docling_component_unreadable'
+                raise DoclingSourceError(code) from error
+            self._readiness = {'state': 'ready', 'message': ''}
+
+    def begin_component_check(self):
+        # Startup stays responsive. Conversion waits for this same check lock,
+        # then verifies again so a previously loaded converter cannot hide damage.
+        def run():
+            try:
+                self.check_component()
+            except DoclingSourceError:
+                pass
+        threading.Thread(target=run, daemon=True, name='document-component-check').start()
 
     def convert_bytes(self, data: bytes, kind: str) -> DoclingSourceResult:
         if kind not in {"pdf", "epub"} or not isinstance(data, bytes) or not data:
             raise DoclingSourceError("docling_invalid_input")
         if (kind == "pdf" and not data.startswith(b"%PDF-")) or (kind == "epub" and not data.startswith(b"PK")):
             raise DoclingSourceError("docling_invalid_input")
+        if self._components_root is not None and (getattr(sys, 'frozen', False) or
+                (Path(self._components_root) / 'docling').exists()):
+            self.check_component()
         if self._converter is None:
             self._converter = self._factory()
         try:
@@ -113,8 +149,18 @@ def _bundled_artifacts():
     return root
 
 
-def _build_converter():
-    artifacts = _bundled_artifacts()
+def _build_converter(components_root=None):
+    if components_root is not None:
+        from .docling_component import DoclingComponent, DoclingComponentError
+        component = DoclingComponent(components_root)
+        try:
+            artifacts = component.verify()
+        except DoclingComponentError as error:
+            if getattr(sys, 'frozen', False) or component.root.exists():
+                raise DoclingSourceError(str(error)) from error
+            artifacts = _bundled_artifacts()
+    else:
+        artifacts = _bundled_artifacts()
     try:
         if version("docling") != DOCLING_VERSION:
             raise DoclingSourceError("docling_runtime_unavailable")
@@ -129,6 +175,7 @@ def _build_converter():
         raise
     except (ImportError, PackageNotFoundError, OSError) as error:
         raise DoclingSourceError("docling_runtime_unavailable") from error
+    _normalize_tableformer_config_paths()
     options = PdfPipelineOptions()
     options.artifacts_path = artifacts
     options.do_ocr = True
@@ -150,6 +197,27 @@ def _build_converter():
         InputFormat.EPUB: EpubFormatOption(backend_options=EpubBackendOptions(
             fetch_images=True, enable_local_fetch=True, enable_remote_fetch=False)),
     })
+
+
+def _normalize_tableformer_config_paths():
+    """Adapt Docling 2.126's string join to Windows extended-path syntax.
+
+    Tableformer appends '/tm_config.json' to a Path string. Windows extended
+    paths do not accept that mixed separator. Keep the adapter confined to
+    its config reader; never replace process-wide open or resolve junctions.
+    """
+    if sys.platform != 'win32':
+        return
+    from docling_ibm_models.tableformer import common
+    if getattr(common.read_config, '_kd_normalized_paths', False):
+        return
+    original = common.read_config
+
+    def read_config(filename):
+        return original(Path(filename))
+
+    read_config._kd_normalized_paths = True
+    common.read_config = read_config
 
 
 def _scan_aware_pipeline():

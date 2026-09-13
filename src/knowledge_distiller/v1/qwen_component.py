@@ -24,15 +24,18 @@ from knowledge_distiller.primary import (
 
 from .adapters.python_policy import PYTHON_VERSION, RUNTIMES
 from .windows_platform import is_link_or_reparse
+from .qwen_migration import QwenLegacyMigration
 
 PYTHON_URL = RUNTIMES['mac']['url']
 PYTHON_SHA256 = RUNTIMES['mac']['sha256']
 ASSETS = Path(__file__).parent / 'adapters'
-BUSY = {'downloading_runtime', 'installing_runtime', 'downloading_model', 'verifying_runtime'}
+BUSY = {'downloading_runtime', 'installing_runtime', 'downloading_model', 'verifying_runtime','validating_existing'}
 LABELS = {'not_installed':'尚未安装', 'downloading_runtime':'正在下载运行组件',
           'installing_runtime':'正在安装运行组件', 'downloading_model':'正在下载模型权重',
           'verifying_runtime':'正在进行本机识别自检',
           'ready':'已安装，可以启用', 'failed':'安装失败，可重试',
+          'needs_validation':'已有组件待校验', 'validating_existing':'正在校验已有组件',
+          'needs_upgrade':'已有组件需要更新',
           'interrupted':'安装已中断，可继续', 'unsupported':'此平台的本地组件尚未提供'}
 
 
@@ -54,7 +57,9 @@ def _digest(path):
 
 def _atomic_json(path, value):
     temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(value, ensure_ascii=False), encoding='utf-8')
+    with temporary.open('w',encoding='utf-8') as output:
+        json.dump(value,output,ensure_ascii=False)
+        output.flush();os.fsync(output.fileno())
     deadline = time.monotonic() + 2
     while True:
         try:
@@ -82,7 +87,7 @@ def _environment(root, *, offline=False):
     return env
 
 
-class QwenComponent:
+class QwenComponent(QwenLegacyMigration):
     def __init__(self, root):
         self.root = Path(root)
         self.active = self.root / 'installed'
@@ -178,7 +183,17 @@ class QwenComponent:
             if state == 'ready' and self.ready():
                 return dict(state='ready', label=LABELS['ready'], busy=False,
                             ready=True, can_install=False)
-            if state == 'ready' or state not in LABELS:
+            if state == 'ready':
+                manifest = _read(self.active/'component.json')
+                expected_version, expected_revision = self.identity()
+                if self._legacy_manifest() is not None:
+                    state = 'needs_validation'
+                elif (manifest.get('version') != expected_version or manifest.get('revision') != expected_revision
+                      or manifest.get('python',{}).get('version') != PYTHON_VERSION):
+                    state = 'needs_upgrade'
+                else:
+                    state = 'failed'
+            elif state not in LABELS:
                 state = 'failed'
         saved=_read(self.root/'state.json')
         if not isinstance(saved,dict):saved={}
@@ -188,7 +203,7 @@ class QwenComponent:
         verified=state=='ready' and isinstance(manifest,dict) and manifest.get('self_test_passed') is True
         return dict(self_test_passed=verified,detail=detail,free_bytes=self._disk_free(),progress=progress,
                     state=state, label=LABELS[state], busy=state in BUSY,
-                    ready=state=='ready', can_install=state in {'not_installed','failed','interrupted'})
+                    ready=state=='ready', can_install=state in {'not_installed','failed','interrupted','needs_validation','needs_upgrade'})
 
     def _locked(self):
         if not (self.root/'install.lock').exists():
@@ -234,6 +249,14 @@ class QwenComponent:
 
     def _install(self,lock):
         try:
+            try:
+                if self._migrate_existing():
+                    return
+            except ComponentError as error:
+                # This path follows explicit Install/Repair, unlike the
+                # startup validator, which never downloads or replaces files.
+                if str(error) not in {'model_identity_mismatch','python_version_mismatch'}:
+                    raise
             if self.windows:
                 from .qwen_windows import install
                 install(self)
@@ -511,12 +534,30 @@ class ComponentQwenRuntime:
     def __init__(self,component):
         self.component=component
 
+    @property
+    def cache_identity(self):
+        worker = 'qwen_windows_worker.py' if self.component.windows else 'qwen_worker.py'
+        return [*self.component.identity(), PYTHON_VERSION, worker,
+                hashlib.sha256((ASSETS / worker).read_bytes()).hexdigest()]
+
     def transcribe(self,audio_path):
         from .file_lock import acquire
         if not self.component.root.is_dir():
             raise QwenRuntimeUnavailable
         try:
-            with acquire(self.component.root/'install.lock'):
+            self.component.begin_legacy_validation()
+            deadline = time.monotonic() + 3660
+            while True:
+                try:
+                    lock = acquire(self.component.root/'install.lock')
+                    break
+                except BlockingIOError:
+                    # Startup qualification runs off the UI thread. A queued
+                    # recognition waits for it instead of failing as unavailable.
+                    if (_read(self.component.root/'state.json').get('state') != 'validating_existing'
+                            or time.monotonic() >= deadline or self.component._stop.wait(.1)):
+                        raise
+            with lock:
                 self.component._probe_python(self.component.active, force=True)
                 return self._transcribe(audio_path)
         except (BlockingIOError, OSError, ComponentError, subprocess.SubprocessError, ValueError) as error:

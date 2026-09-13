@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
 from knowledge_distiller.content_reading import INDEPENDENT_READING, SOURCE_VOICE
@@ -20,6 +20,12 @@ class KnowledgeModelError(RuntimeError):
 @dataclass(frozen=True)
 class AnthropicKnowledgeModel:
     client: AnthropicMessagesClient
+    checkpoint_root: object = None
+
+    def for_item(self, directory):
+        """Let the pipeline own recovery files through its item lifecycle."""
+        from pathlib import Path
+        return replace(self, checkpoint_root=Path(directory) / 'knowledge')
 
     def derive_collection(self, basis):
         from .collection_model import call_combined
@@ -31,6 +37,18 @@ class AnthropicKnowledgeModel:
         uncertainties: Sequence[Mapping[str, object]] = (),
     ) -> Knowledge:
         segments = source_segments(snapshot)
+        from .knowledge_presentation import PresentationRecord, prepare
+        record = PresentationRecord(self.checkpoint_root, {'snapshot': snapshot, 'uncertainties': list(uncertainties),
+            'system': SYSTEM_PROMPT, 'presentation_rule': 1,
+            'model': getattr(self.client, 'model', None), 'endpoint': getattr(self.client, 'base_url', None),
+            'effort': getattr(self.client, 'reasoning_effort', getattr(self.client, 'effort', None)),
+            'service_tier': getattr(self.client, 'service_tier', None)})
+        retained = record.pending()
+        if retained is not None:
+            try:
+                return prepare(snapshot, retained, segments, self.client, record)
+            except OSError as error:
+                raise KnowledgeModelError('knowledge_checkpoint_unavailable') from error
         try:
             text = self.client.complete(
                 system=SYSTEM_PROMPT,
@@ -46,7 +64,10 @@ class AnthropicKnowledgeModel:
             )
         except LLMRequestError as error:
             raise KnowledgeModelError(*error.args) from error
-        return parse_knowledge(snapshot, text, segments=segments)
+        try:
+            return prepare(snapshot, text, segments, self.client, record)
+        except OSError as error:
+            raise KnowledgeModelError('knowledge_checkpoint_unavailable') from error
 
 
 def source_segments(snapshot: str) -> dict[str, tuple[int, int]]:
@@ -86,14 +107,15 @@ def parse_knowledge(snapshot: str, text: str, *, image_ids=frozenset(), segments
         raise KnowledgeModelError("knowledge_not_qualified", rejection_reason=reason.strip())
     if payload.get("rejection_reason") not in {None, ""}:
         raise KnowledgeModelError("knowledge_structure_invalid")
+    from .knowledge_presentation import display_line
     try:
         core = _points(payload["core_points"])
         other = _points(payload["other_points"])
         evidence = _evidence(snapshot, payload["evidence"], image_ids=image_ids, segments=segments)
         knowledge = Knowledge(
-            title=_text(payload["title"]),
-            subtitle=_text(payload["subtitle"]),
-            summary=_text(payload["summary"]),
+            title=_text(display_line(payload["title"])),
+            subtitle=_text(display_line(payload["subtitle"])),
+            summary=_text(display_line(payload["summary"])),
             core_points=core,
             other_points=other,
             evidence=evidence,

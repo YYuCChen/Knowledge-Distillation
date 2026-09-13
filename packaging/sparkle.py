@@ -1,5 +1,7 @@
 """Attach the pinned Sparkle runtime after PyInstaller's bundle assembly."""
 import hashlib
+from io import BytesIO
+import tarfile
 from pathlib import Path
 import plistlib
 import subprocess
@@ -11,13 +13,33 @@ SDK_SHA256 = '52bf9e88cdd972fc0c81501377a880e90d47031bd8ca5462488f843e2609e192'
 
 
 def attach(app, sdk, config, project):
-    sdk, app = Path(sdk), Path(app)
+    # Only the pinned archive is authoritative. Reusing an unpacked tree can
+    # silently flatten framework symlinks or introduce changed build inputs.
+    archive = Path(sdk) / 'Sparkle-2.9.6.tar.xz'
+    data = archive.read_bytes()
+    if hashlib.sha256(data).hexdigest() != SDK_SHA256:
+        raise ValueError('Sparkle SDK checksum mismatch')
+    with tempfile.TemporaryDirectory(prefix='kd-sparkle-sdk-') as temporary:
+        verified = Path(temporary).resolve()
+        with tarfile.open(fileobj=BytesIO(data), mode='r:xz') as tar:
+            tar.extractall(verified, filter='data')
+        return _attach_verified(Path(app), verified, config, project)
+
+
+def validate_framework(sdk):
+    sdk = Path(sdk).resolve()
     sdk_info = plistlib.loads((sdk/'Sparkle.framework/Resources/Info.plist').read_bytes())
     if sdk_info['CFBundleShortVersionString'] != '2.9.6':
         raise ValueError('Sparkle 2.9.6 is required')
-    archive = sdk/'Sparkle-2.9.6.tar.xz'
-    if SDK_SHA256 and hashlib.sha256(archive.read_bytes()).hexdigest() != SDK_SHA256:
-        raise ValueError('Sparkle SDK checksum mismatch')
+    for name in ('Sparkle', 'Resources', 'Versions/Current'):
+        path = sdk / 'Sparkle.framework' / name
+        if not path.is_symlink() or not path.resolve().is_relative_to(sdk):
+            raise ValueError('Sparkle framework links are invalid')
+    return sdk
+
+
+def _attach_verified(app, sdk, config, project):
+    sdk = validate_framework(sdk)
     contents = app/'Contents'
     subprocess.run(['ditto', str(sdk/'Sparkle.framework'), str(contents/'Frameworks/Sparkle.framework')], check=True)
     source = project/'packaging/sparkle-cli'
@@ -44,6 +66,11 @@ def attach(app, sdk, config, project):
         with (work/'build.log').open('w') as log:
             subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--onefile',
                 '--name', 'update-helper', '--paths', str(project/'src'),
+                '--add-binary', str(sdk/'bin/BinaryDelta')+':tools',
+                '--add-data', str(project/'src/knowledge_distiller/v1/adapters/update-codec-notices.txt')+':knowledge_distiller/v1/adapters',
+                '--add-data', str(project/'src/knowledge_distiller/v1/adapters/docling-model-notices.txt')+':knowledge_distiller/v1/adapters',
+                '--add-data', str(project/'packaging/update_config.json')+':knowledge_distiller/v1/adapters',
+                '--add-data', str(project/'src/knowledge_distiller/v1/adapters/docling-models-manifest.json')+':knowledge_distiller/v1/adapters',
                 '--add-data', str(project/'src/knowledge_distiller/v1/adapters/python-runtime.json')+':knowledge_distiller/v1/adapters',
                 '--distpath', str(work/'dist'), '--workpath', str(work/'work'), '--specpath', str(work),
                 str(project/'packaging/update_entry.py')], stdout=log, stderr=subprocess.STDOUT, check=True)
@@ -51,7 +78,7 @@ def attach(app, sdk, config, project):
     plist = contents/'Info.plist'
     info = plistlib.loads(plist.read_bytes())
     info.update(SUPublicEDKey=config['public_key'], SUFeedURL=config['feed_url'],
-                SURequireSignedFeed=True, SUVerifyUpdateBeforeExtraction=True,
+                KDComponentUpdates=True, SURequireSignedFeed=True, SUVerifyUpdateBeforeExtraction=True,
                 SUEnableAutomaticChecks=False, SUAutomaticallyUpdate=False)
     if config.get('test_data_root'):
         info.update(CFBundleIdentifier='local.knowledge-distiller.updater-test', KDUpdateTestDataRoot=config['test_data_root'])

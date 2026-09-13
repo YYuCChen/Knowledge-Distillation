@@ -28,3 +28,5 @@ Mac与Windows分别进行原生验证。双平台流程使用 `scripts/dual_buil
 ## 发行附件大小门禁
 
 Windows完整ZIP严格小于2,000,000,000字节；全部附件严格小于2,147,483,648字节。数值唯一配置为 `packaging/release_policy.json`。打包后与上传前执行 `scripts/check_release_sizes.py <全部实际附件> --report <验收文件>`，检查真实大小及剩余额度，等于上限即失败。禁止删除必要功能、依赖、许可或改为隐含联网/分卷安装来缩包。
+
+组件化施工协议与验收边界见[组件发行与恢复](component-delivery.md)，不能将旧完整包验收当作新协议验收。

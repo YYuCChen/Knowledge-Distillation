@@ -258,10 +258,12 @@ def test_runtime_failures_are_translated(error, expected):
 def test_empty_or_structurally_invalid_output_is_rejected(payload):
     result = FaithfulReviewAdapter(ReviewBinding(payload)).review(recovery())
 
-    assert result.failure is None
-    assert result.candidate.text == (text if "text" in locals() else PRIMARY_TEXT)
-    assert not result.candidate.repairs
-    assert result.candidate.diagnostics or result.candidate.concerns
+    # P06/P09: retained text is not a successfully completed review.
+    assert result.failure == ReviewFailure.INVALID_OUTPUT
+    assert result.candidate is None
+    assert result.incomplete_candidate.text == PRIMARY_TEXT
+    assert not result.incomplete_candidate.repairs
+    assert result.incomplete_candidate.diagnostics
 
 
 def test_overlapping_generated_concerns_are_rejected():
