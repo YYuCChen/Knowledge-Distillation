@@ -1,6 +1,22 @@
 from knowledge_distiller.v1.component_bootstrap import create_installer
 
 
+def test_close_waits_until_response_body_is_finished(tmp_path):
+    import re
+    import threading
+    app = create_installer(target=tmp_path/'program', data_root=tmp_path/'data',
+        platform='windows-x86_64', public_key='unused', manifest_url='https://example.com/release.json')
+    stopped = threading.Event()
+    app.config['SHUTDOWN'] = stopped.set
+    client = app.test_client()
+    token = re.search(r'name="token" value="([^"]+)"', client.get('/').text).group(1)
+    response = client.post('/', data={'token': token, 'action': 'close'}, buffered=False)
+    assert not stopped.wait(.1)
+    assert response.get_data(as_text=True) == '安装器已关闭，可以关闭此页面。'
+    response.close()
+    assert stopped.wait(2)
+
+
 def test_installer_get_is_read_only_and_mutations_require_token(tmp_path):
     root, target = tmp_path / 'data', tmp_path / 'program'
     app = create_installer(target=target, data_root=root, platform='windows-x86_64',

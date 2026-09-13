@@ -10,7 +10,7 @@ from uuid import uuid4
 import webbrowser
 
 import httpx
-from flask import Flask, request, render_template_string, redirect
+from flask import Flask, request, render_template_string, redirect, make_response
 from werkzeug.serving import make_server
 
 from .adapters.python_policy import check_current
@@ -155,10 +155,15 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                 state['message'] = '正在停止准备，已校验的下载会保留。'
                 return redirect('/')
             if action == 'close' and not state['busy']:
+                response = make_response('安装器已关闭，可以关闭此页面。')
                 shutdown = app.config.get('SHUTDOWN')
                 if shutdown:
-                    threading.Thread(target=shutdown, daemon=True).start()
-                return '安装器已关闭，可以关闭此页面。'
+                    # WSGI closes the response after writing/flushing its body.
+                    # Stopping the server before then can terminate the daemon
+                    # request thread and truncate the browser acknowledgement.
+                    response.call_on_close(lambda: threading.Thread(
+                        target=shutdown, daemon=True).start())
+                return response
             if action not in {'prepare', 'install', 'recover'}:
                 return '未知安装操作。', 400
             if operation.acquire(blocking=False):
