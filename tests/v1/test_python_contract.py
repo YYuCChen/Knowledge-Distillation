@@ -86,3 +86,15 @@ def test_project_ci_and_build_gates_follow_single_policy():
         assert 'check_current' in (project/'scripts'/name).read_text()
     for name in ('verify_candidate.py','dual_build.py'):
         assert 'python_policy.py' in (project/'scripts'/name).read_text()
+
+
+def test_retirement_removes_known_old_download_caches(tmp_path, monkeypatch):
+    component=qc.QwenComponent(tmp_path)
+    old=tmp_path/'previous-1'
+    for name in ('python','cache','pip-cache'):
+        (old/name).mkdir(parents=True)
+        (old/name/'download').write_bytes(b'old')
+    (old/'component.json').write_text('{"version":"old"}')
+    monkeypatch.setattr(component,'_runtime_in_use',lambda root:False)
+    component._retire_previous()
+    assert not old.exists()

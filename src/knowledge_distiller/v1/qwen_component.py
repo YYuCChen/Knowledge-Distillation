@@ -381,9 +381,9 @@ class QwenComponent:
             python = old/'python'
             if python.exists() and not python.is_symlink():
                 shutil.rmtree(python)
-            unique = False
             model = old/'model'
-            if model.exists():
+            unique = model.is_symlink()
+            if model.exists() and not model.is_symlink():
                 for path in model.rglob('*'):
                     if not path.is_file() or '.cache' in path.relative_to(model).parts:
                         continue
@@ -393,9 +393,13 @@ class QwenComponent:
                         break
                 if not unique and not model.is_symlink():
                     shutil.rmtree(model)
-            for name in ('component.json','python-ready','install-result.json','install-contract'):
+            for cache in (old/'cache', old/'pip-cache'):
+                if cache.is_dir() and not cache.is_symlink():
+                    shutil.rmtree(cache)
+            for name in ('python-ready','install-result.json','install-contract'):
                 (old/name).unlink(missing_ok=True)
-            if not any(old.iterdir()):
+            if {p.name for p in old.iterdir()} == {'component.json'}:
+                (old/'component.json').unlink()
                 old.rmdir()
             records.append({'directory':old.name,'status':'unique-files-retained' if old.exists() else 'retired'})
         _atomic_json(self.root/'retirement.json', {'python':PYTHON_VERSION,'records':records})
