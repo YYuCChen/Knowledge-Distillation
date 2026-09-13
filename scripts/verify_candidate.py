@@ -7,6 +7,8 @@ import plistlib
 import subprocess
 import time
 import urllib.request
+import runpy
+PYTHON_VERSION=runpy.run_path(str(Path(__file__).resolve().parents[1]/"src/knowledge_distiller/v1/adapters/python_policy.py"))["PYTHON_VERSION"]
 
 
 def main():
@@ -22,7 +24,7 @@ def main():
     report={'ok':False,'platform':args.platform,'version':args.version,'source_commit':args.commit,'disposable_data':True}
     try:
         manifest=json.loads((build/'build-manifest.json').read_text(encoding='utf-8'))
-        assert manifest['python'] == '3.11.16' and manifest['python_inventory']
+        assert manifest['python'] == PYTHON_VERSION and manifest['python_inventory']
         assert manifest['git_head']==args.commit and manifest['version']==args.version
         assert manifest['status'] in {'built','built-not-yet-accepted'}
         assert not manifest.get('changed_during_build') and not manifest.get('git_dirty')
@@ -49,7 +51,7 @@ def main():
         helper = app/('Contents/MacOS/update-helper' if args.platform == 'mac' else 'update-helper.exe')
         subprocess.run([str(helper), '--runtime-report', str(output/'helper-runtime.json')], env=env, cwd=output, check=True, timeout=60)
         helper_runtime=json.loads((output/'helper-runtime.json').read_text(encoding='utf-8'))
-        assert helper_runtime['frozen'] and helper_runtime['python']['version'] == '3.11.16'
+        assert helper_runtime['frozen'] and helper_runtime['python']['version'] == PYTHON_VERSION
         report['update_helper_runtime']=helper_runtime
         base=[str(exe),'--data-dir',str(output/'data'),'--no-open']
         with (output/'runtime.log').open('wb') as log:
@@ -57,7 +59,7 @@ def main():
             if args.platform=='windows':command+=['--check-offline']
             subprocess.run(command,env=env,cwd=output,stdout=log,stderr=log,check=True,timeout=180)
         runtime=json.loads((output/'runtime.json').read_text(encoding='utf-8'))
-        assert runtime['python']['version'] == '3.11.16' and runtime['python_inventory']
+        assert runtime['python']['version'] == PYTHON_VERSION and runtime['python_inventory']
         assert runtime['ok'] and runtime['frozen'];report['runtime']=runtime
         ports=[]
         for iteration in range(2):

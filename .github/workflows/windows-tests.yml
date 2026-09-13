@@ -21,14 +21,28 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11.16'
+      - name: Install pinned product Python
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $policy = Get-Content src/knowledge_distiller/v1/adapters/python-runtime.json -Raw | ConvertFrom-Json
+          $root = Join-Path $env:RUNNER_TEMP 'kd-python'
+          New-Item -ItemType Directory -Path $root | Out-Null
+          $archive = Join-Path $root 'python.tar.gz'
+          Invoke-WebRequest $policy.runtimes.windows.url -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne $policy.runtimes.windows.sha256) { throw 'Python checksum mismatch' }
+          tar -xzf $archive -C $root
+          if ($LASTEXITCODE -ne 0) { throw 'Python extraction failed' }
+          $python = Join-Path $root 'python/python.exe'
+          & $python -I -c 'import platform; print(platform.python_version())'
+          if ($LASTEXITCODE -ne 0) { throw 'Python startup failed' }
+          (Join-Path $root 'python') | Out-File $env:GITHUB_PATH -Append
+          (Join-Path $root 'python/Scripts') | Out-File $env:GITHUB_PATH -Append
       - name: Install isolated test dependencies
         run: python -m pip install 'pytest>=8.3,<9' 'psutil==7.2.2' 'Flask>=3.1,<4' 'PyYAML>=6,<7' 'jsonschema>=4.23,<5' 'httpx>=0.27,<1' 'pycryptodome>=3.20,<4' 'Pillow>=11,<13' 'markdown-it-py>=4,<5' 'pypdf>=6,<7' 'cryptography==50.0.1' setuptools packaging
       - name: Native lifecycle, credentials and update regressions
         run: >-
-          python -m pytest -q tests/v1/test_python_contract.py --junitxml=windows-tests.xml
+          python -m pytest -q tests/v1/test_python_contract.py tests/test_release_sizes.py --junitxml=windows-tests.xml
           tests/v1/test_windows_12_interfaces.py tests/v1/test_windows_12_updates.py
           tests/v1/test_windows_delta.py tests/v1/test_windows_interfaces.py
           tests/v1/test_windows_lifecycle.py tests/v1/test_windows_local_secrets.py

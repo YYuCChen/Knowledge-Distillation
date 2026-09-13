@@ -67,6 +67,7 @@ include-package-data = false
 knowledge_distiller = [
   "v1/adapters/*.mjs",
   "v1/adapters/python_policy.py",
+  "v1/adapters/python-runtime.json",
   "v1/adapters/qwen_worker.py",
   "v1/adapters/qwen-selftest.wav",
   "v1/adapters/qwen_windows_worker.py",

@@ -287,7 +287,7 @@ class QwenComponent:
         if not force and self._python_cache and self._python_cache[0] == key:
             return self._python_cache[1]
         from .subprocess_environment import external_process
-        code = "import json,platform,sys;print(json.dumps(dict(version=platform.python_version(),executable=sys.executable,implementation=platform.python_implementation())))"
+        code = "import json,platform,sys;print(json.dumps(dict(version=platform.python_version(),executable=sys.executable,architecture=platform.machine(),implementation=platform.python_implementation())))"
         with external_process():
             result = subprocess.run([str(python), '-I', '-c', code],
                 env=_environment(root), capture_output=True, text=True, encoding='utf-8',

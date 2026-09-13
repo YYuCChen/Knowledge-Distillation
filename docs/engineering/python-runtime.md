@@ -2,7 +2,7 @@
 
 用户裁决：Mac 主程序、Windows 主程序和全部 Qwen Python 运行环境统一为 Python 3.11。本轮固定同一补丁版本 **CPython 3.11.16**；产品版本继续 1.2。
 
-契约在 `src/knowledge_distiller/v1/adapters/python_policy.py`。两平台均使用 python-build-standalone 20260901 的固定归档和 SHA-256。构建脚本在调用 PyInstaller 前检查真实解释器；冻结成品检查真实 `sys.executable`、版本和包内运行库清单，拒绝 3.12/3.13 等其他 ABI 的二进制。CI 使用相同补丁版本。
+数值与下载哈希唯一契约在 `src/knowledge_distiller/v1/adapters/python-runtime.json`，`python_policy.py` 读取并执行。两平台均使用 python-build-standalone 20260901 的固定归档和 SHA-256。构建脚本在调用 PyInstaller 前检查真实解释器；冻结成品检查真实 `sys.executable`、版本和包内运行库清单，拒绝 3.12/3.13 等其他 ABI 的二进制。CI 读取同一契约；Windows setup-python 无对应安全维护版二进制，因此用 PowerShell 下载并验哈希同一独立运行时。
 
 从全新环境分别安装 `packaging/mac-requirements-lock.txt` 和 `packaging/windows-requirements-lock.txt`。兼容解析保留原有顶层模型与依赖版本；SciPy 由要求 Python ≥3.12 的 1.18.1 改为兼容 3.11 的 1.17.1。Qwen Windows 锁重新选择 cp311 或兼容 abi3 轮子；abi3 文件中的较低 Python 标签表示兼容 ABI 下限，不代表安装了另一个 Python 解释器。
 

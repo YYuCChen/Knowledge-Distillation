@@ -73,3 +73,16 @@ def test_retirement_preserves_unique_model(tmp_path, monkeypatch):
     monkeypatch.setattr(component,'_runtime_in_use',lambda root:False)
     component._retire_previous()
     assert not (old/'python').exists() and (old/'model/unique').read_text()=='unique'
+
+
+def test_project_ci_and_build_gates_follow_single_policy():
+    import tomllib
+    project=Path(__file__).resolve().parents[2]
+    assert tomllib.loads((project/'pyproject.toml').read_text())['project']['requires-python'] == '>='+policy.PYTHON_VERSION+',<3.12'
+    for name in ('quick-tests.yml','windows-tests.yml'):
+        text=(project/'.github/workflows'/name).read_text()
+        assert "src/knowledge_distiller/v1/adapters/python-runtime.json" in text
+    for name in ('build_mac.py','build_windows.py'):
+        assert 'check_current' in (project/'scripts'/name).read_text()
+    for name in ('verify_candidate.py','dual_build.py'):
+        assert 'python_policy.py' in (project/'scripts'/name).read_text()

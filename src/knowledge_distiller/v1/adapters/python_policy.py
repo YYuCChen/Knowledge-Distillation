@@ -2,23 +2,18 @@
 import platform
 import sys
 
-PYTHON_VERSION = '3.11.16'
-PYTHON_SERIES = (3, 11)
-RUNTIMES = {
-    'mac': {
-        'url': 'https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.11.16%2B20260901-aarch64-apple-darwin-install_only_stripped.tar.gz',
-        'sha256': '768f05cf200273bbdda9a5955a5a6892a4b22f2a0b1e4b0a9160f5c7fce86816',
-    },
-    'windows': {
-        'url': 'https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.11.16%2B20260901-x86_64-pc-windows-msvc-install_only_stripped.tar.gz',
-        'sha256': '06cbe479e039f5b9cb5640c286d790074d63f549f92a32d599a3748293bd4510',
-    },
-}
+import json
+from pathlib import Path
+
+CONTRACT = json.loads(Path(__file__).with_name('python-runtime.json').read_text(encoding='utf-8'))
+PYTHON_VERSION = CONTRACT['version']
+PYTHON_SERIES = tuple(map(int, PYTHON_VERSION.split('.')[:2]))
+RUNTIMES = CONTRACT['runtimes']
 
 
 def check_current():
     record = dict(version=platform.python_version(), executable=sys.executable,
-                  prefix=sys.prefix, implementation=platform.python_implementation())
+                  prefix=sys.prefix, architecture=platform.machine(), implementation=platform.python_implementation())
     if record['version'] != PYTHON_VERSION or record['implementation'] != 'CPython':
         raise RuntimeError('Python runtime mismatch: expected CPython ' + PYTHON_VERSION + ', got ' + str(record))
     return record

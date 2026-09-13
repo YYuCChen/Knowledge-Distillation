@@ -89,10 +89,13 @@ def main():
     hashes = {p.relative_to(release).as_posix(): digest(p) for p in sorted(release.rglob('*')) if p.is_file()}
     (release / 'FILES-SHA256.json').write_text(json.dumps(hashes, indent=2), encoding='utf-8')
     archive = output / ('KnowledgeDistiller-' + args.version + '-Windows-x64.zip')
-    with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as zipout:
+    with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as zipout:
         for path in sorted(release.rglob('*')):
             if path.is_file():
                 zipout.write(path, (Path(release.name) / path.relative_to(release)).as_posix())
+    import runpy
+    size_report = runpy.run_path(str(project/'scripts/check_release_sizes.py'))['check_files']([archive])
+    (output/'size-check.json').write_text(json.dumps(size_report,indent=2),encoding='utf-8')
     (output / 'SHA256SUMS.txt').write_text(digest(archive) + '  ' + archive.name + '\n', encoding='ascii')
     print(archive)
 
