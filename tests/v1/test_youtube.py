@@ -228,3 +228,37 @@ def test_queued_youtube_item_is_not_labeled_douyin(store):
     view=_item_view(store.item_bundle(item),None,store.path.parent)
     assert view['title']=='YouTube 内容'
     assert view['source_type']=='YouTube'
+
+
+def test_caption_identity_requires_exact_inventory_and_exposes_missing_language(tmp_path):
+    from types import SimpleNamespace
+    from knowledge_distiller.v1.youtube import _captions
+    from knowledge_distiller.v1.subtitle_baseline import select_subtitle
+    path = tmp_path / 'caption.vtt'
+    path.write_text('WEBVTT\n\n00:00.000 --> 00:01.000\nsource text\n')
+    url = 'https://captions.example/video?lang=en'
+    info = {'id': KEY, 'requested_subtitles': {'en': {'filepath': str(path), 'url': url}},
+            'subtitles': {'en': [{'url': url}]}}
+    tracks = _captions(info, tmp_path)
+    assert tracks[0]['kind'] == 'manual' and tracks[0]['translated'] is False
+    selected, detail = select_subtitle(SimpleNamespace(source_key=KEY, duration_seconds=1,
+        metadata={'captions': tracks, 'original_language': None}))
+    assert selected is None and detail['caption_selection'][0]['code'] == 'original_language_unverified'
+    info['subtitles']['en'][0]['url'] = 'https://captions.example/other'
+    assert _captions(info, tmp_path)[0]['kind'] == 'unverified'
+    translated = 'https://captions.example/video?lang=es&%74lang=en'
+    info['requested_subtitles']['en']['url'] = translated
+    info['automatic_captions'] = {'en': [{'url': translated}]}
+    track = _captions(info, tmp_path)[0]
+    assert track['kind'] == 'automatic' and track['translated'] is True
+
+
+def test_invalid_optional_caption_url_does_not_abort_audio_fallback(tmp_path):
+    from knowledge_distiller.v1.youtube import _captions
+    path = tmp_path / 'caption.vtt'
+    path.write_text('WEBVTT\n\n00:00.000 --> 00:01.000\nsource text\n')
+    url = 'https://[invalid/video'
+    info = {'id': KEY, 'requested_subtitles': {'en': {'filepath': str(path), 'url': url}},
+            'subtitles': {'en': [{'url': url}]}}
+    track = _captions(info, tmp_path)[0]
+    assert track['translated'] is None

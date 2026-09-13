@@ -97,7 +97,7 @@ def _digital_silence(audio,gaps):
                     if len(data)!=count*2 or any(data):return False
                     remaining-=count
             return True
-    except (OSError,ValueError,wave.Error):return False
+    except (OSError,ValueError,EOFError,wave.Error):return False
 
 
 def select_subtitle(captured, audio=None):

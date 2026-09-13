@@ -174,6 +174,8 @@ ERROR_TEXT = {
     "llm_fast_unavailable": "此型号暂不支持 Fast，请在设置中更新型号或选择标准速度。",
     "knowledge_not_qualified": "本次未生成知识，旧记录未保存具体原因。来源已保留，可重新提炼查看新的判断。",
     "insight_labels_incomplete": "阅读标签尚未准备完成，完整候选与依据已保留，重试只继续准备标签。",
+    "knowledge_presentation_incomplete": "展示字段尚未准备完成，原候选、观点和证据已保留，重试会继续恢复展示字段。",
+    "knowledge_checkpoint_unavailable": "候选保存未完成，请检查空间和目录权限后重试；来源已保留。",
     "knowledge_json_invalid": "模型结果未形成可靠知识，可以重新尝试。",
     "knowledge_structure_invalid": "模型结果未通过证据校验，可以重新尝试。",
     "knowledge_evidence_invalid": "生成的证据引用了尚未确认的图片文字或无效图片依据，本次未保存知识。",
