@@ -136,9 +136,9 @@ class RecordedReviewer(FaithfulReviewAdapter):
             piece = PrimaryRecovery(text[start:end], recovery.language, ())
             result = self._review_cached(piece, binding)
             chain.extend(result.response_chain)
-            if result.failure:
-                return replace(result, response_chain=tuple(chain))
-            candidate = result.candidate
+            candidate = result.candidate or result.incomplete_candidate
+            if candidate is None:
+                candidate = FaithfulReviewCandidate(piece.text, ())
             diagnostics.extend({**d, "segment": index, "source_range": [start, end]} for d in candidate.diagnostics)
             concerns.extend(replace(c, start_offset=c.start_offset+offset, end_offset=c.end_offset+offset) for c in candidate.concerns)
             trim = 0
@@ -146,6 +146,18 @@ class RecordedReviewer(FaithfulReviewAdapter):
                             'start': r['start']+offset, 'end': r['end']+offset} for r in candidate.repairs)
             output.append(candidate.text)
             offset += len(candidate.text)
+            if result.failure:
+                # Preserve the reviewed prefix and the failed segment in the
+                # full-source coordinate system. The untouched suffix is data,
+                # not an assertion that the remaining review has completed.
+                output.append(text[end:])
+                diagnostics.append({'code': 'segment_review_unfinished',
+                    'segment': index, 'source_range': [start, end],
+                    'unreviewed_source_range': [end, len(text)],
+                    'failure': str(result.failure)})
+                return replace(result, incomplete_candidate=FaithfulReviewCandidate(
+                    ''.join(output), tuple(concerns), tuple(repairs), tuple(diagnostics)),
+                    response_chain=tuple(chain))
         return replace(FaithfulReview.succeeded(FaithfulReviewCandidate(''.join(output), tuple(concerns), tuple(repairs), tuple(diagnostics))), response_chain=tuple(chain))
 
     @staticmethod
@@ -224,7 +236,8 @@ class RecordedReviewer(FaithfulReviewAdapter):
                 'responses': responses, 'result': payload,
                 'sha256': hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()})
         except OSError:
-            return FaithfulReview.failed(ReviewFailure.CHECKPOINT_UNAVAILABLE)
+            return replace(result, candidate=None, failure=ReviewFailure.CHECKPOINT_UNAVAILABLE,
+                incomplete_candidate=result.candidate or result.incomplete_candidate)
         return result
 
 
