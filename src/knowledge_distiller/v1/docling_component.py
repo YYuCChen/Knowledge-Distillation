@@ -40,7 +40,8 @@ class DoclingComponent:
     def __init__(self, components_root, *, manifest=None):
         self.manifest = trusted_manifest() if manifest is None else manifest
         self.files = self.manifest['files']
-        self.notices = (Path(__file__).parent / 'adapters' / 'docling-model-notices.txt').read_bytes()
+        # Git checkout newline conversion must not change shared archive identity.
+        self.notices = (Path(__file__).parent / 'adapters' / 'docling-model-notices.txt').read_bytes().replace(b'\r\n', b'\n')
         if not self.files:
             raise DoclingComponentError('docling_component_invalid_inventory')
         seen = set()

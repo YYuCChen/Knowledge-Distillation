@@ -149,3 +149,28 @@ def test_archive_notices_are_exact_trusted_bytes(tmp_path, valid):
         with pytest.raises(DoclingComponentError):
             component.import_archive(archive)
         assert not component.active.exists()
+
+
+@pytest.mark.parametrize('tampered', [False, True])
+def test_shared_notice_archive_is_independent_of_checkout_line_endings(tmp_path, monkeypatch, tampered):
+    import zipfile
+    from knowledge_distiller.v1 import docling_component as module
+    adapter = tmp_path / 'checkout/adapters'
+    adapter.mkdir(parents=True)
+    notice = b'License notice\nKeep attribution.\n'
+    (adapter / 'docling-model-notices.txt').write_bytes(notice.replace(b'\n', b'\r\n'))
+    monkeypatch.setattr(module, '__file__', str(adapter.parent / 'docling_component.py'))
+    payload = b'model'
+    manifest = {'files': {'model.bin': {'size':len(payload), 'sha256':hashlib.sha256(payload).hexdigest()}}}
+    component = module.DoclingComponent(tmp_path / 'components', manifest=manifest)
+    archive = tmp_path / 'shared.zip'
+    with zipfile.ZipFile(archive, 'w') as package:
+        package.writestr('model.bin', payload)
+        package.writestr('NOTICE.txt', notice.replace(b'License', b'Changed') if tampered else notice)
+    if tampered:
+        with pytest.raises(module.DoclingComponentError):component.import_archive(archive)
+        assert not component.active.exists()
+    else:
+        component.import_archive(archive)
+        assert (component.active / 'NOTICE.txt').read_bytes() == notice
+        assert (component.active / 'model.bin').read_bytes() == payload
