@@ -214,6 +214,8 @@ def test_qwen_complete_output_is_translated_to_project_primary_material(tmp_path
         ),
         "completed_normally": True,
         "truncated": False,
+        "timeline_status": "available",
+        "timeline_diagnostics": (),
     }
     assert "generated_tokens" not in repr(result.recovery)
     assert "QwenRuntimeResult" not in repr(result.recovery)

@@ -70,8 +70,8 @@ class DoclingSourceResult:
 
 
 class DoclingSourceConverter:
-    def __init__(self, *, converter_factory: Callable | None = None):
-        self._factory = converter_factory or _build_converter
+    def __init__(self, *, converter_factory: Callable | None = None, components_root=None):
+        self._factory = converter_factory or (lambda: _build_converter(components_root))
         self._converter = None
 
     def convert_bytes(self, data: bytes, kind: str) -> DoclingSourceResult:
@@ -113,8 +113,18 @@ def _bundled_artifacts():
     return root
 
 
-def _build_converter():
-    artifacts = _bundled_artifacts()
+def _build_converter(components_root=None):
+    if components_root is not None:
+        from .docling_component import DoclingComponent, DoclingComponentError
+        component = DoclingComponent(components_root)
+        try:
+            artifacts = component.verify()
+        except DoclingComponentError as error:
+            if getattr(sys, 'frozen', False) or component.root.exists():
+                raise DoclingSourceError(str(error)) from error
+            artifacts = _bundled_artifacts()
+    else:
+        artifacts = _bundled_artifacts()
     try:
         if version("docling") != DOCLING_VERSION:
             raise DoclingSourceError("docling_runtime_unavailable")

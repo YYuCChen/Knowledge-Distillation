@@ -74,7 +74,7 @@ def create_application(
     from .ocr import default_ocr_runner
     from .docling_source import DoclingSourceConverter
     local_ocr = default_ocr_runner()
-    local_documents = DoclingSourceConverter()
+    local_documents = DoclingSourceConverter(components_root=selected_paths.data_root / 'components')
 
     def build_distiller() -> Distiller:
         values = store.settings()
@@ -113,6 +113,10 @@ def create_application(
         wake_worker=worker.wake,
         organization=build_organization,
     )
+    # create_app initializes the database. Metadata checks must neither read a
+    # missing database during Settings construction nor block the UI startup.
+    if start_workers and store.setting('asr_model') == QWEN_MODEL_ID:
+        settings_service.qwen_component.begin_legacy_validation()
     from .desktop_pages import install as install_desktop_pages
     install_desktop_pages(app)
     from .feishu_service import FeishuService

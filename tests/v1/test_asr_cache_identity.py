@@ -44,7 +44,8 @@ def test_repair_offsets_preserve_full_original_leading_whitespace(tmp_path,prefi
             text=json.loads(kwargs['user'].split('\n',1)[1]);repairs=[]
             if 'transcripton' in text:
                 repairs=[{'original_text':'transcripton','source_occurrence':0,'replacement':'transcription','occurrence':0,
-                          'reason':'散步地点支持同音字修复','evidence':'transcripton transcription.','meaning_may_change':False}]
+                          'reason':'同一词的拼写恢复','evidence':'transcripton transcription.','meaning_may_change':False,
+                          'assessment':__import__('tests.v1.test_v12_source_integrity', fromlist=['spelling_assessment']).spelling_assessment()}]
             return json.dumps({'candidate_text':text.replace('transcripton','transcription'),'issues':[],'repairs':repairs})
     reviewer=build_reviewer(Client())
     for _ in range(2):

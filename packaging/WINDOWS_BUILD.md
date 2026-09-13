@@ -3,7 +3,7 @@
 在 Windows x64、CPython 3.11.16 环境构建；用户发行包不需要这些开发工具。
 
 1. 在工程建立 `.venv-windows`，安装 `packaging/windows-requirements-lock.txt`，再用 `pip install --no-deps .` 安装当前源码。两平台主程序与 Qwen 独立组件均固定 3.11.16；禁止复用其他版本的虚拟环境。
-2. 用 `scripts/prepare_windows_models.py --manifest packaging/docling-models-manifest.json --output .windows-build/docling-models` 下载固定修订并校验全部30文件。Paddle用 `scripts/prepare_paddle_models.py --output .windows-build/paddle-models`，保留其生成清单。
+2. 用 `scripts/prepare_windows_models.py --manifest src/knowledge_distiller/v1/adapters/docling-models-manifest.json --output .windows-build/docling-models` 下载固定修订并校验全部30文件。Paddle用 `scripts/prepare_paddle_models.py --output .windows-build/paddle-models`，保留其生成清单。
 3. `.windows-build/tools/bin` 放入 Windows 原生 Node、FFmpeg、FFprobe；OpenCLI1.8.7使用npm安装到 `.windows-build/tools/opencli`。来源和许可见 `Windows第三方组件.md`。不得从Mac复制运行时，不复用个人模型缓存。
 4. 用 `scripts/prepare_windows_test_python.py --output <新的临时目录>` 创建进程UTF-8测试解释器，再运行 `scripts/windows_samples.py`、正式测试和离线样本检查。Paddle原生CPU执行器设置是本机兼容所需；应用manifest启用UTF-8解决原生库中文路径，不改变Windows全局区域设置。
 5. `.venv-windows/Scripts/python.exe scripts/build_windows.py --output <新的候选目录> --version <YYYY.MM.DD.N> --product-version <产品版本> --cache-root .windows-build`。源码或资源在构建期间改变会使构建输入验收失败。构建记录含源码哈希、依赖版本与模型来源，产物只能从显式资源清单收集。

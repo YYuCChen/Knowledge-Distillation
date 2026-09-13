@@ -200,7 +200,8 @@ def test_component_transcription_uses_offline_isolated_protocol(component,tmp_pa
             chunks=[dict(start=0,end=1,text='source',language='English',finish_reason='eos',truncated=False)])))
     monkeypatch.setattr(component,'_run',transcribe)
     adapter=QwenPrimaryAdapter(module.ComponentQwenRuntime(component))
-    audio=type('Audio',(),{'path':tmp_path/'audio.wav'})()
+    # Timeline qualification needs the actual StandardAudio duration contract.
+    audio=StandardAudio(tmp_path/'audio.wav',1)
     result=adapter.recognize(audio)
     assert result.recovery.text=='source' and result.recovery.chunks[0].end_seconds==1
     assert not list(component.root.glob('transcription-*'))

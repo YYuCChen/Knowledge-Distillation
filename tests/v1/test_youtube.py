@@ -167,6 +167,10 @@ def test_v7_upgrade_preserves_queue_and_connections(tmp_path):
             db.execute('DROP TABLE '+table)
         db.execute('DROP TABLE source_media')
         db.execute('ALTER TABLE source_connections DROP COLUMN browser_context')
+        # A historical v7 database has none of the v18 review objects.
+        db.execute('DROP TRIGGER distill_review_revision')
+        db.execute('DROP TABLE source_review_results')
+        db.execute('ALTER TABLE distill_items DROP COLUMN review_revision')
         db.execute('ALTER TABLE distill_items DROP COLUMN platform_authority_json')
         db.execute('PRAGMA user_version=7')
     store.initialize()
@@ -174,7 +178,7 @@ def test_v7_upgrade_preserves_queue_and_connections(tmp_path):
     row=store.item_bundle(item)
     assert row['state']=='queued' and row['platform_authority_json']=='{}'
     with connect(path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0]==17
+        assert db.execute('PRAGMA user_version').fetchone()[0]==18
         assert not db.execute('PRAGMA foreign_key_check').fetchall()
 
 

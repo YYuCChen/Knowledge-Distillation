@@ -6,7 +6,7 @@ import hashlib
 import os
 import tempfile
 from pathlib import Path
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from urllib.parse import urlsplit
 
 from knowledge_distiller.faithful_review import (
@@ -30,11 +30,12 @@ class ReviewBinding:
     context: tuple[str, str] = ("", "")
     source_range: tuple[int, int] | None = None
     feedback: tuple = ()
+    recorded_responses: list | None = None
 
     def identity(self, primary_text):
         return hashlib.sha256(json.dumps([primary_text, REVIEW_SYSTEM_PROMPT if english_assistance(primary_text) else _CHINESE_REVIEW_PROMPT,
             getattr(self.client, "model", None), getattr(self.client, "base_url", None),
-            getattr(self.client, "reasoning_effort", None), getattr(self.client, "effort", None), getattr(self.client, "service_tier", None), getattr(self.client, "text_format", None), self.context, self.source_range, "source-operations-v1.2-1"],
+            getattr(self.client, "reasoning_effort", None), getattr(self.client, "effort", None), getattr(self.client, "service_tier", None), getattr(self.client, "text_format", None), self.context, self.source_range, "source-operations-v1.2-3"],
             ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
     def complete_with_feedback(self, primary_text, diagnostics):
@@ -84,6 +85,8 @@ class ReviewBinding:
                     json.dump(record, output, ensure_ascii=False)
                     output.flush(); os.fsync(output.fileno())
                 os.replace(temp, target)
+                if self.recorded_responses is not None:
+                    self.recorded_responses.append(target)
             except OSError as error:
                 raise ReviewRuntimeFailure("review_checkpoint_unavailable") from error
             finally:
@@ -99,9 +102,9 @@ class RecordedReviewer(FaithfulReviewAdapter):
 
     def review_in_directory(self, recovery, directory: Path):
         from knowledge_distiller.primary import PrimaryRecovery
-        text = recovery.text.strip()
-        leading = len(recovery.text) - len(recovery.text.lstrip())
-        if recovery.truncated or not recovery.completed_normally or not text:
+        text = recovery.text
+        leading = 0
+        if recovery.truncated or not recovery.completed_normally or not text.strip():
             return FaithfulReview.failed(ReviewFailure.INPUT_INVALID)
         directory.mkdir(parents=True, exist_ok=True)
         if len(text) <= 2400:
@@ -109,7 +112,7 @@ class RecordedReviewer(FaithfulReviewAdapter):
             if result.candidate is not None:
                 candidate = result.candidate
                 repairs = tuple(_bind_source(r,recovery.text,leading) for r in candidate.repairs)
-                return FaithfulReview.succeeded(replace(candidate, repairs=repairs))
+                return replace(result, candidate=replace(candidate, repairs=repairs))
             return result
         parts = []
         start = 0
@@ -124,55 +127,114 @@ class RecordedReviewer(FaithfulReviewAdapter):
         # Contiguous ranges cover the exact original input once; no model merge pass.
         if parts[0][0] != 0 or parts[-1][1] != len(text) or any(a[1] != b[0] for a,b in zip(parts, parts[1:])):
             return FaithfulReview.failed(ReviewFailure.INSUFFICIENT_COVERAGE)
-        output, concerns, repairs, diagnostics = [], [], [], []
+        output, concerns, repairs, diagnostics, chain = [], [], [], [], []
         offset = 0
         for index, (start, end) in enumerate(parts):
             binding = replace(self.binding, record_path=directory / f"review-part-{index:05d}.json",
                               context=(text[max(0,start-240):start], text[end:end+240]), source_range=(start,end))
             piece = PrimaryRecovery(text[start:end], recovery.language, ())
             result = self._review_cached(piece, binding)
-            if result.failure: return result
+            chain.extend(result.response_chain)
+            if result.failure:
+                return replace(result, response_chain=tuple(chain))
             candidate = result.candidate
             diagnostics.extend({**d, "segment": index, "source_range": [start, end]} for d in candidate.diagnostics)
             concerns.extend(replace(c, start_offset=c.start_offset+offset, end_offset=c.end_offset+offset) for c in candidate.concerns)
-            trim = len(piece.text) - len(piece.text.lstrip())
+            trim = 0
             repairs.extend({**_bind_source(r,recovery.text,leading+start+trim),
                             'start': r['start']+offset, 'end': r['end']+offset} for r in candidate.repairs)
             output.append(candidate.text)
-            offset += len(candidate.text) + 2
-        return FaithfulReview.succeeded(FaithfulReviewCandidate('\n\n'.join(output), tuple(concerns), tuple(repairs), tuple(diagnostics)))
+            offset += len(candidate.text)
+        return replace(FaithfulReview.succeeded(FaithfulReviewCandidate(''.join(output), tuple(concerns), tuple(repairs), tuple(diagnostics))), response_chain=tuple(chain))
 
     @staticmethod
     def _review_cached(recovery, binding):
         path = binding.record_path
-        for cached_path in (path.with_suffix('.retry.json'), path):
-            if not cached_path.is_file() or cached_path.is_symlink():
-                continue
-            try:
-                record = json.loads(cached_path.read_text(encoding='utf-8'))
-                if (record.get("identity") == binding.identity(recovery.text.strip())
-                        and record.get('primary_text') == recovery.text.strip()
-                        and record.get('response_sha256') == hashlib.sha256(record['text'].encode()).hexdigest()):
-                    class Cached:
-                        def complete(self, primary_text):
-                            return ReviewRuntimeResult(record["text"], "end_turn")
-                    result = FaithfulReviewAdapter(Cached()).review(recovery)
-                    if result.candidate is not None:
-                        return result
-            except (OSError, ValueError, KeyError, TypeError, AttributeError):
-                pass
+        # Only a complete validated result is reusable. Response/retry files are
+        # evidence; selecting one silently loses the other response's questions.
+        result_path = path.with_suffix('.result.json')
+        identity = binding.identity(recovery.text)
+        prior = None
+        prior_chain = ()
+        try:
+            record = json.loads(result_path.read_text(encoding='utf-8'))
+            payload = record['result']
+            checksum = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            if (not result_path.is_symlink() and record['schema'] == 2
+                    and record['identity'] == identity and record['sha256'] == checksum):
+                from knowledge_distiller.faithful_review import ReviewConcern
+                for evidence in record['responses']:
+                    evidence_path = path.parent / evidence['name']
+                    if (evidence_path.parent != path.parent or evidence_path.is_symlink()
+                            or hashlib.sha256(evidence_path.read_bytes()).hexdigest() != evidence['sha256']):
+                        raise ValueError('review_evidence_changed')
+                if payload['failure']:
+                    if payload.get('incomplete_candidate'):
+                        prior = _candidate_from_record(payload['incomplete_candidate'])
+                    prior_chain = tuple(payload.get('response_chain', ()))
+                    raise ValueError('review_not_complete')
+                candidate = payload['candidate']
+                concerns = tuple(ReviewConcern(**{**c,
+                    'candidate_readings': tuple(c['candidate_readings']),
+                    'candidate_explanations': tuple(tuple(v) for v in c['candidate_explanations'])})
+                    for c in candidate['concerns'])
+                return replace(FaithfulReview.succeeded(FaithfulReviewCandidate(candidate['text'], concerns,
+                    tuple(candidate['repairs']), tuple(candidate['diagnostics']))),
+                    response_chain=tuple(payload.get('response_chain', ())))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
 
-        result = FaithfulReviewAdapter(binding).review(recovery)
-        if result.candidate is not None:
-            # Separate safe diagnostics from local-only source/response evidence.
-            report = path.with_suffix('.validation.json')
-            from .local_records import write_record
-            try:
-                write_record(report, {'identity': binding.identity(recovery.text.strip()),
-                    'diagnostics': result.candidate.diagnostics})
-            except OSError:
-                return FaithfulReview.failed(ReviewFailure.CHECKPOINT_UNAVAILABLE)
+        recorded = []
+        if prior is not None:
+            from knowledge_distiller.review_validation import retry_context
+            binding = replace(binding, feedback=tuple(retry_context(recovery.text, prior)))
+        result = FaithfulReviewAdapter(replace(binding, recorded_responses=recorded)).review(recovery)
+        from .local_records import write_record
+        try:
+            responses = [{'name': p.name, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
+                         for p in recorded if p.is_file() and not p.is_symlink()]
+            chain = tuple(json.loads((path.parent / entry['name']).read_text()) for entry in responses)
+            if prior is not None:
+                from knowledge_distiller.review_validation import merge_retry
+                current = result.candidate or result.incomplete_candidate
+                if current is None:
+                    result = replace(result, incomplete_candidate=prior)
+                else:
+                    resolutions = []
+                    for response in chain:
+                        try:
+                            rows = json.loads(response['text']).get('resolutions', [])
+                            if isinstance(rows, list):
+                                resolutions.extend(rows)
+                        except (ValueError, AttributeError):
+                            pass
+                    merged = merge_retry(recovery.text, prior, current,
+                                         json.dumps({'resolutions': resolutions}))
+                    if result.failure or any(d.get('code') in {'invalid_json_or_shape',
+                            'invalid_issue', 'issue_mapping_failed'} for d in merged.diagnostics):
+                        result = FaithfulReview.failed(result.failure or ReviewFailure.INVALID_OUTPUT, merged)
+                    else:
+                        result = FaithfulReview.succeeded(merged)
+            # The production transaction retains its actual response evidence,
+            # not paths into temporary media that can be released after success.
+            result = replace(result, response_chain=prior_chain + chain)
+            payload = asdict(result)
+            write_record(result_path, {'schema': 2, 'identity': identity,
+                'responses': responses, 'result': payload,
+                'sha256': hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()})
+        except OSError:
+            return FaithfulReview.failed(ReviewFailure.CHECKPOINT_UNAVAILABLE)
         return result
+
+
+def _candidate_from_record(candidate):
+    from knowledge_distiller.faithful_review import ReviewConcern
+    concerns = tuple(ReviewConcern(**{**c,
+        'candidate_readings': tuple(c['candidate_readings']),
+        'candidate_explanations': tuple(tuple(v) for v in c['candidate_explanations'])})
+        for c in candidate['concerns'])
+    return FaithfulReviewCandidate(candidate['text'], concerns,
+        tuple(candidate['repairs']), tuple(candidate['diagnostics']))
 
 
 def _bind_source(repair, original, offset):
@@ -214,6 +276,29 @@ _REVIEW_FORMAT['schema']['properties']['repairs']['items']['properties']['eviden
     'type':'array','items':{'type':'object','additionalProperties':False,
         'required':['start','end','text'], 'properties':{
             'start':{'type':'integer'},'end':{'type':'integer'},'text':{'type':'string'}}}}
+
+# Provider-enforced structure must allow the same evidence contract as the
+# validator; otherwise every content repair is rejected before semantic review.
+_repair_schema = _REVIEW_FORMAT['schema']['properties']['repairs']['items']
+_assessment_fields = {
+    'kind': {'type': 'string'}, 'original_reading_possible': {'type': 'boolean'},
+    **{name: {'type': 'string'} for name in ('original_reading_analysis',
+        'same_referent_analysis', 'source_support_analysis', 'alternatives_analysis')},
+    **{name: {'type': 'array', 'items': {'type': 'string'}}
+       for name in ('competing_readings', 'meaning_changes')},
+}
+_repair_schema['properties']['assessment'] = {'type': 'object', 'additionalProperties': False,
+    'required': list(_assessment_fields), 'properties': _assessment_fields}
+_repair_schema['properties']['evidence_quotes'] = {'type': 'array', 'items': {'type': 'string'}}
+_repair_schema['required'] += ['assessment', 'evidence_quotes']
+_resolution_fields = {**{name: {'type': 'string'} for name in ('issue_id', 'action',
+    'retained_reading', 'question_analysis', 'reason')},
+    'original_issue_possible': {'type': 'boolean'},
+    'evidence_quotes': {'type': 'array', 'items': {'type': 'string'}}}
+_REVIEW_FORMAT['schema']['properties']['resolutions'] = {'type': 'array', 'items': {
+    'type': 'object', 'additionalProperties': False,
+    'required': list(_resolution_fields), 'properties': _resolution_fields}}
+_REVIEW_FORMAT['schema']['required'].append('resolutions')
 
 def build_reviewer(client: AnthropicMessagesClient) -> FaithfulReviewAdapter:
     # DeepSeek defaults to thinking; its reasoning shares the output budget.

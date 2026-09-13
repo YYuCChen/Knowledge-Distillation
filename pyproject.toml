@@ -73,6 +73,8 @@ knowledge_distiller = [
   "v1/adapters/qwen_windows_worker.py",
   "v1/adapters/qwen-windows-lock.json",
   "v1/adapters/qwen-mac-requirements.txt",
+  "v1/adapters/qwen-model-manifests.json",
+  "v1/adapters/docling-models-manifest.json",
   "v1/templates/*.html",
   "v1/static/*.css",
   "v1/static/*.js",

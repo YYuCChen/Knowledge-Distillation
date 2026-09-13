@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import wave
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -97,6 +98,11 @@ class Distiller:
         except (OcrError, SourceVersionError, ChromeSessionError, DouyinSourceError, YouTubeSourceError, BilibiliSourceError, XiaohongshuSourceError, XPostSourceError, ZhihuSourceError, WeiboSourceError, KnowledgeModelError, DistillError) as error:
             if self._item(item_id)["state"] == "waiting_user":
                 return DistillResult(item_id, "waiting_user")
+            if isinstance(error, OcrError) and hasattr(error, 'partial_review'):
+                from .local_records import write_record
+                directory = self.runtime_root / "items" / str(item_id)
+                directory.mkdir(parents=True, exist_ok=True)
+                write_record(directory / 'ocr-review-incomplete.json', error.partial_review)
             if isinstance(error, OcrError) and hasattr(error, 'member_id'):
                 from .local_records import write_record
                 directory = self.runtime_root / "items" / str(item_id)
@@ -355,9 +361,8 @@ class Distiller:
             return aligned
         if path.is_file() and not path.is_symlink():
             return path
-        # A missing local preview must not destroy the confirmation draft.
-        original = path.parent.parent / "audio" / "standard.wav"
-        return original if original.is_file() and not original.is_symlink() else None
+        # Missing local playback is a recovery state, never a full-audio task.
+        return None
 
     def rerecognize(self, item_id: int, *, token: str = "") -> DistillResult:
         row = self._item(item_id)
@@ -455,7 +460,7 @@ class Distiller:
         from .primary_cache import recognize_segmented
         from .subtitle_baseline import select_subtitle
         from knowledge_distiller.primary import PrimaryRecognition
-        subtitle, source_lineage = select_subtitle(captured)
+        subtitle, source_lineage = select_subtitle(captured,normalized.audio)
         try:
             recognition = (PrimaryRecognition.succeeded(subtitle) if subtitle is not None
                 else recognize_segmented(self.recognizer, normalized.audio, work_dir))
@@ -465,15 +470,29 @@ class Distiller:
             raise DistillError(f"asr_{recognition.failure or 'invalid'}")
         if kind == 'xiaohongshu':
             self.store.record_video_transcript(material_id, recognition.recovery.chunks)
+        review_revision = self._item(item_id)['review_revision']
         review = (self.reviewer.review_in_directory(recognition.recovery, work_dir)
             if isinstance(self.reviewer, RecordedReviewer) else self.reviewer.review(recognition.recovery))
+        import hashlib
+        review_identity = hashlib.sha256(recognition.recovery.text.encode()).hexdigest()
+        stage_result = {'schema': 1, 'source_sha256': review_identity,
+            'user_revision': review_revision, **asdict(review)}
         if review.failure is not None or review.candidate is None:
+            self.store.commit_source_review(item_id, review_revision, review_identity, stage_result)
             raise DistillError(f"review_{review.failure or 'invalid'}")
-        lineage = {**source_lineage, ('primary_subtitle' if subtitle is not None else 'primary_asr'): {'text': recognition.recovery.text,
-                                  'chunks': [asdict(c) for c in recognition.recovery.chunks]},
+        lineage = {**source_lineage, ('primary_subtitle' if subtitle is not None else 'primary_asr'): asdict(recognition.recovery),
                    'ai_repairs': list(review.candidate.repairs),
                    'review_diagnostics': list(review.candidate.diagnostics)}
         blocking = []
+        replay_recovery = recognition.recovery
+        if any(c.meaning_may_change and locate_concern_audio(normalized.audio,
+                replay_recovery, review.candidate.text, c) is None for c in review.candidate.concerns):
+            from .audio_location_recovery import recover_locations
+            try:
+                replay_recovery = recover_locations(self.recognizer, normalized.audio,
+                    recognition.recovery, work_dir)
+            except (OSError, ValueError, EOFError, wave.Error):
+                pass  # Keep the completed review and its unresolved local fields.
         generation = uuid4().hex
         for index, concern in enumerate(review.candidate.concerns, start=1):
             if not concern.meaning_may_change:
@@ -483,15 +502,13 @@ class Distiller:
             try:
                 self.confirmation_clipper.clip(
                     normalized.audio,
-                    recognition.recovery,
+                    replay_recovery,
                     review.candidate.text,
                     concern,
                     work_dir / "confirmation" / name,
                 )
             except ConfirmationAudioError:
-                # Preserve the unresolved question and full original audio. A
-                # failed preview is not evidence that the question was resolved.
-                replay_note = " 局部回听未能准备，播放入口提供完整原音；疑点仍待确认。"
+                replay_note = " 局部原音定位恢复未完成，已保留疑点与原文，可重试恢复。"
 
             blocking.append(
                 _compact_concern({
@@ -517,17 +534,18 @@ class Distiller:
             if not concern.meaning_may_change
         ) + tuple(review.candidate.repairs)
         if not blocking:
-            self.store.establish_source_fact(material_id,
-                SourceFact(review.candidate.text, uncertainties), lineage=lineage)
+            self.store.commit_source_review(item_id, review_revision, review_identity, stage_result,
+                fact=SourceFact(review.candidate.text, uncertainties), lineage=lineage)
             return
-        self.store.mark_waiting(
-            item_id, {
+        self.store.commit_source_review(
+            item_id, review_revision, review_identity, stage_result, confirmation={
                 "snapshot": review.candidate.text, "concerns": blocking, "lineage": lineage,
                 "review_required": False,
                 "audio_alignment": "local_preview_10s_v3",
                 "uncertainties": list(uncertainties),
                 "audio_timeline": {"text": recognition.recovery.text,
-                    "chunks": [asdict(c) for c in recognition.recovery.chunks],
+                    "chunks": [asdict(c) for c in replay_recovery.chunks],
+                    "timeline_status": replay_recovery.timeline_status,
                     "duration_seconds": normalized.audio.duration_seconds},
             }
         )

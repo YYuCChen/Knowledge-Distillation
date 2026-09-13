@@ -199,7 +199,7 @@ def test_v1_schema_migrates_existing_queue_order(tmp_path: Path) -> None:
         queued_at = connection.execute(
             "SELECT queued_at FROM distill_items WHERE item_id = 1"
         ).fetchone()[0]
-    assert version == 17
+    assert version == 18
     assert queued_at == "2026-09-05T01:02:03+00:00"
 
 
@@ -241,7 +241,7 @@ def test_v2_migration_does_not_infer_old_publication_destination(tmp_path: Path)
     from knowledge_distiller.v1.database import initialize
     initialize(path)
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 17
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 18
         assert connection.execute(
             "SELECT published_path, published_vault FROM knowledge_results"
         ).fetchone() == ("知识蒸馏器/old.md", None)
@@ -277,7 +277,7 @@ def test_v11_migration_preserves_item_and_does_not_invent_rejection_reason(tmp_p
         assert after.pop('rejection_reason') is None
         assert after == before
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 17
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 18
 
 
 def test_v12_dismiss_migration_preserves_existing_failure(tmp_path):
@@ -370,7 +370,66 @@ def test_previous_release_schema_16_upgrades_and_keeps_facts(store,tmp_path):
         db.execute('PRAGMA user_version=16')
     store.initialize()
     with connect(store.path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0]==17
+        # Schema 18 adds complete review results; migration must retain facts.
+        assert db.execute('PRAGMA user_version').fetchone()[0]==18
         assert db.execute('SELECT snapshot FROM source_facts WHERE source_fact_id=?',(fact,)).fetchone()[0]=='升级必须保留的真实来源。'
         assert db.execute('PRAGMA foreign_key_check').fetchone() is None
         assert db.execute('SELECT count(*) FROM confirmation_decisions').fetchone()[0]==0
+
+
+def test_review_commit_rejects_late_attempt_after_requeue(store, tmp_path):
+    item = store.create_item('https://v.douyin.com/a/')
+    store.attach_material(item, captured(tmp_path))
+    store.mark_working(item, 'reviewing')
+    revision = store.item_bundle(item)['review_revision']
+    store.requeue_interrupted()
+    store.mark_working(item, 'reviewing')
+    with pytest.raises(ValueError, match='revision_conflict'):
+        store.commit_source_review(item, revision, 'source', {'failure': None},
+                                   fact=SourceFact('late result'))
+    with connect(store.path) as db:
+        assert db.execute('SELECT count(*) FROM source_review_results').fetchone()[0] == 0
+        assert db.execute('SELECT count(*) FROM source_facts').fetchone()[0] == 0
+
+
+def test_review_commit_and_fact_are_atomic_on_database_failure(store, tmp_path):
+    item = store.create_item('https://v.douyin.com/a/')
+    store.attach_material(item, captured(tmp_path))
+    store.mark_working(item, 'reviewing')
+    revision = store.item_bundle(item)['review_revision']
+    with connect(store.path) as db:
+        db.execute("""CREATE TRIGGER injected_failure BEFORE INSERT ON source_facts
+                      BEGIN SELECT RAISE(ABORT, 'injected disk write failure'); END""")
+    with pytest.raises(sqlite3.IntegrityError, match='injected'):
+        store.commit_source_review(item, revision, 'source', {'failure': None},
+                                   fact=SourceFact('source'))
+    with connect(store.path) as db:
+        assert db.execute('SELECT count(*) FROM source_review_results').fetchone()[0] == 0
+        assert db.execute('SELECT count(*) FROM source_facts').fetchone()[0] == 0
+        db.execute('DROP TRIGGER injected_failure')
+    assert store.item_bundle(item)['review_revision'] == revision
+    store.commit_source_review(item, revision, 'source', {'failure': None},
+                               fact=SourceFact('source'))
+    with connect(store.path) as db:
+        assert db.execute('SELECT status FROM source_review_results').fetchone()[0] == 'complete'
+    assert store.item_bundle(item)['snapshot'] == 'source'
+
+
+def test_schema_17_adds_review_state_without_inventing_completion(store, tmp_path):
+    item = store.create_item('https://v.douyin.com/a/')
+    store.attach_material(item, captured(tmp_path))
+    before = dict(store.item_bundle(item))
+    before.pop('review_revision')
+    with connect(store.path) as db:
+        db.execute('DROP TRIGGER distill_review_revision')
+        db.execute('DROP TABLE source_review_results')
+        db.execute('ALTER TABLE distill_items DROP COLUMN review_revision')
+        db.execute('PRAGMA user_version=17')
+    store.initialize()
+    after = dict(store.item_bundle(item))
+    assert after.pop('review_revision') == 0
+    assert after == before
+    with connect(store.path) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 18
+        assert db.execute('SELECT count(*) FROM source_review_results').fetchone()[0] == 0
+        assert not db.execute('PRAGMA foreign_key_check').fetchall()

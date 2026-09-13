@@ -286,7 +286,7 @@ def test_v8_migration_preserves_existing_facts_and_connections(tmp_path,image):
     assert store.connection('douyin')['account_label']=='原连接'
     assert store.connection('douyin')['browser_context'] is None
     with connect(path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0]==17
+        assert db.execute('PRAGMA user_version').fetchone()[0]==18
         assert db.execute('PRAGMA foreign_key_check').fetchall()==[]
 
 

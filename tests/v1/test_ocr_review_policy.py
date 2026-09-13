@@ -14,6 +14,7 @@ def test_noncore_ocr_repair_and_uncertainty_do_not_block_but_keep_evidence():
         {'index':2,'affects_core':True,'reliable':False,'replacement':'数值三','evidence':'','reason':'数值影响结论'}]}
     result,trace=review_ocr(fact,lineage,SimpleNamespace(complete=lambda **kwargs:json.dumps(answer)))
     assert result.snapshot==fact.snapshot
-    assert [u['status'] for u in result.uncertainties]==['unresolved','advisory','unresolved']
+    # P05: rejecting an unsupported edit cannot promote a non-core question.
+    assert [u['status'] for u in result.uncertainties]==['advisory','advisory','unresolved']
     assert trace['ocr_primary_snapshot']==fact.snapshot
     assert trace['ocr_review_diagnostics'][0]['operation']==0

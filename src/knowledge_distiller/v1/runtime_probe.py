@@ -76,7 +76,8 @@ def check(destination, audio=None, *, ocr_image=None, pdf=None, epub=None, compo
             report['checks']['ocr'] = _check_ocr(Path(ocr_image))
         if pdf or epub:
             from .docling_source import DoclingSourceConverter
-            converter = DoclingSourceConverter()
+            converter = (DoclingSourceConverter(components_root=Path(component_root).parent)
+                         if component_root is not None else DoclingSourceConverter())
             for kind, filename in (('pdf',pdf),('epub',epub)):
                 if filename:
                     stage = kind

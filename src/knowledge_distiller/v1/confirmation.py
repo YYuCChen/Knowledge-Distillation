@@ -153,6 +153,8 @@ def locate_concern_audio(
         chunk, offset, reading = matches[0]
     else:
         return None
+    if recovery.timeline_status == 'recovered_windows':
+        return _preview_window(chunk.start_seconds, chunk.end_seconds, audio.duration_seconds)
     return _preview_window(_estimate_time(chunk, offset), _estimate_time(chunk, offset + len(reading)), audio.duration_seconds)
 
 
@@ -191,6 +193,12 @@ def _aligned_chunk_range(audio, recovery, candidate_text, concern, blocks=None):
         return None
     first, first_offset = selected[0]
     last, last_offset = selected[-1]
+    if recovery.timeline_status == 'recovered_windows':
+        # The independent recognizer supplies text for a real bounded window,
+        # not word timestamps. Include that entire window; never interpolate.
+        if last.end_seconds - first.start_seconds > 10:
+            return None
+        return _preview_window(first.start_seconds, last.end_seconds, audio.duration_seconds)
     return _preview_window(
         _estimate_time(first, start - first_offset),
         _estimate_time(last, end - last_offset),

@@ -152,7 +152,7 @@ def test_v6_upgrade_preserves_source_knowledge_and_topic_snapshot(tmp_path):
     assert lib.snapshot()==snapshot
     with connect(store.path) as db:
         assert [tuple(row) for row in db.execute('SELECT * FROM knowledge_results')]==before
-        assert db.execute('PRAGMA user_version').fetchone()[0]==17
+        assert db.execute('PRAGMA user_version').fetchone()[0]==18
         assert db.execute('PRAGMA foreign_key_check').fetchall()==[]
     service,_=organization(store)
     assert service.drive(service.start_or_reuse().event_id).event.status is EventStatus.SUCCEEDED

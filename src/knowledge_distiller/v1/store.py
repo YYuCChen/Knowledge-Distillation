@@ -502,6 +502,39 @@ class Store:
             connection.execute('BEGIN IMMEDIATE')
             return _establish_source_fact(connection, material_id, fact, lineage=lineage)
 
+    def commit_source_review(self, item_id, expected_revision, identity, result, *, fact=None,
+                             lineage=None, confirmation=None):
+        """Commit the complete judgment and its business state under one CAS.
+
+        A late model response cannot replace a user decision, a requeued source,
+        or a source fact established by another item. Raw response files alone
+        have no authority to establish a fact.
+        """
+        with connect(self.path) as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            row = connection.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+            if (row is None or row['review_revision'] != expected_revision or row['state'] != 'working'
+                    or row['confirmation_json'] is not None):
+                raise ValueError('source_review_revision_conflict')
+            if connection.execute('SELECT 1 FROM source_facts WHERE material_id=?', (row['material_id'],)).fetchone():
+                raise ValueError('source_review_fact_already_established')
+            failure = result.get('failure')
+            if failure:
+                if fact is not None or confirmation is not None:
+                    raise ValueError('failed_review_cannot_establish_source')
+            elif (fact is None) == (confirmation is None):
+                raise ValueError('completed_review_requires_one_outcome')
+            connection.execute('INSERT INTO source_review_results VALUES (?,?,?,?,?,?)',
+                (item_id, expected_revision, identity, 'failed' if failure else 'complete', _json(result), _now()))
+            if fact is not None:
+                _establish_source_fact(connection, row['material_id'], fact, lineage=lineage)
+            if confirmation is not None:
+                connection.execute("UPDATE distill_items SET review_revision=review_revision+1,state='waiting_user',phase='reviewing',confirmation_json=?,updated_at=? WHERE item_id=?",
+                    (_confirmation_json(confirmation), _now(), item_id))
+            else:
+                connection.execute("UPDATE distill_items SET review_revision=review_revision+1,state=?,error_code=?,updated_at=? WHERE item_id=?",
+                    ('failed' if failure else 'working', 'review_' + failure if failure else None, _now(), item_id))
+
     def record_video_transcript(self, material_id, chunks):
         with connect(self.path) as connection:
             connection.execute('BEGIN IMMEDIATE')
