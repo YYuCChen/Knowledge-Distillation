@@ -202,6 +202,8 @@ def main(argv=None):
         return check(args.check_runtime, args.check_audio, ocr_image=args.check_ocr_image,
                      pdf=args.check_pdf, epub=args.check_epub, component_root=root / 'components/qwen')
     if not args.update_handshake:
+        from .component_install import require_recovered
+        require_recovered(root)
         try:
             update_lock=acquire(root/'.update.lock')
             update_lock.close()

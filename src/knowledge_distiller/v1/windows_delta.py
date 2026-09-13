@@ -29,6 +29,8 @@ def digest(path):
 
 def inventory(root):
     root = Path(root)
+    if is_link_or_reparse(root):
+        raise UpdateError('应用根目录含链接，不能进行差量更新。')
     result = {}
     for path in sorted(root.rglob('*')):
         if is_link_or_reparse(path):

@@ -91,3 +91,13 @@ def test_archive_activation_accepts_only_trusted_bytes(tmp_path, bad):
         assert component.import_archive(archive) == component.active
         assert component.verify() == component.active
     assert not list(component.root.glob('.import-*'))
+
+
+def test_repair_keeps_corrupt_component_as_recoverable_evidence(tmp_path):
+    source, component = fixture(tmp_path)
+    component.import_existing(source)
+    (component.active / 'family/model.bin').write_bytes(b'corrupt old bytes')
+    component.import_existing(source)
+    component.verify()
+    retained, = component.root.glob('.retained-corrupt-*')
+    assert (retained / 'family/model.bin').read_bytes() == b'corrupt old bytes'

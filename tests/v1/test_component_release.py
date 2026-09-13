@@ -17,7 +17,7 @@ def release():
         'minimum_installer': 1, 'version': '2026.09.13.10', 'source_commit': 'a' * 40,
         'target_identity': 'c' * 64, 'python_version': '3.11.16',
         'docling': {**asset('d'), 'identity': DoclingComponent('.').identity},
-        'base': {**asset('b'), 'identity': 'b' * 64},
+        'base': {**asset('b'), 'identity': 'b' * 64, 'version': '2026.09.13.9'},
         'deltas': [{**asset('e'), 'from_identity': 'b' * 64, 'to_identity': 'c' * 64},
                    {**asset('f'), 'from_identity': 'a' * 64, 'to_identity': 'c' * 64}]}
 

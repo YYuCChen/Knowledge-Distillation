@@ -14,6 +14,7 @@ import shutil
 import stat
 import tempfile
 import zipfile
+from uuid import uuid4
 
 
 class DoclingComponentError(RuntimeError):
@@ -76,7 +77,10 @@ class DoclingComponent:
         self.root.mkdir(parents=True, exist_ok=True)
         _ordinary(self.root, directory=True)
         if self.active.exists():
-            return self.verify()
+            try:
+                return self.verify()
+            except DoclingComponentError:
+                pass
         staging = Path(tempfile.mkdtemp(prefix='.import-', dir=self.root))
         try:
             for name in self.files:
@@ -89,13 +93,7 @@ class DoclingComponent:
             (staging / 'manifest.json').write_text(
                 json.dumps(self.manifest, ensure_ascii=False, indent=2), encoding='utf-8')
             self.verify(staging)
-            try:
-                staging.rename(self.active)
-            except OSError:
-                # Another installer may have activated the identical component.
-                if not self.active.exists():
-                    raise
-                self.verify()
+            self._activate(staging)
             return self.verify()
         finally:
             if staging.exists():
@@ -110,7 +108,10 @@ class DoclingComponent:
         self.root.mkdir(parents=True, exist_ok=True)
         _ordinary(self.root, directory=True)
         if self.active.exists():
-            return self.verify()
+            try:
+                return self.verify()
+            except DoclingComponentError:
+                pass
         staging = Path(tempfile.mkdtemp(prefix='.import-', dir=self.root))
         try:
             with zipfile.ZipFile(archive) as package:
@@ -140,13 +141,26 @@ class DoclingComponent:
                         raise DoclingComponentError('docling_component_corrupt')
             (staging / 'manifest.json').write_text(json.dumps(self.manifest), encoding='utf-8')
             self.verify(staging)
-            try:
-                staging.rename(self.active)
-            except OSError:
-                if not self.active.exists():
-                    raise
-                self.verify()
+            self._activate(staging)
             return self.verify()
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
+
+    def _activate(self, staging):
+        from .file_lock import acquire
+        with acquire(self.root / '.activation.lock'):
+            retained = None
+            if self.active.exists():
+                try:
+                    self.verify()
+                    return  # A concurrent installer activated the same bytes.
+                except DoclingComponentError:
+                    retained = self.root / ('.retained-corrupt-' + uuid4().hex)
+                    self.active.rename(retained)
+            try:
+                staging.rename(self.active)
+            except BaseException:
+                if retained is not None and not self.active.exists():
+                    retained.rename(self.active)
+                raise

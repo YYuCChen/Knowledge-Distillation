@@ -67,6 +67,7 @@ def parse_release(envelope, public_key, *, platform, current='0'):
         _asset(model)
         base = release['base']
         _asset(base)
+        version_key(base['version'])
         if not _digest(base['identity']):
             raise UpdateError('程序基座身份无效。')
         deltas = release['deltas']

@@ -108,6 +108,9 @@ def main(argv=None):
         raise SystemExit(check(args.check_runtime,args.check_audio,ocr_image=args.check_ocr_image,
                               pdf=args.check_pdf,epub=args.check_epub,component_root=args.data_dir.expanduser().resolve()/"components"/"qwen"))
     paths = AppPaths(args.data_dir.expanduser().resolve())
+    if not args.update_handshake:
+        from .component_install import require_recovered
+        require_recovered(paths.data_root)
     paths.data_root.mkdir(parents=True, exist_ok=True)
     from .local_address import LocalAddress, LocalAddressError, load as load_local_address, save as save_local_address
     try:
