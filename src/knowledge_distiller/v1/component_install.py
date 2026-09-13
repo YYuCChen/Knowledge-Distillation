@@ -22,6 +22,16 @@ from .windows_platform import filesystem_path
 from .updates import UpdateError, validate_install_paths, version_key
 
 
+def _rename_program(source, target, platform):
+    if platform == 'windows-x86_64':
+        # Process exit can precede release of Windows DLL/directory handles.
+        # Reuse the bounded wait already required by the legacy updater.
+        from .windows_update_installer import rename_ready
+        rename_ready(filesystem_path(source), filesystem_path(target))
+    else:
+        source.rename(target)
+
+
 def launch(target, data_root, platform, handshake):
     executable = target / ('Contents/MacOS/KnowledgeDistiller' if platform == 'macos-arm64'
                            else 'KnowledgeDistiller.exe')
@@ -35,7 +45,7 @@ def accept_startup(process, root, version):
     deadline = time.monotonic() + 150
     while time.monotonic() < deadline and process.poll() is None:
         try:
-            state = json.loads((root / '.desktop-instance.json').read_text())
+            state = json.loads((root / '.desktop-instance.json').read_text(encoding='utf-8'))
             if state['pid'] == process.pid and type(state['port']) is int:
                 url = 'http://127.0.0.1:' + str(state['port'])
                 status = httpx.get(url + '/settings/updates/status', timeout=2).json()
@@ -57,7 +67,7 @@ def accept_startup(process, root, version):
 def require_recovered(root):
     journal = Path(root) / 'updates/component-install-journal.json'
     if journal.exists():
-        state = json.loads(journal.read_text())
+        state = json.loads(journal.read_text(encoding='utf-8'))
         if state.get('phase') != 'accepted':
             raise UpdateError('组件安装被中断，请重新打开安装器完成恢复。知识数据尚未启动处理。')
 
@@ -68,7 +78,7 @@ def recover(target, data_root):
     updates = root / 'updates'
     journal = updates / 'component-install-journal.json'
     with acquire(root / '.update.lock'):
-        state = json.loads(journal.read_text())
+        state = json.loads(journal.read_text(encoding='utf-8'))
         if state['target'] != str(target.resolve()):
             raise UpdateError('安装恢复目标与原记录不一致。')
         previous = target.with_name(target.name + '.component-previous')
@@ -105,7 +115,7 @@ def recover(target, data_root):
                     # Restore the launchable old path last, so a crash cannot
                     # expose it with a half-restored database.
                     if previous.exists():
-                        previous.rename(target)
+                        _rename_program(previous, target, state['platform'])
                 if stage.exists():
                     shutil.rmtree(filesystem_path(stage))
         backup.unlink(missing_ok=True)
@@ -127,7 +137,7 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
                 if metadata['CFBundleIdentifier'] != 'local.knowledge-distiller.app':
                     raise ValueError()
             else:
-                metadata = json.loads((target / '_internal/windows-version.json').read_text())
+                metadata = json.loads((target / '_internal/windows-version.json').read_text(encoding='utf-8'))
                 version_key(metadata['version'])
                 if not (target / 'KnowledgeDistiller.exe').is_file():
                     raise ValueError()
@@ -173,9 +183,9 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
             state['phase'] = 'replacing'
             write_record(journal, state)
             if had_target:
-                target.rename(previous)
+                _rename_program(target, previous, platform)
             swapped = True
-            stage.rename(target)
+            _rename_program(stage, target, platform)
             state['phase'] = 'startup'
             write_record(journal, state)
             handshake.unlink(missing_ok=True)
@@ -211,7 +221,7 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
                 elif not had_database:
                     database.unlink(missing_ok=True)
                 if previous.exists():
-                    previous.rename(target)
+                    _rename_program(previous, target, state['platform'])
             if stage.exists():
                 shutil.rmtree(filesystem_path(stage))
             backup.unlink(missing_ok=True)

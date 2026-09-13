@@ -91,7 +91,7 @@ class ComponentAssembly:
                 raise UpdateError('程序基线已变化，请重新规划安装。')
             if self.platform == 'windows-x86_64':
                 from .windows_delta import stage_payload
-                current = json.loads((baseline / '_internal/windows-version.json').read_text())['version']
+                current = json.loads((baseline / '_internal/windows-version.json').read_text(encoding='utf-8'))['version']
                 stage_payload(assets[delta['sha256']], baseline, candidate,
                               version=release['version'], current=current, tools_dir=self.windows_tools)
             else:
@@ -107,7 +107,7 @@ class ComponentAssembly:
             version = info['CFBundleVersion']
             subprocess.run(['codesign', '--verify', '--deep', '--strict', str(candidate)], check=True)
         else:
-            version = json.loads((candidate / '_internal/windows-version.json').read_text())['version']
+            version = json.loads((candidate / '_internal/windows-version.json').read_text(encoding='utf-8'))['version']
         if version != release['version']:
             raise UpdateError('最终程序版本不符。')
         return candidate, {'seconds': time.monotonic() - started, 'download_bytes': plan.download_bytes,

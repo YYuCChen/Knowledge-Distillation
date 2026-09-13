@@ -5,6 +5,7 @@ import pytest
 
 from knowledge_distiller.v1.component_install import install, recover, require_recovered
 from knowledge_distiller.v1.program_tree import identity
+from knowledge_distiller.v1.windows_platform import filesystem_path
 from knowledge_distiller.v1.file_lock import acquire
 from knowledge_distiller.v1.updates import UpdateError
 
@@ -82,7 +83,7 @@ def test_crash_recovery_restores_database_before_old_launch_path(tmp_path, monke
         require_recovered(root)
     rename = Path.rename
     def checked_rename(path, destination):
-        if path == previous:
+        if path == filesystem_path(previous):
             with sqlite3.connect(database) as connection:
                 assert connection.execute('SELECT text FROM facts').fetchone()[0] == 'original'
         return rename(path, destination)
@@ -101,3 +102,60 @@ def test_startup_rejects_unavailable_document_component(tmp_path, monkeypatch):
         'version': '2', 'phase': 'installing', 'document_component': {'state': 'unavailable'}}))
     with pytest.raises(module.UpdateError, match='文档组件启动检查'):
         module.accept_startup(process, tmp_path, '2')
+
+
+def test_windows_transient_handles_are_waited_through_every_program_rename(tmp_path, monkeypatch):
+    from knowledge_distiller.v1 import windows_update_installer as legacy
+    target = program(tmp_path / 'installed', '1')
+    candidate = program(tmp_path / 'candidate', '2')
+    original_identity = identity(target, 'windows-x86_64')
+    rename = Path.rename
+    attempts, pauses = {}, []
+    def delayed(source, destination):
+        key = (source.name, destination.name)
+        attempts[key] = attempts.get(key, 0) + 1
+        if attempts[key] == 1:
+            raise PermissionError('fixture delayed Windows handle release')
+        return rename(source, destination)
+    monkeypatch.setattr(Path, 'rename', delayed)
+    monkeypatch.setattr(legacy.time, 'sleep', pauses.append)
+    def reject(*args):raise UpdateError('fixture startup refusal')
+    with pytest.raises(UpdateError, match='fixture startup refusal'):
+        install(candidate, target, tmp_path / 'data', platform='windows-x86_64',
+                version='2', target_identity=identity(candidate, 'windows-x86_64'),
+                launcher=lambda *args:Process(), acceptance=reject)
+    assert len(attempts) == 3 and all(count == 2 for count in attempts.values())
+    assert pauses == [.2, .2, .2]
+    assert identity(target, 'windows-x86_64') == original_identity
+    assert not (tmp_path / 'data/updates/component-install-journal.json').exists()
+
+
+def test_windows_persistent_rename_failure_keeps_recoverable_journal(tmp_path, monkeypatch):
+    from knowledge_distiller.v1 import windows_update_installer as legacy
+    target = program(tmp_path / 'installed', '1')
+    candidate = program(tmp_path / 'candidate', '2')
+    root = tmp_path / 'data'
+    original_identity = identity(target, 'windows-x86_64')
+    rename = Path.rename
+    clock = [0.0]
+    def unavailable(source, destination):
+        if source.name.endswith('.component-previous'):
+            raise PermissionError('fixture persistent handle')
+        return rename(source, destination)
+    monkeypatch.setattr(Path, 'rename', unavailable)
+    monkeypatch.setattr(legacy.time, 'monotonic', lambda:clock[0])
+    monkeypatch.setattr(legacy.time, 'sleep', lambda seconds:clock.__setitem__(0, clock[0] + seconds))
+    def reject(*args):raise UpdateError('fixture startup refusal')
+    with pytest.raises(PermissionError, match='fixture persistent handle'):
+        install(candidate, target, root, platform='windows-x86_64', version='2',
+                target_identity=identity(candidate, 'windows-x86_64'),
+                launcher=lambda *args:Process(), acceptance=reject)
+    assert 15 <= clock[0] < 16
+    assert not target.exists()
+    journal = root / 'updates/component-install-journal.json'
+    assert json.loads(journal.read_text())['phase'] == 'startup'
+    assert identity(target.with_name('installed.component-previous'), 'windows-x86_64') == original_identity
+    monkeypatch.setattr(Path, 'rename', rename)
+    assert recover(target, root)['recovered']
+    assert identity(target, 'windows-x86_64') == original_identity
+    assert not journal.exists()

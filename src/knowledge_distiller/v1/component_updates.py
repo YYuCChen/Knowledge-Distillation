@@ -23,7 +23,7 @@ class ComponentUpdates(Updates):
         self.assembler = ComponentAssembly(Path(data_root) / 'components', self.root / 'component-cache',
             platform=self.platform, public_key=info['public_key'])
         try:
-            self.record = json.loads((self.root / 'component-state.json').read_text())
+            self.record = json.loads((self.root / 'component-state.json').read_text(encoding='utf-8'))
         except (OSError, ValueError):
             pass
 

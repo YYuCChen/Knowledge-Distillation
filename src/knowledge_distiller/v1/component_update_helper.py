@@ -16,7 +16,7 @@ from .updates import UpdateError, validate_install_paths
 
 
 def request_exit(root, plan, platform):
-    state = json.loads((root / '.desktop-instance.json').read_text())
+    state = json.loads((root / '.desktop-instance.json').read_text(encoding='utf-8'))
     if state['pid'] != plan['parent_pid']:
         raise UpdateError('申请更新的应用进程已变化。')
     url = 'http://127.0.0.1:' + str(state['port']) + '/settings/updates/status'
@@ -48,13 +48,13 @@ def request_exit(root, plan, platform):
 
 
 def run(plan_path):
-    plan = json.loads(Path(plan_path).read_text())
+    plan = json.loads(Path(plan_path).read_text(encoding='utf-8'))
     root = Path(plan['data_root'])
     target = Path(plan['info']['bundle'])
     platform = 'windows-x86_64' if sys.platform == 'win32' else 'macos-arm64'
     try:
         validate_install_paths(root, target)
-        config = json.loads((Path(__file__).parent / 'adapters/update_config.json').read_text())
+        config = json.loads((Path(__file__).parent / 'adapters/update_config.json').read_text(encoding='utf-8'))
         tools = Path(getattr(sys, '_MEIPASS', Path(__file__).parent)) / 'tools'
         with (root / 'updates/component-release.json').open('rb') as stream:
             envelope = stream.read(MAX_MANIFEST + 1)
@@ -62,7 +62,7 @@ def run(plan_path):
             import plistlib
             current = plistlib.loads((target / 'Contents/Info.plist').read_bytes())['CFBundleVersion']
         else:
-            current = json.loads((target / '_internal/windows-version.json').read_text())['version']
+            current = json.loads((target / '_internal/windows-version.json').read_text(encoding='utf-8'))['version']
         assembler = ComponentAssembly(root / 'components', root / 'updates/component-cache',
             platform=platform, public_key=config['public_key'], binary_delta=tools / 'BinaryDelta', windows_tools=tools)
         release, selected = assembler.prepare(envelope, installed=target, current=current)
@@ -74,7 +74,7 @@ def run(plan_path):
         install(candidate, target, root, platform=platform, version=release['version'],
                 target_identity=release['target_identity'])
         if not plan.get('no_open'):
-            state = json.loads((root / '.desktop-instance.json').read_text())
+            state = json.loads((root / '.desktop-instance.json').read_text(encoding='utf-8'))
             webbrowser.open('http://127.0.0.1:' + str(state['port']) + '/')
         return 0
     except Exception as error:

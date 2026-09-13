@@ -67,7 +67,7 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                         import plistlib
                         current = plistlib.loads((target / 'Contents/Info.plist').read_bytes())['CFBundleVersion']
                     else:
-                        current = json.loads((target / '_internal/windows-version.json').read_text())['version']
+                        current = json.loads((target / '_internal/windows-version.json').read_text(encoding='utf-8'))['version']
                 offline = context['manifest_path']
                 if offline is not None:
                     with offline.open('rb') as stream:
@@ -203,7 +203,7 @@ def main(argv=None):
     config_path = Path(__file__).parent / 'adapters/update_config.json'
     if not config_path.is_file() and not getattr(sys, 'frozen', False):
         config_path = Path(__file__).resolve().parents[3] / 'packaging/update_config.json'
-    config = json.loads(config_path.read_text())
+    config = json.loads(config_path.read_text(encoding='utf-8'))
     target = args.target or (Path(os.environ['LOCALAPPDATA']) / 'Programs/KnowledgeDistiller'
         if platform == 'windows-x86_64' else Path('/Applications/知识蒸馏器.app'))
     tools = Path(getattr(sys, '_MEIPASS', Path(__file__).parent)) / 'tools'

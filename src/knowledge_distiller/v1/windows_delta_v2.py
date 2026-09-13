@@ -46,8 +46,8 @@ def build_payload(target, output, base=None, *, tools_dir=None):
     base = filesystem_path(base) if base is not None else None
     files, old = inventory(target), inventory(base) if base else {}
     _validate_files(files); _validate_files(old,allow_empty=True)
-    version = json.loads((target/'_internal/windows-version.json').read_text())['version']
-    previous = json.loads((base/'_internal/windows-version.json').read_text())['version'] if base else None
+    version = json.loads((target/'_internal/windows-version.json').read_text(encoding='utf-8'))['version']
+    previous = json.loads((base/'_internal/windows-version.json').read_text(encoding='utf-8'))['version'] if base else None
     operations = {}
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix='delta-encode-',dir=output.parent) as directory:
@@ -199,7 +199,7 @@ def stage_payload(archive_path,installed,stage,*,version,current,tools_dir=None)
                             raise UpdateError('差分目标核验失败。')
                         patch.unlink()
                     metrics.append({'file':name,'kind':kind,'seconds':time.monotonic()-tick})
-            metadata=json.loads((stage/'_internal/windows-version.json').read_text())
+            metadata=json.loads((stage/'_internal/windows-version.json').read_text(encoding='utf-8'))
             if metadata['version']!=version or not (stage/'KnowledgeDistiller.exe').is_file():
                 raise UpdateError('更新应用版本无效。')
             # Construction visits the exact target whitelist and verifies every

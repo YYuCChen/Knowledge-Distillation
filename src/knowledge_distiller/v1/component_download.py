@@ -102,7 +102,7 @@ class ComponentDownloader:
         target.unlink(missing_ok=True)
         offset, etag = 0, None
         try:
-            record = json.loads(metadata.read_text())
+            record = json.loads(metadata.read_text(encoding='utf-8'))
             if record['asset'] == asset and part.is_file():
                 offset = part.stat().st_size
                 etag = record['etag']

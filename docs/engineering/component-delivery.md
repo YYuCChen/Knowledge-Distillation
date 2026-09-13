@@ -17,3 +17,5 @@ Mac 直接差量使用固定 Sparkle BinaryDelta，重建后核对程序树并�
 Docling 模型可从旧应用资源逐字节复制，或者从独立资产导入。损坏或缺失不自动下载，启动和文档处理明确显示不可用状态。Windows 内部模型文件操作使用扩展路径，避免要求用户修改系统长路径策略；该转换不解析 junction，原有链接与重解析点检查继续执行。
 
 构建入口为 `scripts/build_component_installer.py`、平台原生构建脚本、`scripts/package_docling_component.py` 和 `scripts/prepare_component_release.py`。签发只生成本地清单，不自动上传或切换 Latest。签发前核对实际目标程序、源码及资产字节；安装器的新装、旧版升级、失败恢复、离线流程、完整双平台运行、旧客户端过渡入口及线上签名验证仍是独立发布门禁。
+
+Windows 程序目录切换复用原更新器的有界句柄释放等待；持续占用时保留事务日志及旧副本，供安装器恢复。组件状态、更新计划、安装日志和版本 JSON 明确按 UTF-8 读取，避免系统默认编码使中文路径的恢复或更新失败。
