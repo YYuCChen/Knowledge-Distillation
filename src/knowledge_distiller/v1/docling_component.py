@@ -40,6 +40,7 @@ class DoclingComponent:
     def __init__(self, components_root, *, manifest=None):
         self.manifest = trusted_manifest() if manifest is None else manifest
         self.files = self.manifest['files']
+        self.notices = (Path(__file__).parent / 'adapters' / 'docling-model-notices.txt').read_bytes()
         if not self.files:
             raise DoclingComponentError('docling_component_invalid_inventory')
         seen = set()
@@ -95,6 +96,7 @@ class DoclingComponent:
                     os.fsync(dst.fileno())
             (staging / 'manifest.json').write_text(
                 json.dumps(self.manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+            (staging / 'NOTICE.txt').write_bytes(self.notices)
             self.verify(staging)
             self._activate(staging)
             return self.verify()
@@ -119,11 +121,15 @@ class DoclingComponent:
         try:
             with zipfile.ZipFile(filesystem_path(archive)) as package:
                 entries = package.infolist()
-                if (len(entries) != len(self.files) or
-                        {entry.filename for entry in entries} != set(self.files)):
+                expected_files = dict(self.files)
+                if 'NOTICE.txt' in package.namelist():
+                    expected_files['NOTICE.txt'] = {'size': len(self.notices),
+                        'sha256': hashlib.sha256(self.notices).hexdigest()}
+                if (len(entries) != len(expected_files) or
+                        {entry.filename for entry in entries} != set(expected_files)):
                     raise DoclingComponentError('docling_component_invalid_archive')
                 for entry in entries:
-                    expected = self.files[entry.filename]
+                    expected = expected_files[entry.filename]
                     mode = entry.external_attr >> 16
                     if (entry.file_size != expected['size'] or entry.flag_bits & 1 or
                             stat.S_ISLNK(mode) or entry.is_dir()):
@@ -143,6 +149,7 @@ class DoclingComponent:
                     if count != expected['size'] or digest.hexdigest() != expected['sha256']:
                         raise DoclingComponentError('docling_component_corrupt')
             (staging / 'manifest.json').write_text(json.dumps(self.manifest), encoding='utf-8')
+            (staging / 'NOTICE.txt').write_bytes(self.notices)
             self.verify(staging)
             self._activate(staging)
             return self.verify()

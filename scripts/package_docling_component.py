@@ -17,6 +17,10 @@ def package(source, output):
     archive = output / ('docling-' + component.identity + '.zip')
     # Exclusive creation prevents silently replacing an already signed asset.
     with zipfile.ZipFile(archive, 'x', compression=zipfile.ZIP_DEFLATED) as target:
+        notice = zipfile.ZipInfo('NOTICE.txt', date_time=(2026, 1, 1, 0, 0, 0))
+        notice.compress_type = zipfile.ZIP_DEFLATED
+        notice.external_attr = 0o100644 << 16
+        target.writestr(notice, component.notices)
         for name in sorted(component.files):
             info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
@@ -36,7 +40,7 @@ def package(source, output):
     descriptor = {'component': 'docling', 'identity': component.identity,
                   'platforms': ['macos-arm64', 'windows-x86_64'],
                   'archive': archive.name, 'size': archive.stat().st_size,
-                  'sha256': digest, 'unpacked_size': sum(e['size'] for e in component.files.values())}
+                  'sha256': digest, 'unpacked_size': sum(e['size'] for e in component.files.values()) + len(component.notices)}
     archive.with_suffix('.json').write_text(json.dumps(descriptor, indent=2) + '\n', encoding='utf-8')
     return descriptor
 

@@ -68,6 +68,7 @@ def _attach_verified(app, sdk, config, project):
                 '--name', 'update-helper', '--paths', str(project/'src'),
                 '--add-binary', str(sdk/'bin/BinaryDelta')+':tools',
                 '--add-data', str(project/'src/knowledge_distiller/v1/adapters/update-codec-notices.txt')+':knowledge_distiller/v1/adapters',
+                '--add-data', str(project/'src/knowledge_distiller/v1/adapters/docling-model-notices.txt')+':knowledge_distiller/v1/adapters',
                 '--add-data', str(project/'packaging/update_config.json')+':knowledge_distiller/v1/adapters',
                 '--add-data', str(project/'src/knowledge_distiller/v1/adapters/docling-models-manifest.json')+':knowledge_distiller/v1/adapters',
                 '--add-data', str(project/'src/knowledge_distiller/v1/adapters/python-runtime.json')+':knowledge_distiller/v1/adapters',

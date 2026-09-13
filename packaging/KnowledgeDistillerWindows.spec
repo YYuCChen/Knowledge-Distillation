@@ -66,6 +66,7 @@ coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='Knowledge
 # A small onefile helper runs outside the replaced application directory.
 u = Analysis([str(project / 'packaging/windows_update_entry.py')], pathex=[str(project / 'src')],
              datas=[(str(project/'src/knowledge_distiller/v1/adapters/update-codec-notices.txt'),'knowledge_distiller/v1/adapters'),
+                    (str(project/'src/knowledge_distiller/v1/adapters/docling-model-notices.txt'),'knowledge_distiller/v1/adapters'),
                     (str(project/'src/knowledge_distiller/v1/adapters/python-runtime.json'),'knowledge_distiller/v1/adapters'),
                     (str(codec),'tools'),
                     (str(project/'packaging/update_config.json'),'knowledge_distiller/v1/adapters'),

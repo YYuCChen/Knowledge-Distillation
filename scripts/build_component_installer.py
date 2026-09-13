@@ -36,6 +36,7 @@ def main():
     for source, destination in [
         (project / 'packaging/update_config.json', 'knowledge_distiller/v1/adapters'),
         (resources / 'update-codec-notices.txt', 'knowledge_distiller/v1/adapters'),
+        (resources / 'docling-model-notices.txt', 'knowledge_distiller/v1/adapters'),
         (resources / 'python-runtime.json', 'knowledge_distiller/v1/adapters'),
         (resources / 'docling-models-manifest.json', 'knowledge_distiller/v1/adapters')]:
         command += ['--add-data', str(source) + os.pathsep + destination]

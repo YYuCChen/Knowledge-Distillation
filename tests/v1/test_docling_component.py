@@ -133,3 +133,19 @@ def test_import_and_reopen_long_model_paths(tmp_path):
     reopened = DoclingComponent(nested / 'components', manifest=first.manifest)
     assert reopened.verify() == target
     assert filesystem_path(target) == target
+
+
+@pytest.mark.parametrize('valid', [True, False])
+def test_archive_notices_are_exact_trusted_bytes(tmp_path, valid):
+    source, component = fixture(tmp_path)
+    archive = tmp_path / 'models-with-notices.zip'
+    with zipfile.ZipFile(archive, 'w') as output:
+        output.write(source / 'family/model.bin', 'family/model.bin')
+        output.writestr('NOTICE.txt', component.notices if valid else b'changed license text')
+    if valid:
+        target = component.import_archive(archive)
+        assert (target / 'NOTICE.txt').read_bytes() == component.notices
+    else:
+        with pytest.raises(DoclingComponentError):
+            component.import_archive(archive)
+        assert not component.active.exists()
