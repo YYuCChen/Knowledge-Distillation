@@ -28,6 +28,8 @@ def topic_contract(points, existing):
     return schema
 
 def topic_plan(value, points):
+    if set(value['decisions']) != {str(n) for n, _ in enumerate(points)}:
+        raise ValueError('topic decisions must cover exactly the input members')
     topics = {}
     for row in value['topics']:
         key = row['key']
@@ -50,8 +52,11 @@ def topic_plan(value, points):
             used.add(key)
             order[key].append((decision['position'], reference))
     for key, rows in order.items():
-        if sorted(p for p, _ in rows) != list(range(len(rows))):
-            raise ValueError('topic positions must be dense and unique')
+        positions = [p for p, _ in rows]
+        if any(type(p) is not int or p < 0 for p in positions) or len(set(positions)) != len(positions):
+            raise ValueError('topic ordering must be nonnegative and unique')
+        # Numeric gaps or a one-based start do not change the selected order.
+        # The stored member sequence supplies contiguous positions mechanically.
         topics[key]['members'] = [ref for _, ref in sorted(rows, key=lambda row: row[0])]
     return {'topics': list(topics.values()), 'unassigned_points': unassigned}
 

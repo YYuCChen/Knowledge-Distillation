@@ -31,7 +31,7 @@ class StructuredCalls:
         if path and path.is_file() and not path.is_symlink():
             try:
                 saved = json.loads(path.read_text(encoding='utf-8'))
-                if saved.get('fingerprint') == fingerprint and saved.get('accepted'):
+                if saved.get('fingerprint') == fingerprint and (saved.get('accepted') or (stage == 'growth' and saved.get('field_recovery_pending'))):
                     value = _response_value(saved['text'], schema)
                     validator.validate(value)
                     self.records[stage] = saved

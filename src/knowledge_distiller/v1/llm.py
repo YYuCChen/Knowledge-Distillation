@@ -12,6 +12,18 @@ class LLMRequestError(RuntimeError):
     pass
 
 
+def _check_service_status(status, mark_unavailable):
+    if status == 401:
+        mark_unavailable()
+        raise LLMRequestError('llm_config_unavailable')
+    if status == 403:
+        raise LLMRequestError('llm_access_denied')
+    if status == 404:
+        raise LLMRequestError('llm_endpoint_or_model_unavailable')
+    if not 200 <= status < 300:
+        raise LLMRequestError('llm_request_failed')
+
+
 @dataclass(frozen=True)
 class AnthropicMessagesClient:
     base_url: str
@@ -53,11 +65,7 @@ class AnthropicMessagesClient:
             logger.warning("LLM request failed: %s", type(error).__name__)
             raise LLMRequestError("llm_request_failed") from error
 
-        if response.status_code in {401, 403, 404}:
-            self.mark_unavailable()
-            raise LLMRequestError("llm_config_unavailable")
-        if not 200 <= response.status_code < 300:
-            raise LLMRequestError("llm_request_failed")
+        _check_service_status(response.status_code, self.mark_unavailable)
         try:
             payload = response.json()
             blocks = payload["content"]
@@ -128,11 +136,7 @@ class OpenAIResponsesClient:
         except httpx.HTTPError as error:
             logger.warning('OpenAI request failed: %s', type(error).__name__)
             raise LLMRequestError('llm_request_failed') from error
-        if response.status_code in {401, 403, 404}:
-            self.mark_unavailable()
-            raise LLMRequestError('llm_config_unavailable')
-        if not 200 <= response.status_code < 300:
-            raise LLMRequestError('llm_request_failed')
+        _check_service_status(response.status_code, self.mark_unavailable)
         try:
             payload = response.json()
             if payload.get('status') != 'completed':

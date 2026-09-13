@@ -111,6 +111,8 @@ class GrowthRuntime:
                 system_prompt = '本阶段处理跨来源关系和新知，不能把单篇素材的不同观点重新概括为新知。每个候选必须有至少两条独立来源谱系；没有真实跨来源增量时返回零候选并给出未产生结果的理由。\n' + system_prompt
                 system_prompt += '\n输出结构以schema为准：topic_change_assessments是由程序指定topic_ref为键的对象，只评估列出的项目，schema未要求此字段时不要输出，由程序填充空列表。new_input_reviews是以每个frozen_new_id为键的对象，必须逐项给出判断；所有层级codec由程序填写，不要输出。'
                 value = self.calls.complete('growth', system_prompt, input_payload, growth_contract(input_payload), max_tokens)
+                from .insight_presentation import prepare_labels
+                value = prepare_labels(value, self.calls)
                 text = json.dumps(growth_plan(value), ensure_ascii=False)
         except LLMRequestError as error:
             raise GrowthRuntimeFailed() from error
