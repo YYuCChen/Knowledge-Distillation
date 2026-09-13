@@ -16,7 +16,6 @@ datas += resources['opencli_datas'](tools / 'opencli/node_modules/@jackwener/ope
 modules = tools / 'opencli/node_modules'
 datas += [(str(p), str(Path('opencli/node_modules') / p.relative_to(modules).parent))
           for p in modules.rglob('*') if p.is_file() and '@jackwener' not in p.relative_to(modules).parts]
-datas += runpy.run_path(str(project / 'packaging/docling_models.py'))['model_datas'](os.environ['KD_BUILD_DOCLING_MODELS'])
 paddle = Path(os.environ['KD_BUILD_PADDLE_MODELS'])
 if not (paddle / 'manifest.json').is_file():
     raise RuntimeError('Verified Paddle model inventory required')

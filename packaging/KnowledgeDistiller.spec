@@ -15,7 +15,6 @@ while not (opencli/'dist/src/browser/page.js').is_file():
 
 resources = runpy.run_path(str(project / 'packaging/resources.py'))
 datas = resources['application_datas'](project) + resources['opencli_datas'](opencli)
-datas += runpy.run_path(str(project/'packaging/docling_models.py'))['model_datas'](os.environ['KD_BUILD_DOCLING_MODELS'])
 binaries = [(shutil.which(name),'bin') for name in ('node','ffmpeg','ffprobe')]
 hiddenimports = []
 for package in ('config','core','storage','utils','auth','tos'):

@@ -21,7 +21,7 @@ from .updates import UpdateError, validate_install_paths
 
 
 PAGE = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>安装知识蒸馏器</title><style>body{font:16px system-ui;margin:64px auto;padding:0 24px;max-width:640px;background:#f7f7f4;color:#202724}h1{font-size:28px}p{line-height:1.7}label{display:block;margin:18px 0}input{display:block;width:100%;box-sizing:border-box;padding:12px;margin-top:8px}button{padding:12px 20px;border:0;border-radius:8px;background:#264e42;color:white;cursor:pointer}button:disabled{opacity:.5}.note{color:#56635d}progress{width:100%}</style>
+<title>安装知识蒸馏器</title><style>body{font:16px system-ui;margin:64px auto;padding:0 24px;max-width:640px;background:#f7f7f4;color:#202724}h1{font-size:28px}p{line-height:1.7}label{display:block;margin:18px 0}input{display:block;width:100%;box-sizing:border-box;padding:12px;margin-top:8px}button{padding:12px 20px;border:0;border-radius:8px;background:#264e42;color:white;cursor:pointer}form{margin:16px 0}button:disabled{opacity:.5}.note{color:#56635d}progress{width:100%}</style>
 <h1>安装知识蒸馏器</h1><p>{{ state.message }}</p>
 {% if state.busy %}<progress></progress><script>setTimeout(()=>location.reload(),2000)</script>{% endif %}
 {% if state.error %}<p role="alert">{{ state.error }}</p>{% endif %}
@@ -104,6 +104,14 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                 install(context['candidate'], target, root, platform=platform,
                         version=release['version'], target_identity=release['target_identity'])
                 state.update(complete=True, ready=False, message='知识蒸馏器已安装并通过启动检查。')
+        except httpx.HTTPStatusError as error:
+            status = error.response.status_code
+            state['error'] = (
+                '当前发布尚未提供此平台的组件安装清单，请稍后重试。程序未被替换。' if status == 404 else
+                '下载服务拒绝访问（HTTP ' + str(status) + '），请检查网络访问权限后重试。' if status in {401, 403} else
+                '下载服务暂时不可用（HTTP ' + str(status) + '），请稍后重试。已有下载会保留。')
+        except httpx.RequestError:
+            state['error'] = '无法连接下载服务，请检查网络后重试。已有下载会保留。'
         except Exception as error:
             state['error'] = str(error)
         finally:

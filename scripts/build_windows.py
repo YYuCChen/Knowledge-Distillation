@@ -45,7 +45,6 @@ def main():
     if output.exists() and any(output.iterdir()):
         parser.error('Use an empty output directory')
     output.mkdir(parents=True, exist_ok=True)
-    models = cache / 'docling-models'
     paddle = cache / 'paddle-models'
     metadata = output / 'build-input' / 'windows-version.json'
     metadata.parent.mkdir()
@@ -57,7 +56,7 @@ def main():
     metadata.write_text(json.dumps({'feed_url': update_config['feed_url'].replace('appcast.xml','appcast-windows.xml'),
                                    'public_key':update_config['public_key'], 'version': args.version, 'product_version': args.product_version,
                                    'source_commit': head}), encoding='utf-8')
-    env = dict(os.environ, KD_BUILD_HDIFFPATCH=str(codec), KD_BUILD_WINDOWS_CACHE=str(cache), KD_BUILD_WINDOWS_VERSION=str(metadata), KD_BUILD_DOCLING_MODELS=str(models), KD_BUILD_PADDLE_MODELS=str(paddle),
+    env = dict(os.environ, KD_BUILD_HDIFFPATCH=str(codec), KD_BUILD_WINDOWS_CACHE=str(cache), KD_BUILD_WINDOWS_VERSION=str(metadata), KD_BUILD_PADDLE_MODELS=str(paddle),
                PYINSTALLER_CONFIG_DIR=str(output / 'pyinstaller-config'),
                PYTHONUTF8='1', PYTHONIOENCODING='utf-8')
     manifest = dict(platform=platform.platform(), architecture=platform.machine(), python=platform.python_version(),
@@ -66,8 +65,6 @@ def main():
                     sources=source_hashes(project),
                     status='building')
     try:
-        models = cache / 'docling-models'
-        runpy.run_path(str(project / 'packaging/docling_models.py'))['model_datas'](models)
         paddle = cache / 'paddle-models'
         inventory = json.loads((paddle / 'manifest.json').read_text(encoding='utf-8'))
         for name, entry in inventory['files'].items():

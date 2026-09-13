@@ -23,7 +23,7 @@ parser.add_argument('--signing-config', type=Path, help='显式本地证书 iden
 parser.add_argument('--manual-update-only', action='store_true', help='显式构建仅手动更新候选；正式稳定签名版本默认启用差量安装')
 parser.add_argument('--sparkle-sdk',type=Path)
 parser.add_argument('--update-config',type=Path,help='公钥、更新源；隔离验收可指定test_data_root')
-parser.add_argument('--docling-models',type=Path,required=True,help='预下载并带 manifest.json 的完整 Docling 模型目录')
+parser.add_argument('--docling-models',type=Path,help=argparse.SUPPRESS)  # Legacy CLI accepted; models are separate assets.
 args=parser.parse_args()
 if bool(args.sparkle_sdk) != bool(args.update_config):
     parser.error('--sparkle-sdk 与 --update-config 必须同时提供')
@@ -35,9 +35,6 @@ output=args.output.expanduser().resolve()
 if output.exists() and any(output.iterdir()):parser.error('输出目录必须为空，以保留已有候选')
 output.mkdir(parents=True,exist_ok=True)
 project=Path(__file__).resolve().parents[1]
-models=args.docling_models.expanduser().resolve()
-runpy.run_path(str(project/'packaging/docling_models.py'))['model_datas'](models)
-os.environ['KD_BUILD_DOCLING_MODELS']=str(models)
 signing = runpy.run_path(str(project/'packaging/mac_signing.py'))
 signing['version_info'](args.product_version, args.version)
 os.environ['KD_BUILD_VERSION']=args.version
@@ -61,7 +58,7 @@ manifest={'python':_python['version'], 'python_runtime':_python, 'architecture':
               'docling','docling-slim','docling-core','docling-parse','docling-ibm-models','rapidocr',
               'onnxruntime','numpy','opencv-python','torch',
               'torchvision','transformers','lark-oapi','websockets','pycryptodome')},
-          'docling_models':json.loads((models/'manifest.json').read_text()),
+          'docling_models':{'delivery':'external-component', 'manifest':json.loads((project/'src/knowledge_distiller/v1/adapters/docling-models-manifest.json').read_text())},
           'work_directory':str(work),'status':'building','source_sha256':source_fingerprints()}
 manifest_path=output/'build-manifest.json'
 manifest_path.write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')

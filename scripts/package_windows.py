@@ -34,7 +34,7 @@ def main():
 
     if not (app / 'KnowledgeDistiller.exe').is_file():
         parser.error('Frozen Windows executable missing')
-    for family in ('docling-models', 'paddle-models'):
+    for family in ('paddle-models',):
         if not (app / '_internal' / family / 'manifest.json').is_file():
             parser.error('Model inventory missing: ' + family)
     output = args.output.resolve()

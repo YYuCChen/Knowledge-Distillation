@@ -101,3 +101,22 @@ def test_repair_keeps_corrupt_component_as_recoverable_evidence(tmp_path):
     component.verify()
     retained, = component.root.glob('.retained-corrupt-*')
     assert (retained / 'family/model.bin').read_bytes() == b'corrupt old bytes'
+
+
+def test_converter_detects_model_damage_after_prior_success(tmp_path, monkeypatch):
+    from knowledge_distiller.v1.docling_source import DoclingSourceConverter, DoclingSourceError
+    import knowledge_distiller.v1.docling_component as module
+    calls = []
+    def verify(self, root=None):
+        calls.append(1)
+        if len(calls) > 1:
+            raise module.DoclingComponentError('docling_component_corrupt')
+        return self.active
+    monkeypatch.setattr(module.DoclingComponent, 'verify', verify)
+    converter = DoclingSourceConverter(components_root=tmp_path, converter_factory=lambda: None)
+    converter.check_component()
+    assert converter.readiness['state'] == 'ready'
+    with pytest.raises(DoclingSourceError, match='docling_component_corrupt'):
+        converter.check_component()
+    assert converter.readiness['state'] == 'unavailable'
+    assert '安装器' in converter.readiness['message']

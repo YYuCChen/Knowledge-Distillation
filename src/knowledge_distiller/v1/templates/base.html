@@ -12,6 +12,9 @@
   </head>
   <body>
     {% block topbar %}{% endblock %}
+    {% if document_component is defined and document_component.state in ['checking', 'unavailable'] %}
+    <p role="status" style="margin:16px 24px;padding:12px;border:1px solid currentColor;border-radius:8px">{{ document_component.message }}</p>
+    {% endif %}
     {% block content %}{% endblock %}
     {% if desktop_token is defined %}
     <script id="desktop-state" type="application/json">{{ desktop_token|tojson }}</script>

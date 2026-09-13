@@ -44,7 +44,7 @@ def test_build_refuses_incomplete_or_changed_model_assets(tmp_path):
         collect(tmp_path)
 
 
-def test_archive_step_rejects_an_old_app_without_docling_models(tmp_path):
+def test_archive_step_rejects_an_incomplete_app_metadata(tmp_path):
     import subprocess
     app = tmp_path/'old.app'
     binary = app/'Contents/MacOS/KnowledgeDistiller'
@@ -55,5 +55,5 @@ def test_archive_step_rejects_an_old_app_without_docling_models(tmp_path):
     result = subprocess.run([sys.executable,str(script),'--app',str(app),
                              '--output',str(output),'--version','test'],capture_output=True,text=True)
     assert result.returncode != 0
-    assert 'docling-models' in result.stderr
+    assert 'Info.plist' in result.stderr
     assert not output.exists()

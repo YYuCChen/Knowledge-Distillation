@@ -86,6 +86,11 @@ def create_application(
         wake_worker=worker.wake,
         organization=build_organization,
     )
+    import sys
+    if getattr(sys, 'frozen', False):
+        local_documents.begin_component_check()
+    app.context_processor(lambda: {'document_component': local_documents.readiness})
+    app.extensions['document_component'] = local_documents
     # create_app initializes the database. Metadata checks must neither read a
     # missing database during Settings construction nor block the UI startup.
     if start_workers and store.setting('asr_model') == QWEN_MODEL_ID:
