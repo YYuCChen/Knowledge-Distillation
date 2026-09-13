@@ -48,7 +48,7 @@ jobs:
           tests/v1/test_windows_lifecycle.py tests/v1/test_windows_local_secrets.py
           tests/v1/test_windows_release.py tests/v1/test_windows_update_installer.py
           tests/v1/test_windows_version_metadata.py tests/v1/test_main.py
-          tests/v1/test_asr_recovery.py
+          tests/v1/test_asr_recovery.py tests/v1/test_asr_cache_identity.py
           tests/test_build_job.py tests/test_dual_build.py tests/test_prepare_windows_feed.py
       - uses: actions/upload-artifact@v4
         if: always()

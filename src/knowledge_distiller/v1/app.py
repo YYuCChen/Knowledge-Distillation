@@ -132,10 +132,9 @@ class ConfiguredQwenRecognizer:
 
     @property
     def cache_identity(self):
-        from . import qwen_component
         return {'provider': 'qwen', 'model': self.model, 'enabled': self._recognizer is not None,
-                'revision': qwen_component.QWEN_MODEL_REVISION,
-                'runtime': qwen_component.QWEN_RUNTIME_VERSION}
+                'runtime_identity': (self._recognizer.binding.cache_identity
+                                     if self._recognizer is not None else None)}
 
     def recognize(self, audio) -> PrimaryRecognition:
         if self._recognizer is None:

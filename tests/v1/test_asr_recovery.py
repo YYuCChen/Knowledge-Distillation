@@ -158,3 +158,27 @@ def test_non_object_checkpoint_recomputes_instead_of_crashing(tmp_path, payload)
     recognizer = Recognizer()
     result = recognize_resumable(recognizer, audio, tmp_path)
     assert result.failure is None and recognizer.calls == [(1, 16)]
+
+
+@pytest.mark.parametrize('windows', [False, True])
+def test_application_wrapper_binds_actual_runtime_and_invalidates_cache(tmp_path, windows):
+    from types import SimpleNamespace
+    from knowledge_distiller.v1.app import ConfiguredQwenRecognizer
+    from knowledge_distiller.primary import QWEN_MODEL_ID, QwenRuntimeResult
+    component = SimpleNamespace(windows=windows, identity=lambda: ('runtime-1', 'model-1'))
+    recognizer = ConfiguredQwenRecognizer(QWEN_MODEL_ID,
+        SimpleNamespace(qwen_component=component))
+    binding = recognizer._recognizer.binding
+    assert recognizer.cache_identity['runtime_identity'] == binding.cache_identity
+    calls = []
+    def transcribe(path):
+        calls.append(path)
+        return QwenRuntimeResult('speech', 'en', 'eos', False, [])
+    binding.transcribe = transcribe
+    audio = audio_fixture(tmp_path, 16)
+    assert recognize_resumable(recognizer, audio, tmp_path).failure is None
+    assert recognize_resumable(recognizer, audio, tmp_path).failure is None
+    assert len(calls) == 1
+    component.identity = lambda: ('runtime-2', 'model-2')
+    assert recognize_resumable(recognizer, audio, tmp_path).failure is None
+    assert len(calls) == 2

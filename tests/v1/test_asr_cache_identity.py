@@ -10,15 +10,23 @@ def test_real_qwen_wrapper_identity_tracks_selection_and_component_revision(tmp_
     from knowledge_distiller.v1.app import ConfiguredQwenRecognizer
     from knowledge_distiller.v1 import qwen_component as component
     audio=StandardAudio(tmp_path/'audio.wav',1);audio.path.write_bytes(b'fake')
-    settings=SimpleNamespace(qwen_component=object())
+    # Use the actual component identity selected by the runtime. A bare object
+    # silently hid AttributeError through getattr(cache_identity, None).
+    settings=SimpleNamespace(qwen_component=component.QwenComponent(tmp_path/'qwen'))
     active=ConfiguredQwenRecognizer(component.QWEN_MODEL_ID,settings)
     disabled=ConfiguredQwenRecognizer(None,settings)
     original=_identity(active,audio)
     assert original != _identity(disabled,audio)
-    monkeypatch.setattr(component,'QWEN_MODEL_REVISION','test-new-revision')
+    if settings.qwen_component.windows:
+        from knowledge_distiller.v1 import qwen_windows as versions
+        revision_name, runtime_name = 'MODEL_REVISION', 'RUNTIME_VERSION'
+    else:
+        versions = component
+        revision_name, runtime_name = 'QWEN_MODEL_REVISION', 'QWEN_RUNTIME_VERSION'
+    monkeypatch.setattr(versions,revision_name,'test-new-revision')
     assert original != _identity(active,audio)
     revised=_identity(active,audio)
-    monkeypatch.setattr(component,'QWEN_RUNTIME_VERSION','test-new-runtime')
+    monkeypatch.setattr(versions,runtime_name,'test-new-runtime')
     assert revised != _identity(active,audio)
 
 
