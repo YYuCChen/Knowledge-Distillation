@@ -132,7 +132,7 @@ def bundle_info():
                 'bundle': str(Path(sys.executable).resolve().parent) if metadata.get('feed_url') else None,
                 'feed_url': metadata.get('feed_url', ''), 'public_key': metadata.get('public_key', ''),
                 'manual_update_only': not bool(metadata.get('feed_url') and metadata.get('public_key')),
-                'windows_update': True,
+                'windows_update': True, 'component_updates': bool(metadata.get('component_updates')),
                 'download_url': '' if metadata.get('feed_url') else 'https://github.com/YYuCChen/Knowledge-Distillation/releases/latest'}
     if not getattr(sys, 'frozen', False):
         return {'version': '0', 'display_version': '开发版本', 'bundle': None, 'feed_url': '', 'public_key': ''}
@@ -142,6 +142,7 @@ def bundle_info():
     return {'version': info['CFBundleVersion'], 'display_version': info['CFBundleShortVersionString'],
             'bundle': str(bundle), 'feed_url': info.get('SUFeedURL', ''), 'public_key': info.get('SUPublicEDKey', ''),
             'manual_update_only':info.get('KDManualUpdateOnly', True),
+            'component_updates':bool(info.get('KDComponentUpdates')),
             'testing': info.get('CFBundleIdentifier') == 'local.knowledge-distiller.updater-test'}
 
 

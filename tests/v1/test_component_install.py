@@ -88,3 +88,15 @@ def test_crash_recovery_restores_database_before_old_launch_path(tmp_path, monke
     monkeypatch.setattr(Path, 'rename', checked_rename)
     assert recover(target, root)['recovered']
     assert (target / 'KnowledgeDistiller.exe').read_bytes() == b'business-1'
+
+
+def test_startup_rejects_unavailable_document_component(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from knowledge_distiller.v1 import component_install as module
+    (tmp_path / '.desktop-instance.json').write_text(json.dumps({'pid': 321, 'port': 45678}))
+    process = SimpleNamespace(pid=321, poll=lambda: None)
+    monkeypatch.setattr(module.httpx, 'get', lambda *a, **k: SimpleNamespace(json=lambda: {
+        'version': '2', 'phase': 'installing', 'document_component': {'state': 'unavailable'}}))
+    with pytest.raises(module.UpdateError, match='文档组件启动检查'):
+        module.accept_startup(process, tmp_path, '2')

@@ -55,7 +55,7 @@ def main():
     update_config=json.loads((project/'packaging/update_config.json').read_text())
     metadata.write_text(json.dumps({'feed_url': update_config['feed_url'].replace('appcast.xml','appcast-windows.xml'),
                                    'public_key':update_config['public_key'], 'version': args.version, 'product_version': args.product_version,
-                                   'source_commit': head}), encoding='utf-8')
+                                   'source_commit': head, 'component_updates': True}), encoding='utf-8')
     env = dict(os.environ, KD_BUILD_HDIFFPATCH=str(codec), KD_BUILD_WINDOWS_CACHE=str(cache), KD_BUILD_WINDOWS_VERSION=str(metadata), KD_BUILD_PADDLE_MODELS=str(paddle),
                PYINSTALLER_CONFIG_DIR=str(output / 'pyinstaller-config'),
                PYTHONUTF8='1', PYTHONIOENCODING='utf-8')

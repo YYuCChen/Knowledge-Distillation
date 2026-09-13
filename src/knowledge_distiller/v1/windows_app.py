@@ -126,12 +126,12 @@ def install_updates(app,args,root,log_path,restart):
                 (updates.root/name).unlink(missing_ok=True)
             plan=updates.root/'install-plan.json'
             plan.write_text(json.dumps({'data_root':str(root),'info':updates.info,'parent_pid':os.getpid(),
-                            'version':updates.release['version'],'asset_name':updates.release['selected']['name'],
+                            'request_token':updates.token,'version':updates.release['version'],'asset_name':updates.release['selected']['name'],
                             'no_open':args.no_open}),encoding='utf-8')
             helper=updates.root/'update-helper.exe'
             shutil.copy2(Path(updates.info['bundle'])/'update-helper.exe',helper)
             with log_path.open('ab') as output:
-                process=subprocess.Popen([str(helper),str(plan)],creationflags=(subprocess.CREATE_BREAKAWAY_FROM_JOB|subprocess.CREATE_NO_WINDOW),
+                process=subprocess.Popen([str(helper),*(['--component'] if updates.info.get('component_updates') else []),str(plan)],creationflags=(subprocess.CREATE_BREAKAWAY_FROM_JOB|subprocess.CREATE_NO_WINDOW),
                                          close_fds=True,stdin=subprocess.DEVNULL,stdout=output,stderr=output)
         except Exception:
             worker.release_update()
@@ -203,7 +203,12 @@ def main(argv=None):
                      pdf=args.check_pdf, epub=args.check_epub, component_root=root / 'components/qwen')
     if not args.update_handshake:
         from .component_install import require_recovered
-        require_recovered(root)
+        try:
+            require_recovered(root)
+        except (ValueError, OSError):
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, '请重新打开知识蒸馏器安装器，选择当前程序和数据目录，点击恢复中断的安装。', '请先恢复中断的安装', 16)
+            return 1
         try:
             update_lock=acquire(root/'.update.lock')
             update_lock.close()

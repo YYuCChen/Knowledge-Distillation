@@ -90,3 +90,11 @@ and switching Latest remain separate release steps.
 
 Sparkle attachment reconstructs its SDK from the pinned archive on each build,
 so changed or flattened unpacked framework trees cannot become build inputs.
+
+Component-enabled app metadata selects `ComponentUpdates`. Its settings UI uses
+the shared signature/parser/download plan; the copied standalone update helper
+rechecks the manifest, reconstructs and verifies the candidate before asking the
+reserved application instance to exit. A process/token check binds that request
+to the initiating app. The existing rollback journal and paused startup accept
+only a matching build with a ready document component. Old XML clients keep their
+old protocol; they require a separately verified migration installer path.

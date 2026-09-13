@@ -38,9 +38,15 @@ def accept_startup(process, root, version):
             if state['pid'] == process.pid and type(state['port']) is int:
                 url = 'http://127.0.0.1:' + str(state['port'])
                 status = httpx.get(url + '/settings/updates/status', timeout=2).json()
+                documents = status.get('document_component', {'state': 'ready'})
+                if documents.get('state') == 'unavailable':
+                    raise UpdateError('新版本文档组件启动检查未通过。')
                 if (status['version'] == version and status['phase'] == 'installing'
+                        and documents.get('state') == 'ready'
                         and httpx.get(url + '/', timeout=2).status_code == 200):
                     return
+        except UpdateError:
+            raise
         except (OSError, ValueError, KeyError, httpx.HTTPError):
             pass
         time.sleep(.25)

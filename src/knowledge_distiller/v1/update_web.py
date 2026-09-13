@@ -1,10 +1,15 @@
 from urllib.parse import urlparse
 from flask import jsonify, request, send_file
-from .updates import Updates, UpdateError
+from .updates import Updates, UpdateError, bundle_info
 
 
 def register_updates(app, data_root):
-    updates = Updates(data_root)
+    info = bundle_info()
+    if info.get('component_updates'):
+        from .component_updates import ComponentUpdates
+        updates = ComponentUpdates(data_root, info=info)
+    else:
+        updates = Updates(data_root, info=info)
     app.extensions['updates'] = updates
 
     @app.context_processor
@@ -29,7 +34,11 @@ def register_updates(app, data_root):
     def update_status():
         if not trusted_request_host():
             return '', 403
-        return jsonify(updates.snapshot())
+        status = updates.snapshot()
+        documents = app.extensions.get('document_component')
+        if documents is not None:
+            status['document_component'] = documents.readiness
+        return jsonify(status)
 
     @app.get('/settings/updates/archive')
     def update_archive():

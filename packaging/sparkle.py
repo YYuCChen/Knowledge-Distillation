@@ -60,6 +60,9 @@ def _attach_verified(app, sdk, config, project):
         with (work/'build.log').open('w') as log:
             subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--onefile',
                 '--name', 'update-helper', '--paths', str(project/'src'),
+                '--add-binary', str(sdk/'bin/BinaryDelta')+':tools',
+                '--add-data', str(project/'packaging/update_config.json')+':knowledge_distiller/v1/adapters',
+                '--add-data', str(project/'src/knowledge_distiller/v1/adapters/docling-models-manifest.json')+':knowledge_distiller/v1/adapters',
                 '--add-data', str(project/'src/knowledge_distiller/v1/adapters/python-runtime.json')+':knowledge_distiller/v1/adapters',
                 '--distpath', str(work/'dist'), '--workpath', str(work/'work'), '--specpath', str(work),
                 str(project/'packaging/update_entry.py')], stdout=log, stderr=subprocess.STDOUT, check=True)
@@ -67,7 +70,7 @@ def _attach_verified(app, sdk, config, project):
     plist = contents/'Info.plist'
     info = plistlib.loads(plist.read_bytes())
     info.update(SUPublicEDKey=config['public_key'], SUFeedURL=config['feed_url'],
-                SURequireSignedFeed=True, SUVerifyUpdateBeforeExtraction=True,
+                KDComponentUpdates=True, SURequireSignedFeed=True, SUVerifyUpdateBeforeExtraction=True,
                 SUEnableAutomaticChecks=False, SUAutomaticallyUpdate=False)
     if config.get('test_data_root'):
         info.update(CFBundleIdentifier='local.knowledge-distiller.updater-test', KDUpdateTestDataRoot=config['test_data_root'])

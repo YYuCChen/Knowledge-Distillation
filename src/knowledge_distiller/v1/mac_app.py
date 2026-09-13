@@ -108,9 +108,6 @@ def main(argv=None):
         raise SystemExit(check(args.check_runtime,args.check_audio,ocr_image=args.check_ocr_image,
                               pdf=args.check_pdf,epub=args.check_epub,component_root=args.data_dir.expanduser().resolve()/"components"/"qwen"))
     paths = AppPaths(args.data_dir.expanduser().resolve())
-    if not args.update_handshake:
-        from .component_install import require_recovered
-        require_recovered(paths.data_root)
     paths.data_root.mkdir(parents=True, exist_ok=True)
     from .local_address import LocalAddress, LocalAddressError, load as load_local_address, save as save_local_address
     try:
@@ -128,6 +125,16 @@ def main(argv=None):
     from Foundation import NSObject, NSURL, NSTimer
     native = NSApplication.sharedApplication()
     native.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+    if not args.update_handshake:
+        from .component_install import require_recovered
+        try:
+            require_recovered(paths.data_root)
+        except (ValueError, OSError) as error:
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_('请先恢复中断的安装')
+            alert.setInformativeText_('请重新打开知识蒸馏器安装器，选择当前程序和数据目录，点击恢复中断的安装。')
+            alert.runModal()
+            return
     if local_address is None:
         alert = NSAlert.alloc().init()
         alert.setMessageText_('本地访问地址配置无法读取')
@@ -229,12 +236,12 @@ def main(argv=None):
         try:
             plan = updates.root/'install-plan.json'
             plan.write_text(json.dumps({'data_root':str(paths.data_root), 'info':updates.info,
-                                       'version':updates.release['version'], 'parent_pid':os.getpid(),
+                                       'version':updates.release['version'], 'parent_pid':os.getpid(), 'request_token':updates.token,
                                        'asset_name':updates.release['selected']['name'],
                                        'no_open':args.no_open}))
             helper = updates.root/'update-helper'
             shutil.copy2(Path(updates.info['bundle'])/'Contents/MacOS/update-helper', helper)
-            process = subprocess.Popen([str(helper), str(plan)],
+            process = subprocess.Popen([str(helper), *(['--component'] if updates.info.get('component_updates') else []), str(plan)],
                                        start_new_session=True, stdout=output, stderr=output)
         except Exception:
             worker.release_update()
