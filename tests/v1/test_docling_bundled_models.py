@@ -8,6 +8,27 @@ import pytest
 from knowledge_distiller.v1.docling_source import _bundled_artifacts, DoclingSourceError
 
 
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows extended-path semantics')
+def test_tableformer_reads_mixed_separator_extended_config(tmp_path):
+    from knowledge_distiller.v1.docling_source import _normalize_tableformer_config_paths
+    from knowledge_distiller.v1.windows_platform import filesystem_path
+    from docling_ibm_models.tableformer import common
+    root = filesystem_path(tmp_path / ('a' * 120) / ('b' * 120))
+    root.mkdir(parents=True)
+    (root / 'tm_config.json').write_text('{"fixture": true}')
+    mixed = str(root) + '/tm_config.json'
+    assert len(mixed) > 260
+    original = common.read_config
+    try:
+        _normalize_tableformer_config_paths()
+        adapted = common.read_config
+        _normalize_tableformer_config_paths()
+        assert common.read_config is adapted
+        assert common.read_config(mixed) == {'fixture': True}
+    finally:
+        common.read_config = original
+
+
 def test_frozen_documents_require_bundled_models_not_user_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, 'frozen', True, raising=False)
     monkeypatch.setattr(sys, '_MEIPASS', str(tmp_path), raising=False)

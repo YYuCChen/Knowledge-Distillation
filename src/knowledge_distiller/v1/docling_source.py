@@ -175,6 +175,7 @@ def _build_converter(components_root=None):
         raise
     except (ImportError, PackageNotFoundError, OSError) as error:
         raise DoclingSourceError("docling_runtime_unavailable") from error
+    _normalize_tableformer_config_paths()
     options = PdfPipelineOptions()
     options.artifacts_path = artifacts
     options.do_ocr = True
@@ -196,6 +197,27 @@ def _build_converter(components_root=None):
         InputFormat.EPUB: EpubFormatOption(backend_options=EpubBackendOptions(
             fetch_images=True, enable_local_fetch=True, enable_remote_fetch=False)),
     })
+
+
+def _normalize_tableformer_config_paths():
+    """Adapt Docling 2.126's string join to Windows extended-path syntax.
+
+    Tableformer appends '/tm_config.json' to a Path string. Windows extended
+    paths do not accept that mixed separator. Keep the adapter confined to
+    its config reader; never replace process-wide open or resolve junctions.
+    """
+    if sys.platform != 'win32':
+        return
+    from docling_ibm_models.tableformer import common
+    if getattr(common.read_config, '_kd_normalized_paths', False):
+        return
+    original = common.read_config
+
+    def read_config(filename):
+        return original(Path(filename))
+
+    read_config._kd_normalized_paths = True
+    common.read_config = read_config
 
 
 def _scan_aware_pipeline():
