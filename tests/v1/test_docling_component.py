@@ -120,3 +120,16 @@ def test_converter_detects_model_damage_after_prior_success(tmp_path, monkeypatc
         converter.check_component()
     assert converter.readiness['state'] == 'unavailable'
     assert '安装器' in converter.readiness['message']
+
+
+def test_import_and_reopen_long_model_paths(tmp_path):
+    from knowledge_distiller.v1.windows_platform import filesystem_path
+    source, first = fixture(tmp_path)
+    nested = tmp_path / ('long-model-parent-' * 5) / ('preserved-user-directory-' * 4)
+    component = DoclingComponent(nested / 'components', manifest=first.manifest)
+    target = component.import_existing(source)
+    assert len(str(target / 'family/model.bin')) > 260
+    assert (target / 'family/model.bin').read_bytes() == b'fixed model bytes'
+    reopened = DoclingComponent(nested / 'components', manifest=first.manifest)
+    assert reopened.verify() == target
+    assert filesystem_path(target) == target

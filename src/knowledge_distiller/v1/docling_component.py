@@ -26,6 +26,9 @@ def trusted_manifest():
                        'docling-models-manifest.json').read_text(encoding='utf-8'))
 
 
+from .windows_platform import filesystem_path
+
+
 def _ordinary(path, *, directory=False):
     info = path.lstat()
     if (stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400
@@ -51,11 +54,11 @@ class DoclingComponent:
             seen.add(name.casefold())
         canonical = json.dumps(self.manifest, sort_keys=True, separators=(',', ':')).encode()
         self.identity = hashlib.sha256(canonical).hexdigest()
-        self.root = Path(components_root) / 'docling'
+        self.root = filesystem_path(Path(components_root) / 'docling')
         self.active = self.root / self.identity
 
     def verify(self, root=None):
-        root = self.active if root is None else Path(root)
+        root = self.active if root is None else filesystem_path(root)
         try:
             _ordinary(root, directory=True)
             for name, entry in self.files.items():
@@ -114,7 +117,7 @@ class DoclingComponent:
                 pass
         staging = Path(tempfile.mkdtemp(prefix='.import-', dir=self.root))
         try:
-            with zipfile.ZipFile(archive) as package:
+            with zipfile.ZipFile(filesystem_path(archive)) as package:
                 entries = package.infolist()
                 if (len(entries) != len(self.files) or
                         {entry.filename for entry in entries} != set(self.files)):
