@@ -49,6 +49,17 @@ def test_blank_image_can_return_explicit_empty_lines():
     assert result.text == "" and result.lines == () and result.width == 100
 
 
+def test_bad_position_retains_each_line_text_without_accepting_partial_evidence():
+    data = raw()
+    data[0]['rec_polys'][0][0][0] = -1
+    with pytest.raises(ocr.OcrError) as caught:
+        runner(data).recognize_bytes(image_bytes(), 'image/png')
+    first, second = caught.value.line_diagnostics
+    assert first['text'] == ' 原文 A ' and first['text_available']
+    assert not first['evidence_valid'] and 'polygon' not in first
+    assert second['text'] == 'English' and second['evidence_valid']
+
+
 def test_numpy_native_results_are_supported():
     import numpy as np
     result = raw()
@@ -79,6 +90,22 @@ def test_bad_image_fails_before_runtime_load(data, mime):
         raise AssertionError("must not load OCR for an invalid image")
     with pytest.raises(ocr.OcrError, match="ocr_invalid_image"):
         ocr.PaddleOcrRunner(predictor_factory=unexpected).recognize_bytes(data, mime)
+
+
+def test_image_resource_limit_is_not_a_decode_failure(monkeypatch):
+    from contextlib import nullcontext
+    header = SimpleNamespace(format="PNG", n_frames=1, size=(8000, 5001))
+    monkeypatch.setattr(Image, "open", lambda stream: nullcontext(header))
+    with pytest.raises(ocr.OcrError, match="^ocr_image_too_large$"):
+        ocr.decode_image(b"header-only fixture", "image/png")
+
+
+def test_decoder_decompression_limit_is_a_resource_failure(monkeypatch):
+    def reject(stream):
+        raise Image.DecompressionBombError("pixel resource limit")
+    monkeypatch.setattr(Image, "open", reject)
+    with pytest.raises(ocr.OcrError, match="^ocr_image_too_large$"):
+        ocr.decode_image(b"header-only fixture", "image/png")
 
 
 def test_transparency_composites_white_and_pixels_are_bgr():

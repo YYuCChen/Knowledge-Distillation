@@ -111,7 +111,9 @@ class Distiller:
                 directory.mkdir(parents=True, exist_ok=True)
                 write_record(directory / 'ocr-diagnostic.json', {
                     'code': error.code, 'member_id': error.member_id,
-                    'completed_members': error.completed_members})
+                    'completed_members': error.completed_members,
+                    'completed_images': getattr(error, 'completed_images', []),
+                    'line_diagnostics': getattr(error, 'line_diagnostics', [])})
             code = error.args[0] if error.args else "distill_failed"
             self.store.mark_failed(item_id, self._item(item_id)["phase"], str(code),
                                    rejection_reason=error.rejection_reason if isinstance(error, KnowledgeModelError) else None)
@@ -485,7 +487,8 @@ class Distiller:
             review_revision = self._item(item_id)['review_revision']
             snapshot = captured.metadata['original_description'] if kind in {'x', 'zhihu', 'weibo'} else captured.metadata['source_title'] + '\n\n' + captured.metadata['original_description']
             fact, lineage = image_source_fact(snapshot, self.store.media_members(material_id), self.ocr,
-                inline_images=captured.metadata.get('native_kind') == 'article')
+                inline_images=captured.metadata.get('native_kind') == 'article',
+                checkpoint_dir=self.runtime_root / 'items' / str(item_id) / 'ocr')
             if isinstance(self.reviewer, RecordedReviewer):
                 from .ocr_review_policy import review_ocr
                 try:

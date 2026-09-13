@@ -51,6 +51,7 @@ class VisionOcrRunner:
 
 
 def _result(observations, width, height):
+    texts = []
     try:
         # nil is not a completed blank-image result; an actual empty NSArray is.
         if observations is None:
@@ -73,8 +74,11 @@ def _result(observations, width, height):
             if any(not math.isfinite(v) or v < -BOUNDARY_TOLERANCE_PIXELS
                    or v > bound + BOUNDARY_TOLERANCE_PIXELS
                    for x,y in raw for v,bound in ((x,width),(y,height))):
-                raise ValueError
-            polygons.append(tuple((min(width,max(0,x)), min(height,max(0,y))) for x,y in raw))
+                # Keep the text for diagnostics, but let the shared validator
+                # reject these coordinates. Never clamp a genuine violation.
+                polygons.append(raw)
+            else:
+                polygons.append(tuple((min(width,max(0,x)), min(height,max(0,y))) for x,y in raw))
             originals.append(raw if raw != polygons[-1] else ())
         lines = validate_lines(texts, scores, polygons, width, height)
         lines = tuple(replace(line, alternatives=choices, original_polygon=raw)
@@ -86,4 +90,10 @@ def _result(observations, width, height):
     except OcrError:
         raise
     except (AttributeError, TypeError, ValueError, OverflowError) as error:
-        raise OcrError("ocr_invalid_output") from error
+        failure = OcrError("ocr_invalid_output")
+        failure.line_diagnostics = [
+            {'line_index': index, 'text': text if isinstance(text, str) else None,
+             'text_available': isinstance(text, str) and bool(text.strip()),
+             'evidence_valid': False, 'code': 'ocr_invalid_output'}
+            for index, text in enumerate(texts)]
+        raise failure from error
