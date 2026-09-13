@@ -37,3 +37,22 @@ def test_attach_uses_exact_archive_instead_of_flattened_or_changed_tree(tmp_path
     archive.write_bytes(b'wrong archive')
     with pytest.raises(ValueError, match='checksum'):
         module.attach(tmp_path / 'candidate.app', tmp_path, {}, tmp_path)
+
+
+def test_framework_checks_resolved_sdk_root_not_its_alias(tmp_path):
+    import plistlib
+    spec = importlib.util.spec_from_file_location('verified_sparkle_alias', Path(__file__).parents[1] / 'packaging/sparkle.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    root = tmp_path / 'real-sdk'
+    version = root / 'Sparkle.framework/Versions/B'
+    (version / 'Resources').mkdir(parents=True)
+    (version / 'Resources/Info.plist').write_bytes(plistlib.dumps({'CFBundleShortVersionString': '2.9.6'}))
+    (version / 'Sparkle').write_bytes(b'runtime')
+    framework = root / 'Sparkle.framework'
+    (framework / 'Sparkle').symlink_to('Versions/B/Sparkle')
+    (framework / 'Resources').symlink_to('Versions/B/Resources')
+    (framework / 'Versions/Current').symlink_to('B')
+    alias = tmp_path / 'sdk-alias'
+    alias.symlink_to(root, target_is_directory=True)
+    assert module.validate_framework(alias) == root.resolve()

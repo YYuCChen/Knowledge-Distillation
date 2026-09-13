@@ -20,13 +20,14 @@ def attach(app, sdk, config, project):
     if hashlib.sha256(data).hexdigest() != SDK_SHA256:
         raise ValueError('Sparkle SDK checksum mismatch')
     with tempfile.TemporaryDirectory(prefix='kd-sparkle-sdk-') as temporary:
-        verified = Path(temporary)
+        verified = Path(temporary).resolve()
         with tarfile.open(fileobj=BytesIO(data), mode='r:xz') as tar:
             tar.extractall(verified, filter='data')
         return _attach_verified(Path(app), verified, config, project)
 
 
-def _attach_verified(app, sdk, config, project):
+def validate_framework(sdk):
+    sdk = Path(sdk).resolve()
     sdk_info = plistlib.loads((sdk/'Sparkle.framework/Resources/Info.plist').read_bytes())
     if sdk_info['CFBundleShortVersionString'] != '2.9.6':
         raise ValueError('Sparkle 2.9.6 is required')
@@ -34,6 +35,11 @@ def _attach_verified(app, sdk, config, project):
         path = sdk / 'Sparkle.framework' / name
         if not path.is_symlink() or not path.resolve().is_relative_to(sdk):
             raise ValueError('Sparkle framework links are invalid')
+    return sdk
+
+
+def _attach_verified(app, sdk, config, project):
+    sdk = validate_framework(sdk)
     contents = app/'Contents'
     subprocess.run(['ditto', str(sdk/'Sparkle.framework'), str(contents/'Frameworks/Sparkle.framework')], check=True)
     source = project/'packaging/sparkle-cli'
