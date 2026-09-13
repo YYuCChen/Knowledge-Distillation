@@ -534,6 +534,12 @@ class ComponentQwenRuntime:
     def __init__(self,component):
         self.component=component
 
+    @property
+    def cache_identity(self):
+        worker = 'qwen_windows_worker.py' if self.component.windows else 'qwen_worker.py'
+        return [*self.component.identity(), PYTHON_VERSION, worker,
+                hashlib.sha256((ASSETS / worker).read_bytes()).hexdigest()]
+
     def transcribe(self,audio_path):
         from .file_lock import acquire
         if not self.component.root.is_dir():
