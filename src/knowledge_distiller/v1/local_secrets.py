@@ -1,5 +1,6 @@
 """Application-owned credentials. Legacy Keychain is read only on explicit import."""
 from __future__ import annotations
+from .windows_platform import is_link_or_reparse
 import json
 import os
 from pathlib import Path
@@ -31,7 +32,7 @@ class LocalSecrets:
         try:
             # Never follow a symlink in the application credential path.
             for parent in (*reversed(self.root.parents), self.root):
-                if parent.is_symlink() or (sys.platform == 'win32' and getattr(parent, 'is_junction', lambda: False)()):
+                if is_link_or_reparse(parent):
                     raise SecretError('credential_path_unsafe')
             self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
             info = self.root.stat()

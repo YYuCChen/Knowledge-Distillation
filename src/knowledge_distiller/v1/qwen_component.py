@@ -23,6 +23,7 @@ from knowledge_distiller.primary import (
 )
 
 from .adapters.python_policy import PYTHON_VERSION, RUNTIMES
+from .windows_platform import is_link_or_reparse
 
 PYTHON_URL = RUNTIMES['mac']['url']
 PYTHON_SHA256 = RUNTIMES['mac']['sha256']
@@ -325,7 +326,7 @@ class QwenComponent:
 
     def _reset_staging_python(self, staging):
         python = staging/'python'
-        if python.is_symlink() or staging.is_symlink():
+        if is_link_or_reparse(python) or is_link_or_reparse(staging):
             raise ComponentError('unsafe_runtime_path')
         if python.exists():
             if self._runtime_in_use(staging):
@@ -337,7 +338,7 @@ class QwenComponent:
     def _activate(self, staging):
         # Installation lock also excludes new-version transcription. Check old
         # versions' actual processes before moving their interpreter directory.
-        if self.active.is_symlink() or staging.is_symlink():
+        if is_link_or_reparse(self.active) or is_link_or_reparse(staging):
             raise ComponentError('unsafe_runtime_path')
         if self.active.exists() and self._runtime_in_use(self.active):
             raise ComponentError('runtime_in_use')
@@ -361,7 +362,7 @@ class QwenComponent:
         self._state('ready')
         self._retire_previous()
         for cache in (self.root/'downloads', self.active/'pip-cache', self.active/'cache'):
-            if cache.is_dir() and not cache.is_symlink():
+            if cache.is_dir() and not is_link_or_reparse(cache):
                 shutil.rmtree(cache)
         (self.root/'python.tar.gz').unlink(missing_ok=True)
 
@@ -370,7 +371,7 @@ class QwenComponent:
         # unknown material. A retained copy is never selected for execution.
         records = []
         for old in [self.root/'previous', *self.root.glob('previous-*')]:
-            if not old.is_dir() or old.is_symlink():
+            if not old.is_dir() or is_link_or_reparse(old):
                 continue
             manifest = _read(old/'component.json')
             if not isinstance(manifest, dict) or not manifest.get('version'):
@@ -379,22 +380,22 @@ class QwenComponent:
                 records.append({'directory':old.name,'status':'in-use'})
                 continue
             python = old/'python'
-            if python.exists() and not python.is_symlink():
+            if python.exists() and not is_link_or_reparse(python):
                 shutil.rmtree(python)
             model = old/'model'
-            unique = model.is_symlink()
-            if model.exists() and not model.is_symlink():
+            unique = is_link_or_reparse(model)
+            if model.exists() and not is_link_or_reparse(model):
                 for path in model.rglob('*'):
                     if not path.is_file() or '.cache' in path.relative_to(model).parts:
                         continue
                     replacement = self.active/'model'/path.relative_to(model)
-                    if path.is_symlink() or not replacement.is_file() or _digest(path) != _digest(replacement):
+                    if is_link_or_reparse(path) or not replacement.is_file() or _digest(path) != _digest(replacement):
                         unique = True
                         break
-                if not unique and not model.is_symlink():
+                if not unique and not is_link_or_reparse(model):
                     shutil.rmtree(model)
             for cache in (old/'cache', old/'pip-cache'):
-                if cache.is_dir() and not cache.is_symlink():
+                if cache.is_dir() and not is_link_or_reparse(cache):
                     shutil.rmtree(cache)
             for name in ('python-ready','install-result.json','install-contract'):
                 (old/name).unlink(missing_ok=True)

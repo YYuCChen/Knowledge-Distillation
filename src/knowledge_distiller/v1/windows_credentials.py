@@ -4,6 +4,7 @@ Only ciphertext is persisted; Windows owns the protection key. Files cannot be
 decrypted by a different Windows user or copied to another machine as credentials.
 """
 from __future__ import annotations
+from .windows_platform import is_link_or_reparse
 
 import ctypes
 from ctypes import wintypes
@@ -105,7 +106,7 @@ class WindowsLocalSecret:
     def _read(self):
         from .local_secrets import SecretError
         self.store._directory()
-        if self.path.is_symlink() or getattr(self.path, 'is_junction', lambda: False)():
+        if is_link_or_reparse(self.path):
             raise SecretError('credential_path_unsafe')
         try:
             if self.path.stat().st_size > 1024 * 1024:
@@ -169,7 +170,7 @@ class WindowsLocalSecret:
     def clear(self):
         from .local_secrets import SecretError
         self.store._directory()
-        if self.path.is_symlink() or getattr(self.path, 'is_junction', lambda: False)():
+        if is_link_or_reparse(self.path):
             raise SecretError('credential_path_unsafe')
         try:
             self.path.unlink(missing_ok=True)

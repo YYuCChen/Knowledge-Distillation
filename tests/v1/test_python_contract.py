@@ -98,3 +98,29 @@ def test_retirement_removes_known_old_download_caches(tmp_path, monkeypatch):
     monkeypatch.setattr(component,'_runtime_in_use',lambda root:False)
     component._retire_previous()
     assert not old.exists()
+
+
+def test_reparse_attribute_is_rejected_without_python312_api():
+    import stat
+    from types import SimpleNamespace
+    from knowledge_distiller.v1.windows_platform import is_link_or_reparse
+    path=SimpleNamespace(lstat=lambda:SimpleNamespace(st_mode=stat.S_IFDIR,st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT))
+    assert is_link_or_reparse(path)
+
+
+@pytest.mark.skipif(sys.platform!='win32',reason='Native NTFS directory junction')
+def test_real_windows_junction_is_rejected_by_updates_and_credentials(tmp_path):
+    from knowledge_distiller.v1.windows_platform import is_link_or_reparse
+    from knowledge_distiller.v1.windows_delta import inventory
+    from knowledge_distiller.v1.updates import UpdateError
+    from knowledge_distiller.v1.local_secrets import LocalSecrets,SecretError
+    outside=tmp_path/'outside';outside.mkdir()
+    root=tmp_path/'app';root.mkdir();link=root/'junction'
+    subprocess.run(['cmd','/c','mklink','/J',str(link),str(outside)],check=True,capture_output=True)
+    try:
+        assert is_link_or_reparse(link)
+        with pytest.raises(UpdateError):inventory(root)
+        with pytest.raises(SecretError):LocalSecrets(link/'credentials')._directory()
+        assert not (outside/'credentials').exists()
+    finally:
+        link.rmdir()
