@@ -83,3 +83,35 @@ def test_shared_parser_normalizes_display_without_modifying_evidence():
     assert result.summary == '主动设定边界。 减少注意力损耗。'
     assert result.evidence[0].text == value['evidence'][0]['text']
     assert result.core_points[0].argument == value['core_points'][0]['argument']
+
+
+def test_pipeline_retry_retains_item_candidate_and_cleans_after_commit(tmp_path):
+    from knowledge_distiller.v1.pipeline import Distiller
+    from knowledge_distiller.v1.store import Store
+    from knowledge_distiller.v1.domain import CapturedMaterial, SourceFact
+    store = Store(tmp_path / 'isolated.sqlite3')
+    store.initialize()
+    item = store.create_item('https://www.douyin.com/video/123')
+    media = tmp_path / 'fixture'
+    media.write_bytes(b'fixture')
+    material = store.attach_material(item, CapturedMaterial('douyin', '123', 'url', 'url', {}, media, 1))
+    store.establish_source_fact(material, SourceFact(SOURCE))
+    runtime = tmp_path / 'runtime'
+    value = payload()
+    value['subtitle'] = value['title']
+    first = Client([value, LLMRequestError('llm_request_failed')])
+    def pipeline(client):
+        return Distiller(store=store, source=None, normalizer=None, recognizer=None,
+            reviewer=None, confirmation_clipper=None, knowledge_model=AnthropicKnowledgeModel(client),
+            runtime_root=runtime, vault=None, ocr=object())
+    assert pipeline(first).run(item).state == 'failed'
+    checkpoint = runtime / 'items' / str(item) / 'knowledge'
+    assert next(checkpoint.glob('*/pending.json')).exists()
+    second = Client([{'subtitle': '从持续切换的损耗理解注意力边界。'}])
+    # Publication intentionally has no Vault; the knowledge commit still ends
+    # checkpoint ownership and the ordinary item cleanup must run.
+    assert pipeline(second).run(item).state == 'failed'
+    assert store.item_bundle(item)['knowledge_result_id'] is not None
+    assert store.item_bundle(item)['error_code'] == 'vault_not_configured'
+    assert len(second.calls) == 1
+    assert not checkpoint.exists()

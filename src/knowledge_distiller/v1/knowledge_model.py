@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
 from knowledge_distiller.content_reading import INDEPENDENT_READING, SOURCE_VOICE
@@ -21,6 +21,11 @@ class KnowledgeModelError(RuntimeError):
 class AnthropicKnowledgeModel:
     client: AnthropicMessagesClient
     checkpoint_root: object = None
+
+    def for_item(self, directory):
+        """Let the pipeline own recovery files through its item lifecycle."""
+        from pathlib import Path
+        return replace(self, checkpoint_root=Path(directory) / 'knowledge')
 
     def derive_collection(self, basis):
         from .collection_model import call_combined

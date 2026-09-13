@@ -67,7 +67,7 @@ def create_application(
             recognizer=configured_recognizer(values, settings_service),
             reviewer=build_reviewer(client),
             confirmation_clipper=FFmpegConfirmationClipper(),
-            knowledge_model=AnthropicKnowledgeModel(client, checkpoint_root=selected_paths.runtime / 'knowledge'),
+            knowledge_model=AnthropicKnowledgeModel(client),
             runtime_root=selected_paths.runtime,
             vault=Path(values["vault_path"]) if values.get("vault_path") else None,
         )

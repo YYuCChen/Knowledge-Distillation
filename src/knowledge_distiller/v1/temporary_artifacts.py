@@ -33,6 +33,7 @@ class TemporaryArtifacts:
             retained = self._retained_at(item, target)
             if (now - retained >= timedelta(hours=72)
                     and not self._needs_media(self.store.item_bundle(item))
+                    and not self._needs_knowledge(self.store.item_bundle(item), target)
                     and not self._shared_needs_media(item)):
                 # Called by the sole worker before acquiring replacement bytes.
                 if not self._remote_cleanup_pending(target):
@@ -83,6 +84,11 @@ class TemporaryArtifacts:
                 return
             if self._shared_needs_media(item):
                 return
+            # SourceFact already exists during display-field recovery. Preserve
+            # its candidate until knowledge is committed or the user dismisses
+            # this item; source completion alone must not erase retry state.
+            if self._needs_knowledge(row, target):
+                return
             unsupported = (row['error_code'] or '').endswith('_input_unsupported')
             if row['source_fact_id'] is None and not unsupported and now - self._retained_at(item, target) < timedelta(hours=72):
                 return
@@ -94,6 +100,13 @@ class TemporaryArtifacts:
             # Preserve the business outcome; retry this exact residue next pass.
             self.store.set_setting(diagnostic, type(error).__name__)
             logger.error('Temporary cleanup for item %s failed (%s)',item,type(error).__name__)
+
+    @staticmethod
+    def _needs_knowledge(row, target):
+        return bool(row is not None and row['dismissed_at'] is None
+                    and row['knowledge_result_id'] is None
+                    and row['error_code'] != 'knowledge_not_qualified'
+                    and (target / 'knowledge').exists())
 
     @staticmethod
     def _needs_media(row):

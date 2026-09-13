@@ -614,7 +614,7 @@ class Distiller:
             from .xiaohongshu import native_video_fact
             candidate = native_video_fact(json.loads(row['metadata_json']), candidate)
         try:
-            knowledge = self.knowledge_model.derive(candidate.snapshot, candidate.uncertainties)
+            knowledge = self._knowledge_for_item(item_id).derive(candidate.snapshot, candidate.uncertainties)
         except KnowledgeModelError as error:
             if error.args != ("knowledge_not_qualified",):
                 raise
@@ -641,7 +641,7 @@ class Distiller:
                 members = self.store.media_members(row['material_id']) if row['source_kind'] in {'xiaohongshu', 'x', 'weibo'} else []
                 if any(m['mime_type'].startswith('image/') for m in members) and 'image_ocr' not in json.loads(row['lineage_json']):
                     raise DistillError('ocr_legacy_source_requires_review')
-                knowledge = self.knowledge_model.derive(
+                knowledge = self._knowledge_for_item(item_id).derive(
                     row["snapshot"], json.loads(row["uncertainties_json"])
                 )
             except KnowledgeModelError:
@@ -658,6 +658,10 @@ class Distiller:
             raise DistillError("obsidian_target_conflict")
         self.store.mark_succeeded(item_id)
         return DistillResult(item_id, "succeeded")
+
+    def _knowledge_for_item(self, item_id):
+        scope = getattr(self.knowledge_model, 'for_item', None)
+        return scope(self.runtime_root / 'items' / str(item_id)) if callable(scope) else self.knowledge_model
 
     def _item(self, item_id: int):
         row = self.store.item_bundle(item_id)
