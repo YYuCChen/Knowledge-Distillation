@@ -33,9 +33,10 @@ class ReviewBinding:
     recorded_responses: list | None = None
 
     def identity(self, primary_text):
+        from knowledge_distiller.review_validation import RULE_VERSION
         return hashlib.sha256(json.dumps([primary_text, REVIEW_SYSTEM_PROMPT if english_assistance(primary_text) else _CHINESE_REVIEW_PROMPT,
             getattr(self.client, "model", None), getattr(self.client, "base_url", None),
-            getattr(self.client, "reasoning_effort", None), getattr(self.client, "effort", None), getattr(self.client, "service_tier", None), getattr(self.client, "text_format", None), self.context, self.source_range, "source-operations-v1.2-3"],
+            getattr(self.client, "reasoning_effort", None), getattr(self.client, "effort", None), getattr(self.client, "service_tier", None), getattr(self.client, "text_format", None), self.context, self.source_range, RULE_VERSION],
             ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
     def complete_with_feedback(self, primary_text, diagnostics):

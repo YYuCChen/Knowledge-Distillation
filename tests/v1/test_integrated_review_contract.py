@@ -56,6 +56,15 @@ def test_provider_schema_accepts_full_semantic_evidence():
             'assessment': spelling_assessment()}]}, _REVIEW_FORMAT['schema'])
 
 
+def test_explicit_antecedent_evidence_need_not_repeat_the_typo():
+    from knowledge_distiller.semantic_support import assess_correction
+    from tests.v1.test_v12_source_integrity import spelling_assessment
+    source = '我们去人民公园，公共的公、花园的园。人民公元门口有新路牌。'
+    assert assess_correction(source, '人民公元', '人民公园',
+        ['我们去人民公园，公共的公、花园的园。'], {**spelling_assessment(),
+        'same_referent_analysis': '前句释字的地点即后句门口所在地点。'}) is None
+
+
 def test_segmented_identity_preserves_all_original_whitespace(tmp_path):
     text = "  \n" + "def example():\n    return 15  # source\n\n" * 160 + "\n  "
     result = build_reviewer(EchoClient()).review_in_directory(PrimaryRecovery(text, "en", ()), tmp_path)

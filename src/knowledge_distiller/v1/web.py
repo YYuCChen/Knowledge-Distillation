@@ -403,6 +403,15 @@ def create_app(
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.post('/items/<int:item_id>/recover-confirmation-audio')
+    def recover_confirmation_audio(item_id: int):
+        try:
+            service().recover_confirmation_audio(item_id, token=request.form.get('token', ''),
+                                                 concern_id=request.form.get('concern_id', ''))
+        except (ValueError, LookupError) as error:
+            return str(error), 409
+        return redirect(url_for('home', item=item_id))
+
     @app.post("/items/<int:item_id>/continue")
     def continue_knowledge(item_id: int):
         try:

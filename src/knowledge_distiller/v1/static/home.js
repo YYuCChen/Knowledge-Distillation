@@ -144,10 +144,12 @@ document.addEventListener('submit', async event => {
   const data = new FormData(form);
   if (button?.name) data.append(button.name, button.value);
   const suggesting = form.matches('[data-suggest-candidates]');
-  const buttonLabel = suggesting ? button?.textContent : null;
+  const recovering = form.matches('[data-recover-audio]');
+  const buttonLabel = suggesting || recovering ? button?.textContent : null;
   if (button) {
     button.disabled = true;
     if (suggesting) button.textContent = '正在结合上下文生成候选…';
+    if (recovering) button.textContent = '正在恢复局部原音…';
   }
   try {
     const response = await fetch(form.getAttribute('action'), { method: 'POST', body: data });
@@ -161,7 +163,7 @@ document.addEventListener('submit', async event => {
     updating = false;
     if (button) {
       button.disabled = false;
-      if (suggesting) button.textContent = buttonLabel;
+      if (suggesting || recovering) button.textContent = buttonLabel;
     }
   }
 });

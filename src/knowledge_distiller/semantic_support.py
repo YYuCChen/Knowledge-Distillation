@@ -34,8 +34,9 @@ def assess_correction(source, original, replacement, quotes, assessment):
         not isinstance(q, str) or not q.strip() or q not in source for q in quotes
     ):
         return 'evidence_quotes'
-    if not any(original in q for q in quotes):
-        return 'evidence_original'
+    # The operation already binds original_text to its exact source occurrence.
+    # Supporting evidence can be a separate explicit spelling or antecedent;
+    # forcing it to repeat the erroneous reading rejects legitimate corrections.
     if not isinstance(assessment, dict):
         return 'assessment'
     if assessment.get('kind') != 'recognition_error':

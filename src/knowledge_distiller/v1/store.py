@@ -12,6 +12,10 @@ from .domain import CapturedMaterial, Knowledge, SourceFact, knowledge_to_dict
 from .source_files import FILE_KINDS, copy_path, read_copy, retain_copy, open_copy, SourceCopyError
 
 
+class SourceReviewConflict(ValueError):
+    """A newer source/user state superseded this asynchronous judgment."""
+
+
 class Store:
     def __init__(self, path: Path):
         self.path = path
@@ -104,11 +108,22 @@ class Store:
         return SubmittedSource(row["input_kind"], row["input_key"], row["input_label"],
                                content, json.loads(row["input_metadata"]))
 
-    def establish_submitted_fact(self, item_id: int, source, parsed) -> int:
+    def establish_submitted_fact(self, item_id: int, source, parsed, *, expected_revision=None,
+                                 review_result=None) -> int:
         """Commit full fact and locator before relinquishing the temporary input."""
         fact = SourceFact(parsed.snapshot, parsed.uncertainties)
         with connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if expected_revision is not None:
+                row = connection.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+                if (row is None or row['review_revision'] != expected_revision
+                        or row['state'] != 'working' or row['confirmation_json'] is not None
+                        or row['material_id'] is not None):
+                    raise SourceReviewConflict('source_review_revision_conflict')
+                if not review_result or review_result.get('failure'):
+                    raise ValueError('completed_review_required')
+                connection.execute('INSERT INTO source_review_results VALUES (?,?,?,?,?,?)',
+                    (item_id, expected_revision, source.source_key, 'complete', _json(review_result), _now()))
             cursor = connection.execute(
                 """INSERT INTO materials
                    (source_kind, source_key, submitted_url, canonical_url, metadata_json, created_at)
@@ -515,9 +530,9 @@ class Store:
             row = connection.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
             if (row is None or row['review_revision'] != expected_revision or row['state'] != 'working'
                     or row['confirmation_json'] is not None):
-                raise ValueError('source_review_revision_conflict')
+                raise SourceReviewConflict('source_review_revision_conflict')
             if connection.execute('SELECT 1 FROM source_facts WHERE material_id=?', (row['material_id'],)).fetchone():
-                raise ValueError('source_review_fact_already_established')
+                raise SourceReviewConflict('source_review_fact_already_established')
             failure = result.get('failure')
             if failure:
                 if fact is not None or confirmation is not None:

@@ -21,7 +21,7 @@ from .source_parsing import SourceReadError
 from .knowledge_model import AnthropicKnowledgeModel, KnowledgeModelError
 from .publisher import PublicationState, publish
 from .reviewer import RecordedReviewer
-from .store import Store
+from .store import Store, SourceReviewConflict
 from .source_versions import SourceVersionError
 from .youtube import YouTubeSourceError, youtube_identity
 from .bilibili import BilibiliSourceError
@@ -92,6 +92,8 @@ class Distiller:
             if row["source_fact_id"] is None:
                 self._establish_source(item_id, row)
             return self._finish(item_id)
+        except SourceReviewConflict:
+            return DistillResult(item_id, self._item(item_id)['state'])
         except SourceCopyError:
             self.store.mark_failed(item_id, self._item(item_id)["phase"], "source_copy_unavailable")
             return DistillResult(item_id, "failed")
@@ -306,13 +308,48 @@ class Distiller:
                 return tuple(location["audio_range"])
         timeline = pending["audio_timeline"]
         recovery = PrimaryRecovery(timeline["text"], None,
-            tuple(PrimaryChunk(**chunk) for chunk in timeline["chunks"]))
+            tuple(PrimaryChunk(**chunk) for chunk in timeline["chunks"]),
+            timeline_status=timeline.get('timeline_status', 'unverified'))
         concern = ReviewConcern(start, end, pending["snapshot"][start:end], "人工校对", True)
         result = locate_concern_audio(StandardAudio(path, timeline["duration_seconds"]),
             recovery, pending["snapshot"], concern)
         if result is None:
-            raise ValueError("这段文字无法可靠定位，请播放完整原音或查看来源。")
+            raise ValueError("这段文字尚未可靠定位，请重试局部原音恢复或查看来源。")
         return result
+
+    def recover_confirmation_audio(self, item_id, *, token, concern_id):
+        row = self._item(item_id)
+        pending = _pending_confirmation(row, token)
+        concern = next((c for c in pending['concerns'] if c.get('audio_name') == concern_id), None)
+        if concern is None or pending.get('kind') == 'image':
+            raise ValueError('疑点已更新，请查看当前状态。')
+        timeline = pending.get('audio_timeline')
+        if not timeline:
+            raise ValueError('原音定位信息不可用，已有文字和判断已保留。')
+        directory = self.runtime_root / 'items' / str(item_id)
+        from .file_lock import acquire
+        from .audio_location_recovery import recover_locations
+        audio = StandardAudio(self.transcript_audio(item_id, token=token), timeline['duration_seconds'])
+        recovery = PrimaryRecovery(timeline['text'], None,
+            tuple(PrimaryChunk(**chunk) for chunk in timeline['chunks']),
+            timeline_status=timeline.get('timeline_status', 'unverified'))
+        issue = ReviewConcern(concern['start'], concern['end'], concern['text'], concern['reason'], True)
+        name = f'concern-1-{uuid4().hex}.wav'
+        output = directory / 'confirmation' / name
+        try:
+            with acquire(directory / '.audio-recovery.lock'):
+                if locate_concern_audio(audio, recovery, pending['snapshot'], issue) is None:
+                    recovery = recover_locations(self.recognizer, audio, recovery, directory)
+                self.confirmation_clipper.clip(audio, recovery, pending['snapshot'], issue, output)
+                concern.update(audio_file=name, audio_recovery_required=False)
+                concern['reason'] = concern['reason'].removesuffix(' 局部原音定位恢复未完成，已保留疑点与原文，可重试恢复。')
+                pending['audio_alignment'] = 'local_preview_10s_v3'
+                pending['audio_timeline'] = {**timeline, 'chunks': [asdict(c) for c in recovery.chunks],
+                                             'timeline_status': recovery.timeline_status}
+                self.store.update_confirmation_suggestions(item_id, row['confirmation_json'], pending)
+        except (OSError, ValueError, EOFError, wave.Error, ConfirmationAudioError) as error:
+            output.unlink(missing_ok=True)
+            raise ValueError('局部原音尚未恢复，已有文字、候选和人工判断均已保留。') from error
 
     def _corrected_audio_locations(self, item_id, pending, start, end, replacement):
         # Preserve the pre-edit replay anchor even when no corrected character
@@ -340,7 +377,7 @@ class Distiller:
         if not concerns:
             return None
         concern = next((c for c in concerns if c.get("audio_name") == concern_id), None) if concern_id else concerns[0]
-        name = concern.get("audio_name") if concern else None
+        name = concern.get("audio_file", concern.get("audio_name")) if concern else None
         if not _is_confirmation_name(name):
             return None
         path = self.runtime_root / "items" / str(item_id) / "confirmation" / name
@@ -351,7 +388,8 @@ class Distiller:
             aligned = path.with_suffix('.v2.wav')
             if not aligned.is_file():
                 recovery = PrimaryRecovery(timeline['text'], None,
-                    tuple(PrimaryChunk(**chunk) for chunk in timeline['chunks']))
+                    tuple(PrimaryChunk(**chunk) for chunk in timeline['chunks']),
+                    timeline_status=timeline.get('timeline_status', 'unverified'))
                 audio = StandardAudio(path.parent.parent / 'audio' / 'standard.wav', timeline['duration_seconds'])
                 try:
                     self.confirmation_clipper.clip(audio, recovery, pending['snapshot'],
@@ -374,6 +412,7 @@ class Distiller:
     def _establish_source(self, item_id: int, row) -> None:
         if row["input_kind"] in {"direct_text", "markdown", "pdf", "epub", "image"}:
             self.store.mark_working(item_id, "reviewing")
+            review_revision = self._item(item_id)['review_revision']
             source = self.store.submitted_source(item_id)
             try:
                 parsed = parse_submitted_source(source, converter=self.documents, ocr=self.ocr)
@@ -382,8 +421,17 @@ class Distiller:
                     self.store.reject_submitted_source(item_id, str(error))
                 raise DistillError(str(error)) from error
             from .ocr_review_policy import review_parsed
-            parsed = review_parsed(parsed, self.reviewer)
-            self.store.establish_submitted_fact(item_id, source, parsed)
+            try:
+                parsed = review_parsed(parsed, self.reviewer)
+            except OcrError as error:
+                if hasattr(error, 'partial_review'):
+                    self.store.commit_source_review(item_id, review_revision, source.source_key,
+                        {'failure': str(error), **error.partial_review})
+                raise
+            self.store.establish_submitted_fact(item_id, source, parsed,
+                expected_revision=review_revision, review_result={'schema': 1,
+                    'snapshot': parsed.snapshot, 'uncertainties': parsed.uncertainties,
+                    'lineage': parsed.lineage})
             if self._item(item_id)["state"] == "waiting_user":
                 raise DistillError("source_confirmation_required")
             return
@@ -434,18 +482,25 @@ class Distiller:
             return
 
         if kind in {'douyin', 'xiaohongshu', 'x', 'zhihu', 'weibo'} and captured.metadata.get('note_kind') == 'normal':
+            review_revision = self._item(item_id)['review_revision']
             snapshot = captured.metadata['original_description'] if kind in {'x', 'zhihu', 'weibo'} else captured.metadata['source_title'] + '\n\n' + captured.metadata['original_description']
             fact, lineage = image_source_fact(snapshot, self.store.media_members(material_id), self.ocr,
                 inline_images=captured.metadata.get('native_kind') == 'article')
             if isinstance(self.reviewer, RecordedReviewer):
                 from .ocr_review_policy import review_ocr
-                fact, lineage = review_ocr(fact, lineage, self.reviewer.binding.client)
+                try:
+                    fact, lineage = review_ocr(fact, lineage, self.reviewer.binding.client)
+                except OcrError as error:
+                    if hasattr(error, 'partial_review'):
+                        self.store.commit_source_review(item_id, review_revision, captured.source_key,
+                            {'failure': str(error), **error.partial_review})
+                    raise
             from .image_confirmation import pending_review
             pending = pending_review(fact, lineage)
-            if pending is not None:
-                self.store.mark_waiting(item_id, pending)
-                return
-            self.store.establish_source_fact(material_id, fact, lineage=lineage)
+            self.store.commit_source_review(item_id, review_revision, captured.source_key,
+                {'schema': 1, 'snapshot': fact.snapshot, 'uncertainties': fact.uncertainties,
+                 'lineage': lineage}, fact=fact if pending is None else None,
+                lineage=lineage, confirmation=pending)
             return
         media = VerifiedTemporaryMedia(
             captured.source_kind,
@@ -521,6 +576,7 @@ class Distiller:
                         dict.fromkeys((concern.text, *concern.candidate_readings))
                     ),
                     "audio_name": name,
+                    "audio_recovery_required": bool(replay_note),
                 })
             )
         uncertainties = tuple(
@@ -614,13 +670,13 @@ class Distiller:
     ) -> None:
         root = self.runtime_root / "items" / str(item_id) / "confirmation"
         for concern in concerns:
-            name = concern.get("audio_name")
-            if _is_confirmation_name(name):
-                try:
-                    (root / name).unlink(missing_ok=True)
-                    (root / name).with_suffix('.v2.wav').unlink(missing_ok=True)
-                except OSError:
-                    pass
+            for name in {concern.get("audio_name"), concern.get('audio_file')}:
+                if _is_confirmation_name(name):
+                    try:
+                        (root / name).unlink(missing_ok=True)
+                        (root / name).with_suffix('.v2.wav').unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
 
 def _compact_concern(concern: dict) -> dict:

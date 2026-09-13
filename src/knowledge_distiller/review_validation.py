@@ -11,7 +11,7 @@ import re
 from dataclasses import replace
 from difflib import SequenceMatcher
 
-RULE_VERSION = 'source-operations-v1.2-3'
+RULE_VERSION = 'source-operations-v1.2-4'
 # Quotes may be typographic variants; operators, signs, numbers and separators
 # are deliberately not normalized. Whitespace is meaningful in code and units.
 _QUOTES = str.maketrans({'“': '"', '”': '"', '‘': "'", '’': "'"})

@@ -209,13 +209,24 @@ def download_youtube(key, canonical, cookies, work_dir):
 
 def _captions(info, root):
     rows = []
-    for language, track in (info.get('requested_subtitles') or {}).items():
-        path = Path(track.get('filepath') or '')
-        if not path.is_file() or path.resolve().parent != root.resolve():
-            raise YouTubeSourceError('youtube_caption_incomplete')
-        text = path.read_text(encoding='utf-8')
-        if not text.startswith('WEBVTT'):
-            raise YouTubeSourceError('youtube_caption_incomplete')
+    requested = info.get('requested_subtitles') or {}
+    if not isinstance(requested, dict):
+        return [{'error': 'invalid_caption_inventory'}]
+    for language, track in requested.items():
+        try:
+            if not isinstance(track, dict):
+                raise ValueError('invalid_track')
+            path = Path(track.get('filepath') or '')
+            if (not path.is_file() or path.is_symlink() or path.resolve().parent != root.resolve()
+                    or path.stat().st_size > 16 * 1024 * 1024):
+                raise ValueError('invalid_caption_file')
+            text = path.read_text(encoding='utf-8')
+            if not text.startswith('WEBVTT'):
+                raise ValueError('invalid_vtt')
+        except (OSError, ValueError, TypeError):
+            rows.append({'language': language, 'source_key': info.get('id'),
+                         'error': 'optional_caption_unavailable'})
+            continue
         rows.append({'language': language, 'format': 'vtt', 'text': text,
                      'kind': 'manual' if language in (info.get('subtitles') or {}) else 'automatic',
                      'source_key': info.get('id'),

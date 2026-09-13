@@ -433,3 +433,21 @@ def test_schema_17_adds_review_state_without_inventing_completion(store, tmp_pat
         assert db.execute('PRAGMA user_version').fetchone()[0] == 18
         assert db.execute('SELECT count(*) FROM source_review_results').fetchone()[0] == 0
         assert not db.execute('PRAGMA foreign_key_check').fetchall()
+
+
+def test_submitted_review_rejects_stale_state_without_consuming_source(store):
+    from knowledge_distiller.v1.file_sources import prepare_direct_text
+    from knowledge_distiller.v1.source_parsing import ParsedSource
+    source = prepare_direct_text('必须保留的来源')
+    item = store.submit_source(source)
+    store.mark_working(item, 'reviewing')
+    revision = store.item_bundle(item)['review_revision']
+    store.requeue_interrupted()
+    with pytest.raises(ValueError, match='revision_conflict'):
+        store.establish_submitted_fact(item, source, ParsedSource(source.content.decode(), {}, {}),
+            expected_revision=revision, review_result={'snapshot': 'late'})
+    assert store.item_bundle(item)['state'] == 'queued'
+    assert store.submitted_source(item).content == source.content
+    with connect(store.path) as db:
+        assert not db.execute('SELECT 1 FROM materials').fetchone()
+        assert not db.execute('SELECT 1 FROM source_review_results').fetchone()

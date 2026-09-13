@@ -23,8 +23,10 @@ def review_ocr(fact, lineage, client):
     updated=deepcopy(lineage)
     updated['ocr_primary_snapshot']=fact.snapshot
     diagnostics=[]
+    response_chain=[]
     for start in range(0,len(concerns),8):
         group=concerns[start:start+8]
+        response = None
         try:
             response=client.complete(system=PROMPT,user=json.dumps({'snapshot':fact.snapshot,'concerns':[
                 {'index':start+i,'text':u['text'],'reason':u.get('reason','')} for i,u in enumerate(group)]},ensure_ascii=False),max_tokens=3072)
@@ -32,6 +34,7 @@ def review_ocr(fact, lineage, client):
             if not isinstance(rows,list): raise ValueError
         except (LLMRequestError,ValueError,KeyError,TypeError):
             rows=[]
+        response_chain.append({'start': start, 'response': response})
         for i,concern in enumerate(group,start):
             matches=[r for r in rows if isinstance(r,dict) and type(r.get('index')) is int and r['index']==i]
             row=matches[0] if len(matches)==1 else {}
@@ -49,7 +52,7 @@ def review_ocr(fact, lineage, client):
             if not valid or not position_valid:
                 error = OcrError('ocr_review_incomplete')
                 error.partial_review = {'source': fact.snapshot, 'concerns': concerns,
-                    'decisions': decisions, 'response': response if 'response' in locals() else None,
+                    'decisions': decisions, 'response_chain': response_chain,
                     'failed_operation': i, 'field': 'decision' if not valid else 'source_position'}
                 raise error
             supported=(not overlap and (not row['reliable'] and row['replacement']==concern['text']
@@ -64,6 +67,7 @@ def review_ocr(fact, lineage, client):
                 row={**row,'reliable':False,'replacement':concern['text']}
             decisions.append(row)
     updated['ocr_review_diagnostics']=diagnostics
+    updated['ocr_response_chain']=response_chain
     uncertainties=deepcopy(list(fact.uncertainties))
     snapshot=fact.snapshot
     for concern,decision in reversed(list(zip(concerns,decisions))):

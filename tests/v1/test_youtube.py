@@ -192,6 +192,20 @@ def test_expired_audio_is_reacquired_without_overwriting_formal_fact(store, medi
         metadata=old,work_dir=tmp_path/'work') is None
 
 
+def test_broken_optional_caption_keeps_audio_fallback_available(tmp_path):
+    from knowledge_distiller.v1.youtube import _captions
+    from knowledge_distiller.v1.subtitle_baseline import select_subtitle
+    from types import SimpleNamespace
+    path = tmp_path / 'broken.vtt'
+    path.write_bytes(b'\xff\xfeinvalid utf8')
+    tracks = _captions({'id': KEY, 'requested_subtitles': {'en': {'filepath': str(path)}}}, tmp_path)
+    assert tracks[0]['error'] == 'optional_caption_unavailable'
+    selected, diagnostics = select_subtitle(SimpleNamespace(source_key=KEY,
+        duration_seconds=20, metadata={'original_language':'en', 'captions':tracks}))
+    assert selected is None
+    assert diagnostics['caption_selection']
+
+
 def test_new_generation_retry_reacquires_unfinished_material(store, media, tmp_path):
     source=YouTubeSource(store,Session(),downloader(media))
     item=store.create_item(URL)

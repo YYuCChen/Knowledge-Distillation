@@ -539,7 +539,19 @@ class ComponentQwenRuntime:
         if not self.component.root.is_dir():
             raise QwenRuntimeUnavailable
         try:
-            with acquire(self.component.root/'install.lock'):
+            self.component.begin_legacy_validation()
+            deadline = time.monotonic() + 3660
+            while True:
+                try:
+                    lock = acquire(self.component.root/'install.lock')
+                    break
+                except BlockingIOError:
+                    # Startup qualification runs off the UI thread. A queued
+                    # recognition waits for it instead of failing as unavailable.
+                    if (_read(self.component.root/'state.json').get('state') != 'validating_existing'
+                            or time.monotonic() >= deadline or self.component._stop.wait(.1)):
+                        raise
+            with lock:
                 self.component._probe_python(self.component.active, force=True)
                 return self._transcribe(audio_path)
         except (BlockingIOError, OSError, ComponentError, subprocess.SubprocessError, ValueError) as error:

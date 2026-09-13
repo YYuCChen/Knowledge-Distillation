@@ -54,6 +54,26 @@ def test_legacy_qualification_is_async_locked_and_preserves_original(legacy,monk
     assert [json.loads(p.read_text()) for p in (component.root/'legacy-manifests').glob('*.json')]==[original]
 
 
+def test_recognition_waits_for_background_qualification(legacy, monkeypatch):
+    component, _ = legacy
+    entered, release = threading.Event(), threading.Event()
+    def verify(root):
+        entered.set()
+        assert release.wait(3)
+    monkeypatch.setattr(component, '_verify_runtime', verify)
+    runtime = module.ComponentQwenRuntime(component)
+    monkeypatch.setattr(runtime, '_transcribe', lambda _: 'recognized')
+    result = []
+    thread = threading.Thread(target=lambda: result.append(runtime.transcribe('synthetic.wav')))
+    thread.start()
+    assert entered.wait(1)
+    assert not result
+    release.set()
+    thread.join(3)
+    assert result == ['recognized']
+    assert component.ready()
+
+
 @pytest.mark.parametrize('failure',['same_size_corruption','dependencies','selftest','concurrent_manifest'])
 def test_failed_qualification_never_marks_old_component_ready(legacy,monkeypatch,failure):
     component,original=legacy
