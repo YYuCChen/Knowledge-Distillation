@@ -227,7 +227,7 @@ def run(job, retry=False):
 
 
 def status_without_lock(job):
-    return json.loads((job / 'status.json').read_text(encoding='utf-8')) if (job / 'status.json').exists() else {}
+    return read_status_json(job / 'status.json') if (job / 'status.json').exists() else {}
 
 
 def submit(job, request, retry=False, *, supervised=False):

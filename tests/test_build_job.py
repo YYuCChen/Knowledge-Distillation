@@ -258,7 +258,8 @@ def test_default_launch_denial_is_not_silently_changed_to_supervised(tmp_path, m
         assert launches[0]['start_new_session']
 
 
-def test_status_reader_retries_transient_windows_sharing_error(tmp_path, monkeypatch):
+@pytest.mark.parametrize('entry', ['status', 'status_without_lock'])
+def test_status_reader_retries_transient_windows_sharing_error(tmp_path, monkeypatch, entry):
     target = tmp_path / 'status.json'
     target.write_text('{"status":"succeeded"}')
     original = Path.read_text
@@ -270,7 +271,7 @@ def test_status_reader_retries_transient_windows_sharing_error(tmp_path, monkeyp
         return original(path, *args, **kwargs)
     monkeypatch.setattr(build_job.sys, 'platform', 'win32')
     monkeypatch.setattr(Path, 'read_text', read)
-    assert build_job.read_status_json(target)['status'] == 'succeeded'
+    assert getattr(build_job, entry)(tmp_path)['status'] == 'succeeded'
     assert len(calls) == 2
 
 
