@@ -513,3 +513,124 @@ def test_peer_bundle_fills_exact_foreign_rows_without_bypassing_s1(repository,tm
     central['new_defects']=[{'id':'live-failure','severity':'S1','status':'open'}]
     result=q.inspect_with_peers(central,tmp_path/'central/plan.json','candidate',[bundle])
     assert result['exit_code']==1 and 'S0/S1' in result['reason']
+
+
+@pytest.fixture
+def docling_inputs(tmp_path):
+    root=tmp_path.resolve()/'source';models=tmp_path.resolve()/'models';models.mkdir()
+    (models/'weight.bin').write_bytes(b'test-only weights')
+    manifest={'docling_version':'2.126.0','files':{'weight.bin':{'size':17,'sha256':q.digest(models/'weight.bin')}}}
+    q.atomic(root/'src/knowledge_distiller/v1/adapters/docling-models-manifest.json',manifest)
+    q.atomic(models/'manifest.json',manifest)
+    source=root/'src/knowledge_distiller/v1/docling_source.py';source.write_text('DOCLING_VERSION = "2.126.0"\n')
+    identity=q.hashlib.sha256(q.json.dumps(manifest,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    config={'windows-x64':{'models_root':str(models),'component_identity':identity,'tree_sha256':q.tree_digest(models)}}
+    scenario={'id':'pdf','platform':'windows-x64','runner':{'adapter':'pytest','docling':'pdf'}}
+    return root,models,config,scenario
+
+
+def test_docling_requires_explicit_trusted_component_and_rejects_changed_bytes(docling_inputs):
+    root,models,config,scenario=docling_inputs
+    expected=q.docling_identity(config,scenario,root)
+    assert expected['model_required'] and 'models_root' not in expected
+    with pytest.raises(q.Gap,match='missing explicit'):q.docling_identity({},scenario,root)
+    config['windows-x64']['component_identity']='0'*64
+    with pytest.raises(q.Blocked,match='trusted identity'):q.docling_identity(config,scenario,root)
+    config['windows-x64']['component_identity']=expected['component_identity']
+    (models/'weight.bin').write_bytes(b'tampered weights!')
+    config['windows-x64']['tree_sha256']=q.tree_digest(models)
+    with pytest.raises(q.Blocked,match='model bytes differ'):q.docling_identity(config,scenario,root)
+
+
+def test_docling_missing_file_is_gap_and_epub_does_not_need_weights(docling_inputs):
+    root,models,config,scenario=docling_inputs
+    (models/'weight.bin').unlink()
+    with pytest.raises(q.Gap,match='missing Docling'):q.docling_identity(config,scenario,root)
+    scenario['runner']['docling']='epub'
+    assert q.docling_identity({},scenario,root)=={'kind':'epub','model_required':False}
+
+
+def test_docling_environment_uses_only_explicit_models_and_isolated_cache(docling_inputs,tmp_path):
+    root,models,config,scenario=docling_inputs
+    env={'HF_HOME':'untrusted-cache','KNOWLEDGE_DISTILLER_DOCLING_MODELS':'untrusted-models','HF_HUB_OFFLINE':'0'}
+    attempt=tmp_path/'attempt'
+    q.docling_environment(env,scenario,{'release_input':{'docling_input':config}},attempt)
+    assert env['KNOWLEDGE_DISTILLER_DOCLING_MODELS']==str(models)
+    assert env['HF_HUB_OFFLINE']==env['TRANSFORMERS_OFFLINE']=='1'
+    assert Path(env['HF_HOME']).is_relative_to(attempt)
+    scenario['runner']['docling']='epub'
+    q.docling_environment(env,scenario,{'release_input':{}},attempt)
+    assert 'KNOWLEDGE_DISTILLER_DOCLING_MODELS' not in env
+
+
+def test_docling_portable_validation_does_not_open_foreign_model_path(docling_inputs,tmp_path):
+    root,models,config,scenario=docling_inputs
+    identity=q.docling_identity(config,scenario,root)
+    config['windows-x64']['models_root']='C:/absent-on-receiver/models'
+    plan={'source_root':str(root),'release_input':{'docling_input':config},'snapshots':{'pdf':{'docling_inputs':identity}},
+          '_portable_docling':{'pdf':identity}}
+    folder=tmp_path/'logs';folder.mkdir()
+    packages={k:'recorded-version' for k in ('docling-core','docling-ibm-models','torch','onnxruntime','rapidocr')}
+    packages['docling']='2.126.0'
+    runtime={'inputs':identity,'packages':packages,'models_root':r'C:\absent-on-receiver\models',
+             'offline':{'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1'}}
+    q.atomic(folder/'execution-docling.json',runtime)
+    assert q.validate_docling(folder,plan,scenario)==('passed',None)
+    runtime['models_root']=r'C:\different\models';q.atomic(folder/'execution-docling.json',runtime)
+    assert q.validate_docling(folder,plan,scenario)==('failed','docling_model_environment_mismatch')
+    runtime['models_root']=r'C:\absent-on-receiver\models';runtime['offline']['HF_HUB_OFFLINE']='0'
+    q.atomic(folder/'execution-docling.json',runtime)
+    assert q.validate_docling(folder,plan,scenario)==('failed','docling_offline_environment_missing')
+
+
+def test_docling_true_nodes_are_removed_from_host_and_covered_on_each_platform():
+    _,scenarios,_,_=q.registry()
+    host=next(s for s in scenarios if s['id']=='SC-MANUAL-FIFO--synthetic')
+    for kind in ('pdf','epub'):
+        node='tests/v1/test_submitted_sources.py::test_document_uses_same_durable_worker_and_locator_without_audio['+kind+']'
+        assert host['runner']['deselect'].count(node)==1
+        for plat in ('macos-arm64','windows-x64'):
+            scenario=next(s for s in scenarios if s['id']==f'SC-DOCUMENT-WORKER--{kind}--{plat}')
+            assert scenario['runner']['nodeids']==[node] and scenario['level']=='integration'
+            assert scenario['runner']['docling']==kind and not scenario.get('enabled_by')
+            command=q.command_for(scenario,{'source_root':str(q.ROOT)},Path('/tmp/fixture'))
+            assert node in command and 'tests/v1/test_document_sources.py' not in command
+
+
+def test_docling_export_rechecks_identity_and_portable_report_needs_no_model_tree(repository,docling_inputs,tmp_path,monkeypatch):
+    """Adapter-only fixture: package probe is mocked; this does not prove model conversion."""
+    root,git,base=repository
+    source,models,config,scenario=docling_inputs
+    platform_id=q.host_platform()
+    config={platform_id:config['windows-x64']}
+    paths=['tests/v1/test_submitted_sources.py','tests/v1/test_document_sources.py']
+    q.atomic(root/'src/knowledge_distiller/v1/adapters/docling-models-manifest.json',q.read(source/'src/knowledge_distiller/v1/adapters/docling-models-manifest.json'))
+    (root/'src/knowledge_distiller/v1/docling_source.py').write_text('DOCLING_VERSION = "2.126.0"\n')
+    (root/'tests/v1').mkdir()
+    (root/paths[0]).write_text('import pytest\n@pytest.mark.parametrize("kind",["pdf"])\ndef test_document_uses_same_durable_worker_and_locator_without_audio(kind): assert kind == "pdf"\n')
+    (root/paths[1]).write_text('# helper fixture only\n')
+    registry=q.read(root/'quality/scenarios.yaml');s=registry['scenarios'][0]
+    s.update(always=True,level='integration',gate='contract',platform=platform_id)
+    s['runner']={'adapter':'pytest','paths':paths,'nodeids':[paths[0]+'::test_document_uses_same_durable_worker_and_locator_without_audio[pdf]'],'docling':'pdf'}
+    q.atomic(root/'quality/scenarios.yaml',registry)
+    impact=q.read(root/'quality/change-impact.yaml');impact['components']['business']['paths']+=paths+['src/**']
+    q.atomic(root/'quality/change-impact.yaml',impact);git('add','.');git('commit','-qm','synthetic adapter contract')
+    release=tmp_path/'release.json';q.atomic(release,{'docling_input':config})
+    directory=tmp_path/'plan';plan=q.make_plan(base,'HEAD',release,directory,root)
+    original=q.subprocess.check_output
+    def probe(command,**kwargs):
+        if command[:2]==[q.sys.executable,'-c'] and 'importlib.metadata' in command[-1]:
+            packages={key:'fixture-version' for key in ('docling-core','docling-ibm-models','torch','onnxruntime','rapidocr')};packages['docling']='2.126.0'
+            return q.json.dumps({'packages':packages,'models_root':str(models),'offline':{'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1'}})
+        return original(command,**kwargs)
+    monkeypatch.setattr(q.subprocess,'check_output',probe)
+    assert q.run(plan,directory/'plan.json','contract',tmp_path/'data')['exit_code']==0
+    bundle=tmp_path/'bundle';q.export_evidence(directory/'plan.json',bundle)
+    assert not (bundle/'weight.bin').exists()
+    q.shutil.rmtree(models)
+    portable=q.load_portable_plan(bundle/'plan.json',root)
+    assert q.inspect(portable,bundle/'plan.json','contract')['exit_code']==0
+    # Re-exporting from the execution host must not borrow the portable receipt when inputs vanished.
+    with pytest.raises(q.Gap,match='missing explicit Docling'):q.export_evidence(directory/'plan.json',tmp_path/'bad-export')
+    output=next(bundle.glob('logs/*/execution-docling.json'));output.write_text('{}')
+    with pytest.raises(q.Blocked,match='portable file changed'):q.load_portable_plan(bundle/'plan.json',root)

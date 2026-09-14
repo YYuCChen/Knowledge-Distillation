@@ -126,6 +126,10 @@
           "tests/v1/test_xiaohongshu.py",
           "tests/v1/test_youtube.py",
           "tests/v1/test_media_lifecycle.py"
+        ],
+        "deselect": [
+          "tests/v1/test_submitted_sources.py::test_document_uses_same_durable_worker_and_locator_without_audio[pdf]",
+          "tests/v1/test_submitted_sources.py::test_document_uses_same_durable_worker_and_locator_without_audio[epub]"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -1800,6 +1804,142 @@
       "timeout": 300,
       "not_proven": [
         "frozen candidate installer or runtime"
+      ]
+    },
+    {
+      "id": "SC-DOCUMENT-WORKER--pdf--macos-arm64",
+      "requirements": [
+        "BUG-20260914-03"
+      ],
+      "components": [
+        "manual",
+        "docling"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "macos-arm64",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_submitted_sources.py",
+          "tests/v1/test_document_sources.py"
+        ],
+        "nodeids": [
+          "tests/v1/test_submitted_sources.py::test_document_uses_same_durable_worker_and_locator_without_audio[pdf]"
+        ],
+        "docling": "pdf"
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "real Docling conversion in durable worker preserves locator, deduplication, restart, publication and one knowledge request"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "final frozen application",
+        "real model semantic knowledge quality",
+        "online model download availability"
+      ]
+    },
+    {
+      "id": "SC-DOCUMENT-WORKER--epub--macos-arm64",
+      "requirements": [
+        "BUG-20260914-03"
+      ],
+      "components": [
+        "manual",
+        "docling"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "macos-arm64",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_submitted_sources.py",
+          "tests/v1/test_document_sources.py"
+        ],
+        "nodeids": [
+          "tests/v1/test_submitted_sources.py::test_document_uses_same_durable_worker_and_locator_without_audio[epub]"
+        ],
+        "docling": "epub"
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "real Docling conversion in durable worker preserves locator, deduplication, restart, publication and one knowledge request"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "final frozen application",
+        "real model semantic knowledge quality",
+        "online model download availability"
+      ]
+    },
+    {
+      "id": "SC-DOCUMENT-WORKER--pdf--windows-x64",
+      "requirements": [
+        "BUG-20260914-03"
+      ],
+      "components": [
+        "manual",
+        "docling"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "windows-x64",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_submitted_sources.py",
+          "tests/v1/test_document_sources.py"
+        ],
+        "nodeids": [
+          "tests/v1/test_submitted_sources.py::test_document_uses_same_durable_worker_and_locator_without_audio[pdf]"
+        ],
+        "docling": "pdf"
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "real Docling conversion in durable worker preserves locator, deduplication, restart, publication and one knowledge request"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "final frozen application",
+        "real model semantic knowledge quality",
+        "online model download availability"
+      ]
+    },
+    {
+      "id": "SC-DOCUMENT-WORKER--epub--windows-x64",
+      "requirements": [
+        "BUG-20260914-03"
+      ],
+      "components": [
+        "manual",
+        "docling"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "windows-x64",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_submitted_sources.py",
+          "tests/v1/test_document_sources.py"
+        ],
+        "nodeids": [
+          "tests/v1/test_submitted_sources.py::test_document_uses_same_durable_worker_and_locator_without_audio[epub]"
+        ],
+        "docling": "epub"
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "real Docling conversion in durable worker preserves locator, deduplication, restart, publication and one knowledge request"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "final frozen application",
+        "real model semantic knowledge quality",
+        "online model download availability"
       ]
     }
   ]

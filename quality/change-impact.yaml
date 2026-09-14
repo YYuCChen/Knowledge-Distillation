@@ -723,6 +723,22 @@
       ],
       "depends_on": [],
       "artifact": false
+    },
+    "docling": {
+      "owner": "E",
+      "paths": [
+        "src/knowledge_distiller/v1/docling_source.py",
+        "src/knowledge_distiller/v1/docling_component.py",
+        "src/knowledge_distiller/v1/pdf_source.py",
+        "src/knowledge_distiller/v1/epub_source.py",
+        "src/knowledge_distiller/v1/adapters/docling-models-manifest.json",
+        "src/knowledge_distiller/v1/adapters/docling-model-notices.txt",
+        "src/knowledge_distiller/v1/windows_platform.py",
+        "tests/v1/test_document_sources.py",
+        "tests/v1/test_submitted_sources.py"
+      ],
+      "depends_on": [],
+      "artifact": false
     }
   },
   "collector_paths": [

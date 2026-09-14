@@ -6,6 +6,7 @@ No command from a passport or local release input is ever executed.
 from __future__ import annotations
 
 import argparse
+import ast
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fnmatch
@@ -16,6 +17,7 @@ from pathlib import Path, PureWindowsPath, PurePosixPath
 import platform
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -165,6 +167,13 @@ def registry(root=ROOT):
             raise Gap('source browser runner proves integration only: ' + s['id'])
         if runner and runner['adapter'] == 'pytest' and s['level'] not in ('source', 'synthetic', 'integration'):
             raise Gap('pytest cannot attest native/model/visual evidence: ' + s['id'])
+        if runner and runner.get('docling'):
+            kind=runner['docling']
+            node='tests/v1/test_submitted_sources.py::test_document_uses_same_durable_worker_and_locator_without_audio['+kind+']'
+            if (runner['adapter']!='pytest' or kind not in ('pdf','epub') or s['level']!='integration'
+                    or s['platform']=='host' or runner.get('nodeids')!=[node]
+                    or not {'tests/v1/test_submitted_sources.py','tests/v1/test_document_sources.py'}<=set(runner['paths'])):
+                raise Gap('invalid real Docling scenario')
         if runner and runner['adapter'] == 'pytest':
             for node in runner.get('nodeids', []) + runner.get('deselect', []):
                 if '::' not in node or node.split('::',1)[0] not in runner['paths']:
@@ -252,7 +261,7 @@ def make_plan(base, head, release_input, output, root=ROOT):
     config = read(release_input) if release_input else {}
     selected = [s for s in scenarios if (set(s['components']) & affected or s.get('always'))
                 and (not s.get('enabled_by') or config.get(s['enabled_by']))]
-    forbidden = set(config) - {'version','product_version','artifacts','reuse_evidence','build_config','build_job','parameter_lock','audio_input'}
+    forbidden = set(config) - {'version','product_version','artifacts','reuse_evidence','build_config','build_job','parameter_lock','audio_input','docling_input'}
     if forbidden: raise Gap('unsupported release-input keys: ' + ', '.join(sorted(forbidden)))
     output = protected(output)
     if contained(output, root): raise Gap('plan output must be outside checkout')
@@ -273,6 +282,10 @@ def make_plan(base, head, release_input, output, root=ROOT):
                     try: snapshots[s['id']]['audio_inputs']=audio_identity(config['audio_input'],s)
                     except Blocked: raise
                     except Gap as exc: gaps[s['id']].append(str(exc))
+                if s['runner'].get('docling'):
+                    try: snapshots[s['id']]['docling_inputs']=docling_identity(config.get('docling_input',{}),s,root)
+                    except Blocked: raise
+                    except Gap as exc:gaps[s['id']].append(str(exc))
 
     plan = dict(schema_version=1, change_id=uuid.uuid4().hex, baseline_commit=base, head_commit=head,
                 source_root=str(root), requirement_ids=sorted({r for s in selected for r in s['requirements']}),
@@ -326,6 +339,8 @@ def load_plan(path):
         snap=plan['snapshots'].get(scenario['id'],{})
         if 'audio_inputs' in snap and audio_identity(plan['release_input']['audio_input'],scenario)!=snap['audio_inputs']:
             raise Blocked('audio inputs changed')
+        if 'docling_inputs' in snap and docling_identity(plan['release_input'].get('docling_input',{}),scenario,root)!=snap['docling_inputs']:
+            raise Blocked('Docling component changed')
     return plan
 
 
@@ -488,6 +503,82 @@ def audio_identity(config,scenario):
     return identity
 
 
+def docling_identity(config,scenario,root=ROOT):
+    try:return _docling_identity(config,scenario,root)
+    except FileNotFoundError as error:raise Gap('missing Docling model inventory/file') from error
+
+
+def _docling_identity(config,scenario,root=ROOT):
+    kind=scenario['runner']['docling']
+    if kind=='epub':return {'kind':'epub','model_required':False}
+    entry=config.get(scenario['platform'])
+    if not entry:raise Gap('missing explicit Docling model component for '+scenario['platform'])
+    if set(entry)!={'models_root','component_identity','tree_sha256'}:raise Gap('invalid Docling input fields')
+    supplied=Path(entry['models_root'])
+    if not supplied.is_absolute() or '..' in supplied.parts:raise Gap('Docling models_root must be an absolute lexical path')
+    # Do not let protected() resolve away a linked model root or ancestor.
+    for parent in [supplied,*supplied.parents]:
+        try:info=parent.lstat()
+        except FileNotFoundError:raise Gap('missing explicit Docling model directory')
+        if stat.S_ISLNK(info.st_mode) or getattr(info,'st_file_attributes',0)&0x400:
+            raise Blocked('linked Docling component input')
+    models=protected(supplied)
+    trusted=read(root/'src/knowledge_distiller/v1/adapters/docling-models-manifest.json')
+    identity=hashlib.sha256(json.dumps(trusted,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    if entry['component_identity']!=identity:raise Blocked('Docling trusted identity mismatch')
+    if read(models/'manifest.json')!=trusted:raise Blocked('Docling manifest differs from trusted inventory')
+    for name,expected in trusted['files'].items():
+        relative=PurePosixPath(name)
+        if relative.is_absolute() or '..' in relative.parts or '\\' in name or ':' in name:
+            raise Blocked('invalid Docling inventory path')
+        path=models.joinpath(*relative.parts)
+        for parent in [path,*list(path.parents)[:len(relative.parts)-1]]:
+            info=parent.lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info,'st_file_attributes',0)&0x400:
+                raise Blocked('linked Docling component input')
+        if path.stat().st_size!=expected['size'] or digest(path)!=expected['sha256']:
+            raise Blocked('Docling model bytes differ')
+    measured=tree_digest(models)
+    if measured!=entry['tree_sha256']:raise Blocked('Docling tree changed')
+    return {'kind':'pdf','model_required':True,'component_identity':identity,'tree_sha256':measured,
+        'trusted_manifest_sha256':digest(root/'src/knowledge_distiller/v1/adapters/docling-models-manifest.json')}
+
+
+def docling_environment(env,scenario,plan,attempt):
+    if not scenario['runner'].get('docling'):return
+    env.pop('KNOWLEDGE_DISTILLER_DOCLING_MODELS',None)
+    cache=attempt/'document-cache'
+    env.update(HF_HOME=str(cache/'hf'),HF_HUB_CACHE=str(cache/'hf/hub'),HUGGINGFACE_HUB_CACHE=str(cache/'hf/hub'),
+        TRANSFORMERS_CACHE=str(cache/'transformers'),XDG_CACHE_HOME=str(cache),HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1')
+    if scenario['runner']['docling']=='pdf':
+        entry=plan['release_input']['docling_input'][scenario['platform']]
+        env['KNOWLEDGE_DISTILLER_DOCLING_MODELS']=str(protected(entry['models_root']))
+
+
+def validate_docling(folder,plan,scenario):
+    expected=plan['snapshots'][scenario['id']]['docling_inputs']
+    measured=(plan['_portable_docling'][scenario['id']] if '_portable_docling' in plan else
+        docling_identity(plan['release_input'].get('docling_input',{}),scenario,Path(plan['source_root'])))
+    if measured!=expected:return 'failed','docling_input_identity_changed'
+    runtime=read(folder/'execution-docling.json')
+    if runtime.get('inputs')!=expected:return 'failed','docling_recorded_input_mismatch'
+    packages=runtime.get('packages',{})
+    module=ast.parse((Path(plan['source_root'])/'src/knowledge_distiller/v1/docling_source.py').read_text(encoding='utf-8'))
+    versions=[ast.literal_eval(node.value) for node in module.body if isinstance(node,ast.Assign)
+        and any(isinstance(target,ast.Name) and target.id=='DOCLING_VERSION' for target in node.targets)]
+    if len(versions)!=1 or packages.get('docling')!=versions[0] or any(not packages.get(k) for k in ('docling-core','docling-ibm-models','torch','onnxruntime','rapidocr')):
+        return 'failed','docling_package_identity_mismatch'
+    if runtime.get('offline')!={'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1'}:
+        return 'failed','docling_offline_environment_missing'
+    # These are execution-host labels, never paths opened by portable verification.
+    if scenario['runner']['docling']=='pdf':
+        original=plan['release_input']['docling_input'][scenario['platform']]['models_root']
+        path_type=PureWindowsPath if scenario['platform'].startswith('windows-') else PurePosixPath
+        if path_type(runtime.get('models_root',''))!=path_type(original):return 'failed','docling_model_environment_mismatch'
+    elif runtime.get('models_root') is not None:return 'failed','unexpected_epub_model_input'
+    return 'passed',None
+
+
 def read_pcm(path):
     import wave
     if Path(path).is_symlink():raise Blocked('linked PCM evidence')
@@ -555,7 +646,7 @@ def validate_audio(folder,plan,scenario):
 
 def output_paths(scenario, attempt=None):
     adapter=scenario['runner']['adapter']
-    if adapter=='pytest': return ['junit.xml']
+    if adapter=='pytest': return ['junit.xml',*(['execution-docling.json'] if scenario['runner'].get('docling') else [])]
     if adapter=='verify_candidate':
         return ['verification/'+n for n in ('result.json','runtime.json','helper-runtime.json','runtime.log','launch.log','support.md')]
     if adapter=='audio_pcm':return ['verification/result.json','verification/normalization/standard.wav',*[f'verification/{n}.wav' for n in ('head','window8','worker20','segment300','tail')]]
@@ -650,6 +741,7 @@ def validate_result(scenario, attempt, returncode, plan=None, logdir=None):
         if not cases: return 'not_run', 'empty_collection'
         if any(list(c.iter('skipped')) for c in cases): return 'not_run', 'skipped_assertions'
         if any(list(c.iter('failure')) or list(c.iter('error')) for c in cases): return 'failed', 'assertion_failure'
+        if scenario['runner'].get('docling'):return validate_docling(attempt,plan,scenario)
     elif scenario['runner']['adapter'] == 'verify_candidate':
         result = read(attempt/'verification/result.json')
         if result.get('ok') is not True: return 'failed', 'candidate_verification'
@@ -821,6 +913,15 @@ def run(plan, path, gate, disposable):
                                LOCALAPPDATA=str(home/'AppData/Local'),TMPDIR=str(attempt),TEMP=str(attempt),TMP=str(attempt),
                                PYTHONPATH=str(root/'src')+os.pathsep+str(root),PYTHONUTF8='1',PYTHONDONTWRITEBYTECODE='1',
                                PYTEST_DISABLE_PLUGIN_AUTOLOAD='1',KNOWLEDGE_DISTILLER_DATA_DIR=str(attempt/'data'))
+                    docling_environment(env,scenario,plan,attempt)
+                    if scenario['runner'].get('docling'):
+                        identity=docling_identity(plan['release_input'].get('docling_input',{}),scenario,root)
+                        if identity!=plan['snapshots'][scenario['id']]['docling_inputs']:raise Blocked('Docling inputs changed before run')
+                        probe='import os,json,importlib.metadata as m; print(json.dumps(dict(packages={k:m.version(k) for k in ("docling","docling-core","docling-ibm-models","torch","onnxruntime","rapidocr")},models_root=os.environ.get("KNOWLEDGE_DISTILLER_DOCLING_MODELS"),offline={k:os.environ.get(k) for k in ("HF_HUB_OFFLINE","TRANSFORMERS_OFFLINE")})))'
+                        try:runtime=json.loads(subprocess.check_output([sys.executable,'-c',probe],cwd=root,env=env,text=True))
+                        except subprocess.CalledProcessError as error:raise Gap('Docling execution packages unavailable') from error
+                        runtime['inputs']=identity
+                        atomic(attempt/'execution-docling.json',runtime)
                     if os.name != 'nt' and scenario['runner']['adapter'] in ('desktop_browser', 'manual_browser'):
                         # Unix socket paths have a 103-byte macOS limit; the isolated HOME is longer.
                         browser_sockets = tempfile.TemporaryDirectory(prefix='kdbr-', dir='/tmp')
@@ -905,8 +1006,13 @@ def export_evidence(path, output):
                 raise Blocked('invalid portable output')
             copy(source,record['path'])
     audio={}
+    docling={}
     for scenario in plan['scenarios']:
         snap=plan['snapshots'].get(scenario['id'],{})
+        if 'docling_inputs' in snap:
+            measured=docling_identity(plan['release_input'].get('docling_input',{}),scenario,Path(plan['source_root']))
+            if measured!=snap['docling_inputs']:raise Blocked('Docling input changed before export')
+            docling[scenario['id']]=measured
         if 'audio_inputs' in snap:
             measured=audio_identity(plan['release_input']['audio_input'],scenario)
             if measured!=snap['audio_inputs']:raise Blocked('audio input changed before export')
@@ -920,7 +1026,7 @@ def export_evidence(path, output):
         if plan['release_input'].get(key)}
     receipt={'schema_version':1,'plan_sha256':plan['plan_sha256'],'source_commit':plan['head_commit'],
         'execution_platform':plan.get('execution_platform',host_platform()),'files':files,
-        'audio_inputs':audio,'configuration_identities':configuration_identities,
+        'audio_inputs':audio,'docling_inputs':docling,'configuration_identities':configuration_identities,
         'original_audio_fixture':original_fixture,'exported_at':now(),
         'scope':'Recorded execution and component identity; not current remote availability.'}
     receipt['receipt_sha256']=object_hash(receipt)
@@ -950,6 +1056,8 @@ def load_portable_plan(path, source_root):
         if not snap:continue
         current=snapshot(scenario,read(source_root/'quality/change-impact.yaml'),source_root)
         if any(snap.get(k)!=v for k,v in current.items()):raise Blocked('portable source dependencies changed')
+        if 'docling_inputs' in snap and receipt.get('docling_inputs',{}).get(scenario['id'])!=snap['docling_inputs']:
+            raise Blocked('portable Docling identity changed')
         if 'audio_inputs' in snap and receipt['audio_inputs'].get(scenario['id'])!=snap['audio_inputs']:
             raise Blocked('portable component identity changed')
         for key,expected_hash in snap.get('execution_inputs',{}).items():
@@ -958,6 +1066,7 @@ def load_portable_plan(path, source_root):
     # A new in-memory inspection view only. No re-sealing, editing or execution of old evidence.
     plan['source_root']=str(source_root)
     plan['_portable_audio']=receipt['audio_inputs']
+    plan['_portable_docling']=receipt.get('docling_inputs',{})
     plan['_original_audio_fixture']=receipt['original_audio_fixture']
     if receipt['audio_inputs']:
         config=plan['release_input']['audio_input']
@@ -993,7 +1102,8 @@ def inspect_with_peers(plan,path,gate,bundles):
                 raise Blocked('ambiguous peer evidence')
             sources[scenario_id]={'bundle':str(bundle),'plan_id':peer['change_id'],
                 'evidence_id':passport['evidence_id'],'execution_inputs':peer['snapshots'][scenario_id].get('execution_inputs',{}),
-                'audio_inputs':peer['snapshots'][scenario_id].get('audio_inputs')}
+                'audio_inputs':peer['snapshots'][scenario_id].get('audio_inputs'),
+                'docling_inputs':peer['snapshots'][scenario_id].get('docling_inputs')}
             rows[scenario_id]={'scenario_id':scenario_id,'level':scenario['level'],'platform':scenario['platform'],
                 'result':'passed','evidence_id':passport['evidence_id'],'peer_plan_id':peer['change_id']}
     all_rows=list(rows.values())

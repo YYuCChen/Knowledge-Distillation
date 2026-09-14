@@ -124,3 +124,27 @@ python scripts/quality.py report --plan <mac-plan>/plan.json --gate contract --p
 ```
 
 peer 只补精确匹配其执行平台的 source/synthetic/integration 子场景；保留原 evidence ID、peer plan ID 和各平台配置/音频身份。`host` 行不混用，native、model_real、visual、remote_readback 不通过 peer 导入放行。缺场景、原始失败、hash/契约不符、开放 S0/S1 仍然阻断。最终成品及独立 native/发行门继续使用各自实物证据。
+
+## Docling 显式组件与文档工作流
+
+`test_submitted_sources.py::test_document_uses_same_durable_worker_and_locator_without_audio[pdf]` 与 `[epub]` 从 `SC-MANUAL-FIFO--synthetic` 精确拆出，分别登记为两平台的 `SC-DOCUMENT-WORKER--pdf/epub--<platform>`，证据等级为 integration。仍运行原始节点和原断言，辅助生成材料的 `test_document_sources.py` 同时参与输入指纹；不会因拆分而漏掉去重、worker中断恢复、来源定位、发布及模型调用次数检查。
+
+PDF 场景要求 release-input 显式提供对应执行平台的独立组件：
+
+```json
+{
+  "docling_input": {
+    "windows-x64": {
+      "models_root": "<absolute-independent-model-directory>",
+      "component_identity": "<canonical-trusted-manifest-identity>",
+      "tree_sha256": "<quality.tree_digest-of-this-platform-model-directory>"
+    }
+  }
+}
+```
+
+Mac 使用 `macos-arm64` 键。`models_root` 指向含 `manifest.json`、RapidOcr、Docling模型目录的那一层；必须是绝对路径，不能借系统或正式资料目录。身份来自源码受信清单的规范JSON摘要，工具逐项核对清单、文件内容、目录树及普通路径，拒绝链接/重解析点。路径只定位输入，不作为跨机组件身份。EPUB 仍执行真实Docling解析，但不要求PDF权重，独立登记为无模型依赖。
+
+计划、执行前、结果核验及导出都重查组件身份。只向对应场景注入 `KNOWLEDGE_DISTILLER_DOCLING_MODELS`；HF缓存位于本次attempt内部，`HF_HUB_OFFLINE=1`、`TRANSFORMERS_OFFLINE=1`，不会依赖用户原HOME缓存或隐式联网补模型。每次执行生成 `execution-docling.json`，记录实际Docling、docling-core、docling-ibm-models、Torch、ONNXRuntime、RapidOCR版本、组件身份及模型路径/离线环境，并与JUnit及护照输出哈希绑定。缺显式组件/运行依赖保持not_run，字节或实际结果错误阻断。
+
+复用须匹配 `docling_inputs`。portable导出保留受核验的组件身份与原运行记录，不复制1GB级模型；汇总端只核验原计划、源码、receipt及输出，在内存中使用原身份记录，不打开原机器绝对路径。`peer-bundle` 可汇总这些精确平台integration结果，不能将它们升级为最终冻结应用验收或声称原机器此刻仍有模型。
