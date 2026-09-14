@@ -18,6 +18,7 @@ from .component_assembly import ComponentAssembly
 from .component_install import install, recover, finalize_install
 from .component_release import MAX_MANIFEST
 from .component_download import ComponentDownloader
+from .install_problem import problem_from
 from .installer_platform import pick_path, create_shortcut, manual_command, KINDS
 from .updates import UpdateError, validate_install_paths
 
@@ -69,6 +70,8 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                 event('startup')
                 outcome = recover(target, root)
                 if outcome.get('accepted'):
+                    capability = context['assembler'].capability_for(context['candidate']) if context.get('candidate') is not None else None
+                    outcome = finalize_install(outcome, capability=capability, shortcut=lambda:create_shortcut(target,root))
                     publish_outcome(outcome)
                     state.update(complete=outcome['activation']['status'] == 'ready', ready=False,
                         message='安装已接受。' + ' '.join(outcome.get('warnings', [])))
@@ -87,6 +90,7 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                     else:
                         current = json.loads((target / '_internal/windows-version.json').read_text(encoding='utf-8'))['version']
                 state['steps'][0] = 'complete'
+                event('prepare')
                 offline = context['manifest_path']
                 if offline is not None:
                     with offline.open('rb') as stream:
@@ -116,6 +120,7 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                 if offline and plan.download_bytes:
                     raise UpdateError('离线目录缺少本次所需组件，尚未开始安装。请补齐发行文件后重试。')
                 context.update(assembler=assembler, release=release, plan=plan, candidate=None)
+                state['steps'][1] = 'pending'
                 state.update(ready=True, version=release['version'],
                     download=f'{plan.download_bytes / 1024**2:.1f} MB',
                     message='发行签名与可复用组件已检查。确认后将准备组件并切换程序。')
@@ -145,18 +150,17 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                 state.update(complete=outcome['activation']['status'] == 'ready', ready=False,
                     message=('知识蒸馏器已安装并通过启动检查。' if outcome['activation']['status'] == 'ready'
                              else '安装已接受，启动放行待恢复。') + ' '.join(outcome['warnings']))
-        except httpx.HTTPStatusError as error:
-            status = error.response.status_code
-            state['error'] = (
-                '当前发布尚未提供此平台的组件安装清单，请稍后重试。程序未被替换。' if status == 404 else
-                '下载服务拒绝访问（HTTP ' + str(status) + '），请检查网络访问权限后重试。' if status in {401, 403} else
-                '下载服务暂时不可用（HTTP ' + str(status) + '），请稍后重试。已有下载会保留。')
-        except httpx.RequestError:
-            state['error'] = '无法连接下载服务，请检查网络后重试。已有下载会保留。'
         except Exception as error:
-            state['error'] = str(error)
+            journal = context['root'] / 'updates/component-install-journal.json'
+            accepted = bool(context.get('outcome',{}).get('accepted'))
+            data_state = 'unknown' if journal.exists() else 'restored' if state.get('stage') in {'install','startup'} else 'unchanged'
+            problem = problem_from(error,stage=state.get('stage','prepare'),
+                role='manifest' if action == 'prepare' and state.get('steps',[None])[0]=='complete' else
+                     'data' if state.get('stage')=='paths' else 'candidate',
+                accepted=accepted,data_state=data_state)
+            state.update(error=str(problem), problem=problem.to_dict())
             for index, status in enumerate(state['steps']):
-                if status == 'working': state['steps'][index] = 'cancelled' if isinstance(error,InterruptedError) else 'attention'
+                if status == 'working': state['steps'][index] = 'cancelled' if problem.category=='cancelled' else 'attention'
         finally:
             state['busy'] = False
             operation.release()

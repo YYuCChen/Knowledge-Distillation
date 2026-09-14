@@ -11,6 +11,7 @@ from uuid import uuid4
 import httpx
 from .component_assembly import ComponentAssembly
 from .component_install import install, finalize_install
+from .install_problem import problem_from
 from .component_release import MAX_MANIFEST
 from .updates import UpdateError, validate_install_paths
 
@@ -89,7 +90,11 @@ def run(plan_path):
         return 0
     except Exception as error:
         (root / 'updates').mkdir(parents=True, exist_ok=True)
-        (root / 'updates/install-error.txt').write_text(str(error), encoding='utf-8')
+        accepted = bool(locals().get('outcome',{}).get('accepted'))
+        problem = problem_from(error,stage='install' if 'candidate' in locals() else 'prepare',
+            role='candidate' if 'candidate' in locals() else 'manifest',accepted=accepted,
+            data_state='unknown' if (root/'updates/component-install-journal.json').exists() else 'unchanged')
+        (root / 'updates/install-error.txt').write_text(str(problem), encoding='utf-8')
         return 1
     finally:
         (root / 'updates/shutdown-request').unlink(missing_ok=True)

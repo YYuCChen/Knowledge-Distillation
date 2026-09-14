@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import time
 
+from .install_problem import problem_from
 from .component_attempt import create_attempt, bind_candidate
 from .component_release import parse_release, plan_release
 from .component_download import ComponentDownloader
@@ -27,6 +28,10 @@ class ComponentAssembly:
         self.downloader = downloader or ComponentDownloader(cache_root)
 
     def prepare(self, envelope, *, installed=None, current='0'):
+        try: return self._prepare(envelope, installed=installed, current=current)
+        except Exception as error: raise problem_from(error,stage='prepare',role='manifest') from error
+
+    def _prepare(self, envelope, *, installed=None, current='0'):
         release = parse_release(envelope, self.public_key, platform=self.platform, current=current)
         model = DoclingComponent(self.components_root)
         model_id = None
@@ -51,7 +56,11 @@ class ComponentAssembly:
         return release, plan_release(release, verified_current_identity=current_id,
             verified_model_identity=model_id, verified_cached_assets=cached)
 
-    def assemble(self, release, plan, work_root, *, installed=None, cancelled=lambda: False,
+    def assemble(self, release, plan, work_root, **kwargs):
+        try: return self._assemble(release,plan,work_root,**kwargs)
+        except Exception as error: raise problem_from(error,stage='verify',role='candidate') from error
+
+    def _assemble(self, release, plan, work_root, *, installed=None, cancelled=lambda: False,
                  progress=lambda received, total: None, event=lambda *a, **k:None):
         """Never stops or replaces an installed application; produces a checked candidate."""
         started = time.monotonic()
@@ -60,6 +69,7 @@ class ComponentAssembly:
         if installed is not None: excluded.append(installed)
         capability = create_attempt(root, excluded=excluded)
         self.attempts[str(root)] = capability
+        event('prepare', attempt_id=capability.attempt_id)
         candidate = root / ('candidate.app' if self.platform == 'macos-arm64' else 'candidate')
         if candidate.exists():
             raise UpdateError('安装暂存目录已存在，请先恢复上次安装。')
@@ -69,7 +79,11 @@ class ComponentAssembly:
                 raise InterruptedError('component_assembly_cancelled')
             from urllib.parse import urlsplit
             event('prepare', asset=urlsplit(asset['url']).path.rsplit('/',1)[-1], bytes_done=0, bytes_total=asset['size'])
-            assets[asset['sha256']] = self.downloader.fetch(asset, cancelled=cancelled, progress=progress)
+            role = 'base' if asset['sha256'] == release['base']['sha256'] else 'docling' if asset['sha256'] == release['docling']['sha256'] else 'delta'
+            try:
+                assets[asset['sha256']] = self.downloader.fetch(asset, cancelled=cancelled, progress=progress)
+            except Exception as error:
+                raise problem_from(error,stage='prepare',role=role,asset=asset) from error
         model = DoclingComponent(self.components_root)
         if release['docling']['sha256'] in assets:
             model.import_archive(assets[release['docling']['sha256']])

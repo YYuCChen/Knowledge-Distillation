@@ -67,7 +67,7 @@ def _windows_picker(kind):
                 raise
         selected = shell.SHBrowseForFolder(0,None,'选择本机文件夹',
             shellcon.BIF_RETURNONLYFSDIRS | shellcon.BIF_NEWDIALOGSTYLE)
-        return shell.SHGetPathFromIDList(selected[0]).decode('utf-8') if selected and selected[0] else None
+        return shell.SHGetPathFromIDListW(selected[0]) if selected and selected[0] else None
     finally: pythoncom.CoUninitialize()
 
 
@@ -85,12 +85,16 @@ def create_shortcut(target, data_root):
     executable = target/'KnowledgeDistiller.exe'
     pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
     temporary = None
+    engine = link = check = None
     try:
         desktop = Path(shell.SHGetKnownFolderPath('{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}',0,None))
         desktop.mkdir(parents=True,exist_ok=True)
         engine=Dispatch('WScript.Shell')
         def owned(path):
             if not path.is_file() or path.is_symlink(): return False
+            # Do not hand an arbitrary same-name file to Shell's binary parser.
+            with path.open('rb') as stream: header = stream.read(20)
+            if header != bytes.fromhex('4c0000000114020000000000c000000000000046'): return False
             link=engine.CreateShortcut(str(path))
             return (link.Description == _MARKER and Path(link.TargetPath).name.casefold() == 'knowledgedistiller.exe'
                     and '--data-dir' in link.Arguments)
@@ -116,4 +120,5 @@ def create_shortcut(target, data_root):
         return {'status':'complete','path':str(destination),'warning':warning}
     finally:
         if temporary: temporary.unlink(missing_ok=True)
+        check = link = engine = None
         pythoncom.CoUninitialize()
