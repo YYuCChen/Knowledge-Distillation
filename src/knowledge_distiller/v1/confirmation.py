@@ -140,7 +140,7 @@ def locate_concern_audio(
     # the edited text do not identify an occurrence in the original audio.
     aligned = _aligned_chunk_range(audio, recovery, candidate_text, concern, blocks)
     if aligned is not None:
-        return aligned
+        return _preview_window(*aligned, audio.duration_seconds)
     matches: list[tuple[object, int, str]] = []
     for chunk in recovery.chunks:
         for reading in (concern.text, *concern.candidate_readings):
@@ -196,13 +196,10 @@ def _aligned_chunk_range(audio, recovery, candidate_text, concern, blocks=None):
     if recovery.timeline_status == 'recovered_windows':
         # The independent recognizer supplies text for a real bounded window,
         # not word timestamps. Include that entire window; never interpolate.
-        if last.end_seconds - first.start_seconds > 10:
-            return None
-        return _preview_window(first.start_seconds, last.end_seconds, audio.duration_seconds)
-    return _preview_window(
+        return first.start_seconds, last.end_seconds
+    return (
         _estimate_time(first, start - first_offset),
         _estimate_time(last, end - last_offset),
-        audio.duration_seconds,
     )
 
 

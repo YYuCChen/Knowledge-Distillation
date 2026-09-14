@@ -26,3 +26,14 @@ def test_preview_contains_target_at_source_edges():
 def test_preview_rejects_even_slightly_oversized_target():
     from knowledge_distiller.v1.confirmation import _preview_window
     assert _preview_window(3, 13.001, 25) is None
+
+
+def test_long_aligned_target_cannot_fall_back_to_short_alternative(tmp_path):
+    path = tmp_path / 'source.wav'
+    path.write_bytes(b'present')
+    raw = 'begin alpha beta gamma delta epsilon finish'
+    candidate = 'begin alpha corrected gamma delta epsilon finish'
+    recovery = PrimaryRecovery(raw, 'en', (PrimaryChunk(raw, 0, 28, 'en'),), timeline_status='available')
+    start, end = candidate.index('alpha'), candidate.index(' finish')
+    concern = ReviewConcern(start, end, candidate[start:end], 'unclear', True, ('gamma',))
+    assert locate_concern_audio(StandardAudio(path, 28), recovery, candidate, concern) is None
