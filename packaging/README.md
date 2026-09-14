@@ -70,7 +70,10 @@ platform base with `scripts/package_platform_base.py`. The base contains runtime
 code and platform resources (including Windows Paddle models), while the common
 Docling weights remain external. Qwen stays optional and independent.
 
-Use `scripts/build_component_installer.py` on each native platform. Verify actual
+Use `scripts/build_component_installer.py` on each native platform with explicit
+`--version` and `--product-version` from the same candidate request as the app.
+`dual_build.py` passes those values to both installers; Mac bundle and Windows PE
+metadata are generated before signing/packaging, without a separate version constant. Verify actual
 frozen runtime, offline PDF/EPUB, old full-bundle model import, installation and
 rollback before publishing. These scripts alone do not constitute release acceptance.
 The older `package_mac.py` and `package_windows.py` create local validation archives;
