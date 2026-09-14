@@ -103,8 +103,8 @@ def test_installer_command_keeps_version_identity_icon_and_resources(tmp_path, m
         assert 'pythoncom' in command
     manifest = json.loads((output/'build-manifest.json').read_text())
     assert manifest['version'] == '2026.09.14.3' and manifest['product_version'] == '1.3'
-    assert any('installer_assets/page.html' in value for value in command)
-    assert any('installer_assets/installer-logo.svg' in value for value in command)
+    assert any('installer_assets/page.html' in value.replace('\\', '/') for value in command)
+    assert any('installer_assets/installer-logo.svg' in value.replace('\\', '/') for value in command)
     assert 'knowledge_distiller.v1.component_attempt' in command
 
 
