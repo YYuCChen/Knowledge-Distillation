@@ -1,0 +1,9 @@
+{
+  "source": "src/knowledge_distiller/v1/installer_assets/installer-logo.svg",
+  "source_sha256": "321f006c30fb9fb16b6e6ddd5d291d98b0f6b485a3c87a6dd7b2c573d9c21fa6",
+  "method": "macOS NSImage SVG renderer; native iconutil; Pillow ICO",
+  "files": {
+    "installer-icon.ico": "b572450f289c698aa19ec6cfa1121749d060f5019e6538e945f96d2acd13155a",
+    "installer-icon.icns": "909be1e686f4f0d5aecd461553c6dccf35d3643179b28812ce5a06739c77c4bc"
+  }
+}

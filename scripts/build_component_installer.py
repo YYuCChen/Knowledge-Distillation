@@ -29,8 +29,12 @@ def main():
     if not tool.is_file():
         parser.error('缺少固定版本差量解码器。')
     resources = project / 'src/knowledge_distiller/v1/adapters'
+    resource_api = runpy.run_path(str(project / 'packaging/resources.py'))
+    icon = project / 'packaging/assets' / ('installer-icon.ico' if windows else 'installer-icon.icns')
+    if not icon.is_file():
+        parser.error('缺少安装器图标；先在 Mac 上运行 scripts/build_installer_icon.py。')
     command = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--noupx', '--onefile',
-        '--name', 'KnowledgeDistillerInstaller', '--paths', str(project / 'src'),
+        '--name', 'KnowledgeDistillerInstaller', '--icon', str(icon), '--paths', str(project / 'src'),
         '--distpath', str(args.output / 'dist'), '--workpath', str(args.output / 'work'),
         '--specpath', str(args.output), '--add-binary', str(tool) + os.pathsep + 'tools']
     for source, destination in [
@@ -40,9 +44,11 @@ def main():
         (resources / 'python-runtime.json', 'knowledge_distiller/v1/adapters'),
         (resources / 'docling-models-manifest.json', 'knowledge_distiller/v1/adapters')]:
         command += ['--add-data', str(source) + os.pathsep + destination]
-    if windows:
-        command += ['--hidden-import', 'win32job']
-    else:
+    for source, destination in resource_api['installer_datas'](project):
+        command += ['--add-data', source + os.pathsep + destination]
+    for module in resource_api['installer_hiddenimports'](sys.platform):
+        command += ['--hidden-import', module]
+    if not windows:
         command += ['--windowed', '--osx-bundle-identifier', 'local.knowledge-distiller.installer']
     command += [str(project / 'packaging/component_installer_entry.py')]
     with (args.output / 'build.log').open('w') as log:

@@ -78,6 +78,8 @@ knowledge_distiller = [
   "v1/adapters/update-codec-notices.txt",
   "v1/adapters/docling-model-notices.txt",
   "v1/templates/*.html",
+  "v1/installer_assets/*.html",
+  "v1/installer_assets/*.svg",
   "v1/static/*.css",
   "v1/static/*.js",
   "v1/static/fonts/*.md",

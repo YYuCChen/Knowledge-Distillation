@@ -32,3 +32,26 @@ def opencli_datas(root: Path) -> list[tuple[str, str]]:
                      and not (folder == 'dist' and path.name.endswith(('.test.js', '.map', '.d.ts'))))
     return [(str(path), (Path('opencli') / path.relative_to(root).parent).as_posix())
             for path in sorted(files)]
+
+
+def installer_datas(project: Path) -> list[tuple[str, str]]:
+    """The installer reads these files by package-relative paths at runtime."""
+    root = project / 'src/knowledge_distiller/v1/installer_assets'
+    files = [root / name for name in ('page.html', 'installer-logo.svg')]
+    for path in files:
+        if not path.is_file():
+            raise RuntimeError(f'Installer release resource missing: {path.name}')
+    return [(str(path), 'knowledge_distiller/v1/installer_assets') for path in files]
+
+
+def installer_hiddenimports(platform: str) -> list[str]:
+    """Shared installer/helper bridge inputs; no imports or platform side effects."""
+    common = ['knowledge_distiller.v1.component_attempt',
+              'knowledge_distiller.v1.installer_platform',
+              'knowledge_distiller.v1.install_problem']
+    if platform == 'win32':
+        return common + ['win32job', 'pythoncom', 'pywintypes', 'win32gui',
+                         'win32com.shell.shell', 'win32com.shell.shellcon', 'win32com.client']
+    if platform == 'darwin':
+        return common + ['AppKit', 'Foundation']
+    raise ValueError('Unsupported installer target platform')
