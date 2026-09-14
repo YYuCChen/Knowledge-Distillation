@@ -13,3 +13,16 @@ def test_long_target_is_unavailable_instead_of_silently_cropped(tmp_path):
     recovery=PrimaryRecovery(text,'en',(PrimaryChunk(text,0,20,'en'),),timeline_status='available')
     concern=ReviewConcern(0,len(text),text,'unclear',True)
     assert locate_concern_audio(StandardAudio(path,20),recovery,text,concern) is None
+
+
+def test_preview_contains_target_at_source_edges():
+    from knowledge_distiller.v1.confirmation import _preview_window
+    for start, end, duration in ((0, 3, 25), (22, 25, 25), (7, 17, 25), (0, 6, 6)):
+        left, right = _preview_window(start, end, duration)
+        assert 0 <= left <= start < end <= right <= duration
+        assert right - left == min(10, duration)
+
+
+def test_preview_rejects_even_slightly_oversized_target():
+    from knowledge_distiller.v1.confirmation import _preview_window
+    assert _preview_window(3, 13.001, 25) is None

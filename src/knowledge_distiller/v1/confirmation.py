@@ -216,10 +216,14 @@ def _estimate_time(chunk, offset: int) -> float:
     return chunk.start_seconds + (chunk.end_seconds - chunk.start_seconds) * position / len(units)
 
 
-def _preview_window(start: float, end: float, duration: float) -> tuple[float, float]:
+def _preview_window(start: float, end: float, duration: float) -> tuple[float, float] | None:
     # Text context length never controls playback length. Keep a ten-second
     # listening window around the concern, shifting at the source boundaries.
     length = min(10.0, duration)
+    # A short preview must contain the complete located target. A longer
+    # target remains unavailable so callers retain the recovery path.
+    if end - start > length:
+        return None
     left = max(0.0, min((start + end) / 2 - length / 2, duration - length))
     return left, left + length
 
