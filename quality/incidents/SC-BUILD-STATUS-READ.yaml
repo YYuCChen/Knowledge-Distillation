@@ -1,0 +1,41 @@
+{
+  "id": "SC-BUILD-STATUS-READ",
+  "requirement_ids": [
+    "ENG-20260914-01"
+  ],
+  "symptom": "Windows build status read can collide with atomic status replacement and raise transient PermissionError.",
+  "evidence_state": "bounded_read_retry_verified_on_actual_windows",
+  "severity": "S1",
+  "decision": "must_fix_now",
+  "affected_components": [
+    "build"
+  ],
+  "corruption_or_privacy": "Build orchestration stops before packaging; no knowledge data affected.",
+  "core_path": true,
+  "propagation": [
+    "build"
+  ],
+  "workaround": null,
+  "verification": [
+    "tests/test_build_job.py"
+  ],
+  "owner": "E",
+  "target": "V1.3",
+  "status": "closed",
+  "original_evidence": "V1.3开发-20260914/build-evidence/windows-final-native-failed.log",
+  "scenario_ids": [
+    "SC-RELEASE-INTEGRITY--synthetic",
+    "SC-BUILD-CHILD--windows-x64"
+  ],
+  "closure_scope": "Both status readers use the same bounded Windows retry; persistent denial and corrupt JSON still fail. Fixed native preflight completed with 93 passed and 2 platform-specific skips.",
+  "closure_limits": [
+    "Final packaging and build artifact validation remain independently required"
+  ],
+  "evidence_references": [
+    {
+      "locator": "V1.3开发-20260914/build-evidence/windows-15.2-native-tool-fixed.log",
+      "sha256": "b977e8ce895e87487a137c5ead05e598e937ca625ae414db6bda0492b609e2ab",
+      "scope": "Actual Windows native preflight; platform skips are not passes"
+    }
+  ]
+}
