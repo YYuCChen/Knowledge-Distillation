@@ -23,7 +23,7 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 GATES = ('module', 'contract', 'candidate', 'native', 'release')
-ADAPTERS = {'pytest', 'verify_candidate', 'build_job', 'dual_build', 'manual_browser', 'desktop_browser'}
+ADAPTERS = {'pytest', 'verify_candidate', 'build_job', 'dual_build', 'manual_browser', 'desktop_browser', 'audio_pcm', 'audio_engine'}
 LEVELS = ('source', 'synthetic', 'integration', 'native', 'model_real', 'visual', 'remote_readback')
 
 
@@ -152,13 +152,15 @@ def registry(root=ROOT):
         if runner:
             fixed={'manual_browser':{'tests/v1/browser/manual_browser.py','tests/v1/browser/manual_fixture.py','tests/v1/browser/manual_samples.js'},
                    'verify_candidate':{'scripts/verify_candidate.py'},'build_job':{'scripts/build_job.py'},'dual_build':{'scripts/dual_build.py'}}
+            if runner['adapter'] in ('audio_pcm','audio_engine'):
+                fixed[runner['adapter']]={'scripts/probe_audio_pcm.py'} if runner['adapter']=='audio_pcm' else {'scripts/probe_audio_boundaries.py', 'src/knowledge_distiller/v1/adapters/'+('qwen_worker.py' if s['platform']=='macos-arm64' else 'qwen_windows_worker.py')}
             if runner['adapter']=='desktop_browser':
                 if runner.get('case') not in ('protocol','slow-open'):raise Gap('invalid desktop browser case')
                 fixed['desktop_browser']={'quality/run_desktop_browser.py','tests/v1/desktop/browser_fixture.py',
                     'tests/v1/desktop/'+('run_browser_protocol.py' if runner['case']=='protocol' else 'slow_open_browser.py')}
             if not fixed.get(runner['adapter'],set())<=set(runner.get('paths',[])):
                 raise Gap('adapter execution paths must be fingerprinted: '+s['id'])
-        if runner and runner['adapter'] in ('manual_browser','desktop_browser') and s['level'] != 'integration':
+        if runner and runner['adapter'] in ('manual_browser','desktop_browser','audio_pcm','audio_engine') and s['level'] != 'integration':
             raise Gap('source browser runner proves integration only: ' + s['id'])
         if runner and runner['adapter'] == 'pytest' and s['level'] not in ('source', 'synthetic', 'integration'):
             raise Gap('pytest cannot attest native/model/visual evidence: ' + s['id'])
@@ -237,7 +239,7 @@ def make_plan(base, head, release_input, output, root=ROOT):
     product_affected = {c for c,spec in impact['components'].items()
                         if any(matches(p,spec['paths']) for p in paths
                                if not p.startswith(('tests/','docs/','quality/','.github/'))
-                               and p != 'scripts/quality.py')}
+                               and not matches(p,impact.get('collector_paths',['scripts/quality.py'])))}
     while True:
         expanded = affected | {c for c,spec in impact['components'].items() if set(spec.get('depends_on',[])) & affected}
         if expanded == affected: break
@@ -249,7 +251,7 @@ def make_plan(base, head, release_input, output, root=ROOT):
     config = read(release_input) if release_input else {}
     selected = [s for s in scenarios if (set(s['components']) & affected or s.get('always'))
                 and (not s.get('enabled_by') or config.get(s['enabled_by']))]
-    forbidden = set(config) - {'version','product_version','artifacts','reuse_evidence','build_config','build_job','parameter_lock'}
+    forbidden = set(config) - {'version','product_version','artifacts','reuse_evidence','build_config','build_job','parameter_lock','audio_input'}
     if forbidden: raise Gap('unsupported release-input keys: ' + ', '.join(sorted(forbidden)))
     output = protected(output)
     if contained(output, root): raise Gap('plan output must be outside checkout')
@@ -263,7 +265,9 @@ def make_plan(base, head, release_input, output, root=ROOT):
         if not gaps[s['id']]:
             snapshots[s['id']] = snapshot(s, impact, root)
             if s['level'] not in ('source','synthetic'):
-                snapshots[s['id']]['execution_inputs']=execution_inputs
+                snapshots[s['id']]['execution_inputs']=dict(execution_inputs)
+                if s['runner']['adapter'] in ('audio_pcm','audio_engine') and config.get('audio_input'):
+                    snapshots[s['id']]['audio_inputs']=audio_identity(config['audio_input'],s)
 
     plan = dict(schema_version=1, change_id=uuid.uuid4().hex, baseline_commit=base, head_commit=head,
                 source_root=str(root), requirement_ids=sorted({r for s in selected for r in s['requirements']}),
@@ -313,6 +317,10 @@ def load_plan(path):
             for snap in plan['snapshots'].values():
                 if key in snap.get('execution_inputs',{}) and snap['execution_inputs'][key]!=actual:
                     raise Blocked('execution configuration changed: '+key)
+    for scenario in plan['scenarios']:
+        snap=plan['snapshots'].get(scenario['id'],{})
+        if 'audio_inputs' in snap and audio_identity(plan['release_input']['audio_input'],scenario)!=snap['audio_inputs']:
+            raise Blocked('audio inputs changed')
     return plan
 
 
@@ -350,12 +358,46 @@ def artifact_identity(plan, scenario):
     return entry['sha256']
 
 
+def candidate_source(plan,scenario):
+    entry=plan['release_input'].get('artifacts',{}).get(scenario['platform'])
+    if not entry:raise Gap('missing candidate build source identity')
+    artifact_identity(plan,scenario)
+    manifest=read(protected(entry['build'])/'build-manifest.json')
+    commit=manifest.get('git_head')
+    root=Path(plan['source_root'])
+    if not commit or manifest.get('git_dirty') or manifest.get('changed_during_build'):
+        raise Blocked('candidate build source is not clean')
+    if subprocess.run(['git','merge-base','--is-ancestor',commit,plan['head_commit']],cwd=root,
+                      stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
+        raise Blocked('candidate source is not an ancestor of plan')
+    impact=read(root/'quality/change-impact.yaml')
+    allowed=['docs/**','quality/**','tests/**','.github/**','AGENTS.md','README.md','CONTRIBUTING.md','SECURITY.md',
+             *impact.get('collector_paths',['scripts/quality.py'])]
+    changed=git('diff','--no-renames','--name-only',commit,plan['head_commit'],root=root).splitlines()
+    if any(not matches(path,allowed) for path in changed):raise Blocked('candidate product/build inputs changed')
+    return commit
+
+
 def command_for(scenario, plan, attempt):
     """Only registered adapters form argument arrays; no user supplied shell."""
     root = Path(plan['source_root']); runner = scenario['runner']; adapter = runner['adapter']
     if adapter == 'pytest':
         return [sys.executable,'-m','pytest','-q',*runner.get('nodeids',runner['paths']),*[f'--deselect={n}' for n in runner.get('deselect',[])],'--basetemp',str(attempt/'pytest-temp'),
                 '--junitxml',str(attempt/'junit.xml'),'-p','no:cacheprovider']
+    if adapter in ('audio_pcm','audio_engine'):
+        config=plan['release_input'].get('audio_input')
+        if not config:raise Gap('missing licensed audio fixture/component inputs')
+        identity=audio_identity(config,scenario)
+        if identity!=plan['snapshots'][scenario['id']].get('audio_inputs'):raise Blocked('audio inputs changed')
+        if adapter=='audio_pcm':
+            return [sys.executable,str(root/'scripts/probe_audio_pcm.py'),str(protected(config['fixtures'])),str(attempt/'verification')]
+        entry=config['components'][scenario['platform']]
+        engine='mlx' if scenario['platform']=='macos-arm64' else 'transformers'
+        worker='qwen_worker.py' if engine=='mlx' else 'qwen_windows_worker.py'
+        return [sys.executable,str(root/'scripts/probe_audio_boundaries.py'),'--engine',engine,
+                '--python',str(Path(entry['python']).resolve()),'--model',str(Path(entry['model']).resolve()),
+                '--worker',str(root/'src/knowledge_distiller/v1/adapters'/worker),
+                '--fixtures',str(protected(config['fixtures'])),'--output',str(attempt/'verification')]
     if adapter == 'manual_browser':
         return [sys.executable,str(root/'tests/v1/browser/manual_browser.py'),'--output',str(attempt/'verification')]
     if adapter == 'desktop_browser':
@@ -367,7 +409,7 @@ def command_for(scenario, plan, attempt):
         return [sys.executable,str(root/'scripts/verify_candidate.py'),'--platform',
                 'mac' if scenario['platform'].startswith('macos-') else 'windows',
                 '--build',str(protected(artifact['build'])),'--output',str(attempt/'verification'),
-                '--version',plan['release_input']['version'],'--commit',plan['head_commit']]
+                '--version',plan['release_input']['version'],'--commit',candidate_source(plan,scenario)]
     if adapter == 'build_job':
         return [sys.executable,str(root/'scripts/build_job.py'),'status',str(protected(plan['release_input']['build_job']))]
     if adapter == 'dual_build':
@@ -377,11 +419,96 @@ def command_for(scenario, plan, attempt):
     raise Gap('unimplemented runner adapter: ' + adapter)
 
 
-def output_paths(scenario):
+def audio_identity(config,scenario):
+    if set(config)-{'fixtures','fixture_hashes','permission','components'}:raise Gap('unknown audio input fields')
+    if config.get('permission') not in ('self_created','redistributable'):raise Gap('audio fixture permission missing')
+    folder=protected(config['fixtures'])
+    names=('source.m4a','standard.wav','short.wav','script.txt')
+    hashes={n:digest(folder/n) for n in names}
+    if hashes!=config.get('fixture_hashes'):raise Blocked('audio fixture hash mismatch')
+    identity={'fixture_hashes':hashes,'permission':config['permission']}
+    if scenario['runner']['adapter']=='audio_engine':
+        entry=config.get('components',{}).get(scenario['platform'])
+        if not entry:raise Gap('missing actual audio component for '+scenario['platform'])
+        if set(entry)!={'root','tree_sha256','python','model'}:raise Gap('invalid audio component fields')
+        component=protected(entry['root']);python=Path(entry['python']).resolve();model=Path(entry['model']).resolve()
+        if not contained(python,component) or not contained(model,component) or not model.is_dir():
+            raise Blocked('audio runtime/model must belong to measured component tree')
+        measured=tree_digest(component)
+        if measured!=entry['tree_sha256']:raise Blocked('audio component tree changed')
+        identity['component']={'tree_sha256':measured,'python_sha256':digest(python),
+                               'python_relative':str(python.relative_to(component)),'model_relative':str(model.relative_to(component))}
+    return identity
+
+
+def read_pcm(path):
+    import wave
+    if Path(path).is_symlink():raise Blocked('linked PCM evidence')
+    with wave.open(str(path),'rb') as stream:
+        if (stream.getnchannels(),stream.getsampwidth(),stream.getframerate())!=(1,2,16000):raise Gap('PCM format mismatch')
+        return stream.readframes(stream.getnframes())
+
+
+def validate_audio(folder,plan,scenario):
+    config=plan['release_input']['audio_input']
+    if audio_identity(config,scenario)!=plan['snapshots'][scenario['id']]['audio_inputs']:
+        return 'failed','audio_input_identity_changed'
+    fixture=protected(config['fixtures']);standard=read_pcm(fixture/'standard.wav');short=read_pcm(fixture/'short.wav')
+    if len(standard)<312*32000 or len(short)!=24*32000 or standard[:len(short)]!=short:
+        return 'failed','audio_fixture_duration_or_origin'
+    if scenario['runner']['adapter']=='audio_pcm':
+        report=read(folder/'result.json')
+        if (report.get('source_sha256')!=digest(fixture/'source.m4a')
+                or report.get('standard_pcm_sha256')!=hashlib.sha256(standard).hexdigest()
+                or report.get('standard_frames')!=len(standard)//2 or report.get('normalization_pcm_equal') is not True
+                or read_pcm(folder/'normalization/standard.wav')!=standard):return 'failed','audio_normalization_mismatch'
+        cases=report.get('cases',[])
+        if {r.get('label') for r in cases}!={'head','window8','worker20','segment300','tail'} or len(cases)!=5:
+            return 'not_run','audio_cases_missing'
+        for row in cases:
+            start,count=row['start_frame'],row['frames']
+            if type(start)!=int or type(count)!=int or start<0 or count<=0 or (start+count)*2>len(standard):
+                return 'failed','audio_range_invalid'
+            if row.get('pcm_equal') is not True or read_pcm(folder/(row['label']+'.wav'))!=standard[start*2:(start+count)*2]:
+                return 'failed','audio_preview_discontinuity'
+    else:
+        summary=read(folder/'summary.json');runtime=read(folder/'runtime.json')
+        version=read(Path(plan['source_root'])/'src/knowledge_distiller/v1/adapters/python-runtime.json')['version']
+        worker='qwen_worker.py' if scenario['platform']=='macos-arm64' else 'qwen_windows_worker.py'
+        if (not runtime.get('driver_python','').startswith(version+' ') or not runtime.get('component_python','').startswith(version+' ')
+                or runtime.get('worker_sha256')!=digest(Path(plan['source_root'])/'src/knowledge_distiller/v1/adapters'/worker)):
+            return 'failed','audio_actual_runtime_mismatch'
+        if any(summary.get(k) is not True for k in ('long_success','location_text_unchanged','location_pcm_equal','recovery_pcm_equal','recovery_success')):
+            return 'failed','audio_engine_journey_failure'
+        calls=sorted((folder/'calls').glob('*/input.json'))
+        if not calls or len(calls)!=summary.get('actual_worker_calls'):return 'not_run','audio_calls_missing'
+        original=Path(read(folder/'probe-binding.json')['output_root'])
+        for path in calls:
+            measured=read(path);source=Path(measured['source'])
+            if contained(source,original): pcm_source=folder/source.relative_to(original)
+            elif source in (fixture/'standard.wav',fixture/'short.wav'):pcm_source=source
+            else:return 'failed','audio_call_source_outside_probe'
+            pcm=read_pcm(pcm_source)
+            if measured.get('returncode')!=0 or measured.get('frames')!=len(pcm)//2 or measured.get('pcm_sha256')!=hashlib.sha256(pcm).hexdigest():
+                return 'failed','audio_call_input_mismatch'
+            response=read(path.with_name('result.json'));digest(path.with_name('stderr.txt'))
+            if not response.get('text') or response.get('truncated') is True:return 'failed','audio_call_incomplete'
+        for pattern,expected in [('long/asr-segments/*/audio.wav',standard),('locations/location-recovery/*/audio.wav',short),('recovery/asr-recovery/*/audio.wav',short)]:
+            if b''.join(read_pcm(p) for p in sorted(folder.glob(pattern)))!=expected:return 'failed','audio_segments_discontinuous'
+    return 'passed',None
+
+
+def output_paths(scenario, attempt=None):
     adapter=scenario['runner']['adapter']
     if adapter=='pytest': return ['junit.xml']
     if adapter=='verify_candidate':
         return ['verification/'+n for n in ('result.json','runtime.json','helper-runtime.json','runtime.log','launch.log','support.md')]
+    if adapter=='audio_pcm':return ['verification/result.json','verification/normalization/standard.wav',*[f'verification/{n}.wav' for n in ('head','window8','worker20','segment300','tail')]]
+    if adapter=='audio_engine':
+        required=['verification/'+n for n in ('runtime.json','summary.json','long-result.json','long-pcm-cache.json','locations-result.json','recovery-result.json','probe-binding.json')]
+        if attempt:
+            required+= [str(p.relative_to(attempt)) for p in (attempt/'verification').rglob('*') if p.is_file() and p.suffix in ('.json','.txt','.wav') and not {'cache','hf-cache','tmp'}.intersection(p.relative_to(attempt/'verification').parts)]
+        return sorted(set(required))
     if adapter=='manual_browser': return ['verification/result.json','verification/commands.json']
     if adapter=='desktop_browser':
         files=['result.json','parameter-lock.json','fixture.stdout.log','fixture.stderr.log','runner.stdout.log','runner.stderr.log']
@@ -471,8 +598,7 @@ def validate_result(scenario, attempt, returncode, plan=None, logdir=None):
         result = read(attempt/'verification/result.json')
         if result.get('ok') is not True: return 'failed', 'candidate_verification'
         expected_platform='mac' if scenario['platform'].startswith('macos-') else 'windows'
-        if (result.get('source_commit') != plan['head_commit'] or result.get('version') != plan['release_input']['version']
-                or result.get('platform') != expected_platform or result.get('disposable_data') is not True):
+        if (result.get('platform') != expected_platform or result.get('source_commit') != candidate_source(plan,scenario) or result.get('version') != plan['release_input']['version'] or result.get('disposable_data') is not True):
             return 'failed','candidate_identity_mismatch'
         version=read(Path(plan['source_root'])/'src/knowledge_distiller/v1/adapters/python-runtime.json')['version']
         runtime=read(attempt/'verification/runtime.json');helper=read(attempt/'verification/helper-runtime.json')
@@ -484,6 +610,8 @@ def validate_result(scenario, attempt, returncode, plan=None, logdir=None):
             return 'failed','candidate_runtime_or_journey_mismatch'
         for name in ('runtime.log','launch.log','support.md'):
             digest(attempt/'verification'/name)
+    elif scenario['runner']['adapter'] in ('audio_pcm','audio_engine'):
+        return validate_audio(attempt/'verification',plan,scenario)
     elif scenario['runner']['adapter'] == 'manual_browser':
         return validate_manual_browser(attempt/'verification',plan)
     elif scenario['runner']['adapter'] == 'desktop_browser':
@@ -530,7 +658,7 @@ def verify_passport(passport, scenario, plan, plan_dir):
         directories={Path(r['path']).parent for r in passport['outputs'] if Path(r['path']).name=='stdout.log'}
         if len(directories)!=1: raise Blocked('missing unique execution logs')
         logdir=plan_dir/next(iter(directories))
-        required={'stdout.log','stderr.log',*output_paths(scenario)}
+        required={'stdout.log','stderr.log',*output_paths(scenario,logdir)}
         recorded={str(Path(r['path']).relative_to(logdir.relative_to(plan_dir))) for r in passport['outputs']
                   if contained(Path(r['path']),logdir.relative_to(plan_dir))}
         if not required <= recorded: raise Blocked('missing required runner outputs')
@@ -541,8 +669,9 @@ def verify_passport(passport, scenario, plan, plan_dir):
 
 def inspect(plan, path, gate):
     rows = []
+    promotion_error=None
     try: check_promotion(plan,gate)
-    except Gap as exc: return {'gate':gate,'result':'blocked','exit_code':1,'reason':str(exc),'scenarios':rows}
+    except Gap as exc: promotion_error=str(exc)
     for scenario in gate_scenarios(plan,gate):
         entry = {'scenario_id':scenario['id'],'level':scenario['level'],'platform':scenario['platform'],'result':'not_run'}
         passport_path = path.parent/'evidence'/ (scenario['id'] + '.json')
@@ -558,12 +687,13 @@ def inspect(plan, path, gate):
             entry['reason'] = str(exc)
             if isinstance(exc,Blocked): entry['result']='invalid'
         rows.append(entry)
-    code = 1 if any(r['result'] in ('failed','invalid','cancelled','timeout','tool_error') for r in rows) else 2 if not rows or any(r['result'] != 'passed' for r in rows) else 0
-    return {'gate':gate,'result':'passed' if code==0 else 'blocked' if code==1 else 'not_run','exit_code':code,'scenarios':rows}
+    code = 1 if promotion_error or any(r['result'] in ('failed','invalid','cancelled','timeout','tool_error') for r in rows) else 2 if not rows or any(r['result'] != 'passed' for r in rows) else 0
+    return {'gate':gate,'result':'passed' if code==0 else 'blocked' if code==1 else 'not_run','exit_code':code,'scenarios':rows,**({'reason':promotion_error} if promotion_error else {})}
 
 
 def run(plan, path, gate, disposable):
-    check_promotion(plan,gate)
+    # Registered collection can repair missing evidence; promotion still fails.
+    check_promotion(plan,'module')
     root = Path(plan['source_root'])
     expected_python = read(root/'src/knowledge_distiller/v1/adapters/python-runtime.json')['version']
     if platform.python_version() != expected_python: raise Gap('runner Python differs from project runtime policy')
@@ -593,6 +723,8 @@ def run(plan, path, gate, disposable):
                 try:
                     if scenario['platform'] not in ('host',host_platform()): raise Gap('requires native host ' + scenario['platform'])
                     passport['artifact_sha256'] = artifact_identity(plan,scenario)
+                    if scenario['runner']['adapter']=='verify_candidate':
+                        passport['artifact_source_commit']=candidate_source(plan,scenario)
                     command = command_for(scenario,plan,attempt); passport['invocation']=command
                     env = {k:v for k,v in os.environ.items() if not k.startswith(('PYTHON','CONDA','VIRTUAL_ENV','KNOWLEDGE_DISTILLER'))}
                     home = attempt/'home'; home.mkdir()
@@ -603,6 +735,8 @@ def run(plan, path, gate, disposable):
                     with (logdir/'stdout.log').open('wb') as stdout, (logdir/'stderr.log').open('wb') as stderr:
                         process = subprocess.Popen(command,cwd=root,env=env,stdout=stdout,stderr=stderr,start_new_session=os.name!='nt')
                         passport['exit_code']=process.wait(timeout=scenario['timeout'])
+                    if scenario['runner']['adapter']=='audio_engine' and (attempt/'verification').is_dir():
+                        atomic(attempt/'verification/probe-binding.json',{'output_root':str(attempt/'verification')})
                     passport['result'],passport['failure_kind']=validate_result(scenario,attempt,passport['exit_code'],plan,logdir)
                     if scenario['runner']['adapter']=='manual_browser':
                         passport['environment']['browser']=read(attempt/'verification/result.json').get('browser')
@@ -626,7 +760,7 @@ def run(plan, path, gate, disposable):
                             else: process.kill()
                             process.wait()
                     # Copy machine-readable assertion result, retain raw attempt data locally.
-                    for relative in output_paths(scenario):
+                    for relative in output_paths(scenario,attempt):
                         source=attempt/relative
                         if source.is_file():
                             target=logdir/relative;target.parent.mkdir(parents=True,exist_ok=True)

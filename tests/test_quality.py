@@ -300,7 +300,8 @@ def test_resealed_success_passport_cannot_override_failed_actual_junit(repositor
         q.verify_passport(passport,plan['scenarios'][0],plan,output)
 
 
-def test_candidate_adapter_checks_actual_identity_and_required_files(tmp_path):
+def test_candidate_adapter_checks_actual_identity_and_required_files(tmp_path,monkeypatch):
+    monkeypatch.setattr(q,"candidate_source",lambda *args:"current")
     plan={'source_root':str(q.ROOT),'head_commit':'current','release_input':{'version':'candidate'}}
     scenario={'runner':{'adapter':'verify_candidate'},'platform':'macos-arm64'}
     report={'ok':True,'source_commit':'current','version':'candidate','platform':'windows','disposable_data':True}
@@ -317,3 +318,53 @@ def test_browser_cannot_be_promoted_to_native_by_registry(repository):
         'tests/v1/browser/manual_browser.py','tests/v1/browser/manual_fixture.py','tests/v1/browser/manual_samples.js']})
     q.atomic(root/'quality/scenarios.yaml',registry)
     with pytest.raises(q.Gap,match='integration only'):q.registry(root)
+
+
+def test_severe_incident_allows_collection_but_never_promotion(repository,tmp_path):
+    root,git,base=repository
+    (root/'business.py').write_text('value=2');git('add','.');git('commit','-qm','changed')
+    output=tmp_path/'plan';plan=q.make_plan(base,'HEAD',None,output,root)
+    plan['new_defects']=[{'id':'severe','severity':'S0','status':'module_fixed_candidate_pending'}]
+    result=q.run(plan,output/'plan.json','native',tmp_path/'data')
+    assert result['exit_code']==1 and result['result']=='blocked'
+    assert 'S0/S1' in result['reason']
+    assert result['scenarios'][0]['result']=='passed'
+
+
+def test_candidate_keeps_original_commit_for_collector_only_changes(repository,tmp_path):
+    root,git,base=repository
+    build=tmp_path/'candidate';build.mkdir()
+    q.atomic(build/'build-manifest.json',{'git_head':base,'git_dirty':False})
+    archive=tmp_path/'candidate.zip';archive.write_bytes(b'candidate artifact')
+    entry={'path':str(archive),'sha256':q.digest(archive),'build':str(build),'build_sha256':q.tree_digest(build)}
+    (root/'docs').mkdir();(root/'docs/new.md').write_text('new collection contract')
+    git('add','.');git('commit','-qm','documentation only')
+    plan={'source_root':str(root),'head_commit':git('rev-parse','HEAD'),'release_input':{'artifacts':{'macos-arm64':entry}}}
+    scenario={'platform':'macos-arm64','level':'native'}
+    assert q.candidate_source(plan,scenario)==base
+    (root/'business.py').write_text('value=2');git('add','.');git('commit','-qm','product changes')
+    plan['head_commit']=git('rev-parse','HEAD')
+    with pytest.raises(q.Blocked,match='product/build inputs changed'):q.candidate_source(plan,scenario)
+
+
+def test_audio_adapter_requires_measured_permission_and_rejects_modified_fixture(tmp_path):
+    fixture=tmp_path/'fixture';fixture.mkdir()
+    for name in ('source.m4a','standard.wav','short.wav','script.txt'):(fixture/name).write_bytes(b'synthetic validator input')
+    config={'fixtures':str(fixture),'permission':'self_created','fixture_hashes':{p.name:q.digest(p) for p in fixture.iterdir()}}
+    scenario={'runner':{'adapter':'audio_pcm'}}
+    assert q.audio_identity(config,scenario)['permission']=='self_created'
+    config['permission']='unknown'
+    with pytest.raises(q.Gap,match='permission'):q.audio_identity(config,scenario)
+    config['permission']='self_created';(fixture/'standard.wav').write_bytes(b'modified')
+    with pytest.raises(q.Blocked,match='fixture hash'):q.audio_identity(config,scenario)
+
+
+def test_audio_model_runtime_cannot_escape_registered_component(tmp_path):
+    fixture=tmp_path/'fixture';fixture.mkdir()
+    for name in ('source.m4a','standard.wav','short.wav','script.txt'):(fixture/name).write_bytes(b'fixture')
+    component=tmp_path/'component';component.mkdir();(component/'model').mkdir();(component/'model/weights').write_bytes(b'model')
+    outside=tmp_path/'unrelated-python';outside.write_bytes(b'python')
+    config={'fixtures':str(fixture),'permission':'self_created','fixture_hashes':{p.name:q.digest(p) for p in fixture.iterdir()},
+        'components':{'macos-arm64':{'root':str(component),'tree_sha256':q.tree_digest(component),'python':str(outside),'model':str(component/'model')}}}
+    with pytest.raises(q.Blocked,match='runtime/model'):
+        q.audio_identity(config,{'runner':{'adapter':'audio_engine'},'platform':'macos-arm64'})

@@ -4,7 +4,7 @@
     "HISTORICAL-REGRESSION"
   ],
   "symptom": "SC-RELEASE-INTEGRITY frozen regression family",
-  "evidence_state": "not_run",
+  "evidence_state": "historical_requirement_current_regression_pending",
   "severity": "unknown",
   "decision": "investigate_only",
   "affected_components": [
@@ -17,23 +17,26 @@
   ],
   "workaround": null,
   "verification": [
-    "tests/test_release_sizes.py",
+    "tests/test_build_job.py",
     "tests/test_dual_build.py",
-    "tests/test_build_job.py"
+    "tests/test_release_sizes.py"
   ],
   "owner": "E",
   "target": "V1.3",
-  "status": "open",
+  "status": "regression_active",
   "original_evidence": "窗口5 §12.3 / 窗口6 §7",
   "synthetic_counterexample": [
-    "tests/test_release_sizes.py",
+    "tests/test_build_job.py",
     "tests/test_dual_build.py",
-    "tests/test_build_job.py"
+    "tests/test_release_sizes.py"
   ],
   "expected_assertions": [
     "existing_registered_test_assertions"
   ],
   "scenario_ids": [
-    "SC-RELEASE-INTEGRITY--synthetic"
-  ]
+    "SC-RELEASE-INTEGRITY--synthetic",
+    "SC-RELEASE-INTEGRITY--macos-arm64--native",
+    "SC-RELEASE-INTEGRITY--windows-x64--native"
+  ],
+  "review_note": "Registered regressions are execution requirements; this index does not promote old logs into current candidate passports."
 }

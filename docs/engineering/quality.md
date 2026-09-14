@@ -64,3 +64,30 @@ python scripts/quality.py report --plan <plan-directory>/plan.json --gate native
 这些场景登记为 integration；没有把合成 pytest 或源码浏览器晋级成 native/visual 成品。原生 Dock、真实模型、真实飞书客户端仍缺专用 runner，继续列为 not_run。
 
 成品 `verify_candidate` 适配器除退出码外核对报告中的实际平台、源码/版本、独立数据声明、冻结主程序与 helper 运行时、两次启动和页面数量；保留 runtime、helper、启动原始日志和报告。所有成品场景仍绑定当前 archive 与 build tree 摘要。对旧护照复用也重新解析必需输出；改写护照 passed 并重算摘要不能覆盖 JUnit 或业务报告中的失败。质量采集器摘要参与证据依赖，改采集器只失效证据，不触发产品重建。
+
+开放 S0/S1 允许采集登记场景以取得修复证据，但 `status/report` 与门退出码仍为 blocked，并列出逐项状态。未映射路径继续禁止执行。事故索引中的模块交付日志是可核对线索，不能当作当前候选护照；安装接受回退 S0、正常零页恢复 S1 在成品门未关闭。
+
+当计划源码晚于成品时，成品源码身份来自受 build tree 摘要绑定的 `build-manifest.json.git_head`。只有它是计划 HEAD 的祖先，且全部差异仅限测试、文档或精确登记的质量采集器，才允许使用该原成品 commit 调用验收。护照同时保留计划源码与 `artifact_source_commit`；产品、打包或依赖输入有变化即拒绝。此规则不重写成品原始 commit，也不把采集器变更当作需要重新构建产品。
+
+音频探针登记为 contract/integration。可选本地 `audio_input` 格式为：
+
+```json
+{
+  "fixtures": "<independent licensed speech directory>",
+  "permission": "self_created",
+  "fixture_hashes": {
+    "source.m4a": "<file sha256>", "standard.wav": "<file sha256>",
+    "short.wav": "<file sha256>", "script.txt": "<file sha256>"
+  },
+  "components": {
+    "macos-arm64": {
+      "root": "<independent measured ASR component tree>",
+      "tree_sha256": "<quality.tree_digest>",
+      "python": "<actual component Python within root>",
+      "model": "<model directory within root>"
+    }
+  }
+}
+```
+
+把上述对象作为 release-input 的 `audio_input` 值；Windows 同理增加 windows-x64。许可支持 self_created/redistributable，仍须保留许可出处与真实词语脚本。PCM 探针重算标准化和五个片段字节，真实引擎探针核对组件树、Python/worker、各调用输入/原始结果/日志与分段连续性。缺平台组件、夹具或执行失败保持未验/失败；不会自动下载模型。该证据不证明识别语义无误、用户原音故障或最终主包旅程，native 音频门仍独立存在。

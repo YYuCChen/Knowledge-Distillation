@@ -4,7 +4,7 @@
     "ENG-20260914-01"
   ],
   "symptom": "SC-QUALITY frozen regression family",
-  "evidence_state": "not_run",
+  "evidence_state": "collector_counterexamples_passed_final_plan_pending",
   "severity": "unknown",
   "decision": "investigate_only",
   "affected_components": [
@@ -21,7 +21,7 @@
   ],
   "owner": "E",
   "target": "V1.3",
-  "status": "open",
+  "status": "candidate_pending",
   "original_evidence": "窗口5 §12.3 / 窗口6 §7",
   "synthetic_counterexample": [
     "tests/test_quality.py"
@@ -31,5 +31,6 @@
   ],
   "scenario_ids": [
     "SC-QUALITY--synthetic"
-  ]
+  ],
+  "review_note": "Registered regressions are execution requirements; this index does not promote old logs into current candidate passports."
 }

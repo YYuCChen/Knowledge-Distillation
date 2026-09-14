@@ -190,7 +190,8 @@
           "tests/v1/test_confirmation_display.py",
           "tests/v1/test_feishu_actions.py",
           "tests/v1/test_feishu_receipts.py",
-          "tests/v1/test_feishu_scopes.py"
+          "tests/v1/test_feishu_scopes.py",
+          "tests/v1/test_feishu_status.py"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -247,7 +248,9 @@
       "runner": {
         "adapter": "pytest",
         "paths": [
-          "tests/v1/test_audio_location_recovery.py"
+          "tests/v1/test_audio_location_recovery.py",
+          "tests/v1/test_confirmation.py",
+          "tests/v1/test_audio_target_containment.py"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -496,7 +499,8 @@
         "paths": [
           "tests/test_release_sizes.py",
           "tests/test_dual_build.py",
-          "tests/test_build_job.py"
+          "tests/test_build_job.py",
+          "tests/test_installer_packaging.py"
         ],
         "deselect": [
           "tests/test_build_job.py::test_windows_killed_worker_terminates_owned_child"
@@ -1614,6 +1618,128 @@
       "not_proven": [
         "frozen installer",
         "native user journey"
+      ]
+    },
+    {
+      "id": "SC-AUDIO-PROBE--pcm--macos-arm64",
+      "requirements": [
+        "BUG-20260914-02"
+      ],
+      "components": [
+        "confirmation",
+        "runtime"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "macos-arm64",
+      "runner": {
+        "adapter": "audio_pcm",
+        "paths": [
+          "scripts/probe_audio_pcm.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "measured licensed speech fixture and actual PCM boundaries"
+      ],
+      "timeout": 3600,
+      "not_proven": [
+        "original user discontinuity",
+        "recognition semantic accuracy",
+        "final candidate main package",
+        "root incompleteness is injected in recovery probe"
+      ]
+    },
+    {
+      "id": "SC-AUDIO-PROBE--engine--macos-arm64",
+      "requirements": [
+        "BUG-20260914-02"
+      ],
+      "components": [
+        "confirmation",
+        "runtime"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "macos-arm64",
+      "runner": {
+        "adapter": "audio_engine",
+        "paths": [
+          "scripts/probe_audio_boundaries.py",
+          "src/knowledge_distiller/v1/adapters/qwen_worker.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "actual engine calls with measured component/runtime; segmented PCM and recovery child outputs"
+      ],
+      "timeout": 3600,
+      "not_proven": [
+        "original user discontinuity",
+        "recognition semantic accuracy",
+        "final candidate main package",
+        "root incompleteness is injected in recovery probe"
+      ]
+    },
+    {
+      "id": "SC-AUDIO-PROBE--pcm--windows-x64",
+      "requirements": [
+        "BUG-20260914-02"
+      ],
+      "components": [
+        "confirmation",
+        "runtime"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "windows-x64",
+      "runner": {
+        "adapter": "audio_pcm",
+        "paths": [
+          "scripts/probe_audio_pcm.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "measured licensed speech fixture and actual PCM boundaries"
+      ],
+      "timeout": 3600,
+      "not_proven": [
+        "original user discontinuity",
+        "recognition semantic accuracy",
+        "final candidate main package",
+        "root incompleteness is injected in recovery probe"
+      ]
+    },
+    {
+      "id": "SC-AUDIO-PROBE--engine--windows-x64",
+      "requirements": [
+        "BUG-20260914-02"
+      ],
+      "components": [
+        "confirmation",
+        "runtime"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "windows-x64",
+      "runner": {
+        "adapter": "audio_engine",
+        "paths": [
+          "scripts/probe_audio_boundaries.py",
+          "src/knowledge_distiller/v1/adapters/qwen_windows_worker.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "actual engine calls with measured component/runtime; segmented PCM and recovery child outputs"
+      ],
+      "timeout": 3600,
+      "not_proven": [
+        "original user discontinuity",
+        "recognition semantic accuracy",
+        "final candidate main package",
+        "root incompleteness is injected in recovery probe"
       ]
     }
   ]

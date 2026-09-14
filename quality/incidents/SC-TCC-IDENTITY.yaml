@@ -4,7 +4,7 @@
     "VAL-20260914-01"
   ],
   "symptom": "SC-TCC-IDENTITY frozen regression family",
-  "evidence_state": "not_run",
+  "evidence_state": "specific_service_unidentified",
   "severity": "unknown",
   "decision": "investigate_only",
   "affected_components": [
@@ -21,7 +21,7 @@
   ],
   "owner": "C",
   "target": "V1.3",
-  "status": "open",
+  "status": "investigation_pending",
   "original_evidence": "窗口5 §12.3 / 窗口6 §7",
   "synthetic_counterexample": [
     "tests/v1/test_mac_signing.py"
@@ -30,6 +30,11 @@
     "existing_registered_test_assertions"
   ],
   "scenario_ids": [
-    "SC-TCC-IDENTITY--synthetic"
+    "SC-TCC-IDENTITY--synthetic",
+    "SC-TCC-IDENTITY--macos-arm64--native"
+  ],
+  "review_note": "Registered regressions are execution requirements; this index does not promote old logs into current candidate passports.",
+  "remaining_verification": [
+    "identify actual service and native repeat authorization evidence before changing signing identity"
   ]
 }

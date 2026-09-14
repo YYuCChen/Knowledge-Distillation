@@ -85,6 +85,10 @@
         "docs/engineering/confirmation-context.md",
         "docs/engineering/confirmation-groups.md",
         "docs/engineering/manual-confirmation.md",
+        "docs/testing/audio-boundary-probes.md",
+        "scripts/probe_audio_boundaries.py",
+        "scripts/probe_audio_pcm.py",
+        "scripts/trace_qwen_pcm_reads.py",
         "src/knowledge_distiller/faithful_review.py",
         "src/knowledge_distiller/legacy/faithful_review_service.py",
         "src/knowledge_distiller/v1/audio_location_recovery.py",
@@ -108,7 +112,8 @@
         "tests/v1/test_group_confirmation_pipeline.py",
         "tests/v1/test_image_confirmation.py",
         "tests/v1/test_pipeline.py",
-        "tests/v1/test_review_resume.py"
+        "tests/v1/test_review_resume.py",
+        "tests/v1/test_audio_target_containment.py"
       ],
       "depends_on": [
         "storage"
@@ -177,8 +182,10 @@
         "src/knowledge_distiller/v1/static/settings.js",
         "src/knowledge_distiller/v1/templates/_home_heading.html",
         "src/knowledge_distiller/v1/templates/confirmation_context.html",
+        "src/knowledge_distiller/v1/templates/confirmation_group.html",
         "src/knowledge_distiller/v1/templates/feishu_onboarding.html",
         "src/knowledge_distiller/v1/templates/home.html",
+        "src/knowledge_distiller/v1/templates/http_error.html",
         "src/knowledge_distiller/v1/templates/settings.html",
         "src/knowledge_distiller/v1/templates/update_settings.html",
         "src/knowledge_distiller/v1/topic_web.py",
@@ -207,9 +214,7 @@
         "tests/v1/test_settings.py",
         "tests/v1/test_settings_web.py",
         "tests/v1/test_topic_web.py",
-        "tests/v1/test_web.py",
-        "src/knowledge_distiller/v1/templates/confirmation_group.html",
-        "src/knowledge_distiller/v1/templates/http_error.html"
+        "tests/v1/test_web.py"
       ],
       "depends_on": [
         "storage",
@@ -692,7 +697,12 @@
         "scripts/verify_archive.py",
         "scripts/verify_candidate.py",
         "scripts/windows_offline_check.py",
-        "scripts/windows_samples.py"
+        "scripts/windows_samples.py",
+        "packaging/assets/installer-icon.icns",
+        "packaging/assets/installer-icon.ico",
+        "packaging/assets/installer-icon.json",
+        "scripts/build_installer_icon.py",
+        "tests/test_installer_packaging.py"
       ],
       "depends_on": [
         "main",
@@ -701,5 +711,11 @@
       ],
       "artifact": false
     }
-  }
+  },
+  "collector_paths": [
+    "scripts/quality.py",
+    "scripts/probe_audio_boundaries.py",
+    "scripts/probe_audio_pcm.py",
+    "scripts/trace_qwen_pcm_reads.py"
+  ]
 }
