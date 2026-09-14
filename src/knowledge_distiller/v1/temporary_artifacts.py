@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 
 from .database import connect
+from .windows_platform import filesystem_path
 
 logger = logging.getLogger(__name__)
 MARKER = '.retained-at.json'
@@ -15,7 +16,9 @@ MARKER = '.retained-at.json'
 class TemporaryArtifacts:
     def __init__(self, store, runtime_root):
         self.store = store
-        self.root = Path(runtime_root)
+        # Checkpoint creation uses the same lexical Win32 namespace. Retention
+        # checks and recursive cleanup must be able to reach those exact files.
+        self.root = filesystem_path(runtime_root)
 
     def _directory(self, item):
         target = self.root / 'items' / str(item)
