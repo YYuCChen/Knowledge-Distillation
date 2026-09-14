@@ -22,6 +22,36 @@ from .windows_platform import filesystem_path
 from .updates import UpdateError, validate_install_paths, version_key
 
 
+def _sync_journal(path):
+    with path.open('r+b') as stream:
+        os.fsync(stream.fileno())
+    if os.name != 'nt':
+        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(descriptor)
+        finally: os.close(descriptor)
+
+
+def _persist_journal(path, state):
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes
+        from uuid import uuid4
+        temporary = path.with_name('.component-journal-' + uuid4().hex)
+        try:
+            write_record(temporary, state)
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.MoveFileExW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+            kernel.MoveFileExW.restype = wintypes.BOOL
+            # Replace atomically and request write-through metadata before any
+            # paused application is allowed to perform new work.
+            if not kernel.MoveFileExW(str(filesystem_path(temporary)), str(filesystem_path(path)), 0x9):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally: temporary.unlink(missing_ok=True)
+    else:
+        write_record(path, state)
+    _sync_journal(path)
+
+
 def _rename_program(source, target, platform):
     if platform == 'windows-x86_64':
         # Process exit can precede release of Windows DLL/directory handles.
@@ -249,7 +279,7 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
             raise UpdateError('请先正常退出知识蒸馏器，再继续安装；已下载内容会保留。') from error
         try:
             event('install')
-            write_record(journal, state)
+            _persist_journal(journal, state)
             shutil.copytree(filesystem_path(candidate), filesystem_path(stage), symlinks=True)
             if identity(stage, platform) != target_identity:
                 raise UpdateError('同盘暂存程序校验失败。')
@@ -258,13 +288,13 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
                     source.backup(destination)
                 os.chmod(backup, 0o600)
             state['phase'] = 'replacing'
-            write_record(journal, state)
+            _persist_journal(journal, state)
             if had_target:
                 _rename_program(target, previous, platform)
             swapped = True
             _rename_program(stage, target, platform)
             state['phase'] = 'startup'
-            write_record(journal, state)
+            _persist_journal(journal, state)
             handshake.unlink(missing_ok=True)
             instance.close()
             event('startup')
@@ -274,7 +304,7 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
             # Journal acceptance precedes the visible handshake: after this
             # point recovery must never restore a database over possible work.
             state['phase'] = 'accepted'
-            write_record(journal, state)
+            _persist_journal(journal, state)
             accepted = True
             return _finish_accepted(state, root, activation)
         except Exception:
@@ -289,6 +319,11 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
                 except Exception as error:
                     raise UpdateError('安装接受状态无法核实，已保留新程序和恢复材料；请恢复安装。') from error
                 if persisted.get('phase') == 'accepted':
+                    try: _sync_journal(journal)
+                    except OSError as error:
+                        result = _outcome(persisted)
+                        result['warnings'].append('接受记录持久性待确认，保留恢复材料：' + str(error))
+                        return result
                     return _finish_accepted(persisted, root, activation)
             if accepted:
                 raise

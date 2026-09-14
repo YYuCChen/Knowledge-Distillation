@@ -38,11 +38,11 @@ def assert_new(target, root):
 
 def test_accepted_write_raises_after_replace_never_rolls_back(tmp_path, monkeypatch):
     candidate,target,root,kwargs=fixture(tmp_path)
-    original=module.write_record
+    original=module._persist_journal
     def uncertain(path, value):
         original(path,value)
         if value.get('phase') == 'accepted': raise OSError('write returned failure after persistence')
-    monkeypatch.setattr(module,'write_record',uncertain)
+    monkeypatch.setattr(module,'_persist_journal',uncertain)
     outcome=module.install(candidate,target,root,**kwargs)
     assert outcome['accepted'] is True
     assert_new(target,root)
@@ -82,11 +82,11 @@ def test_previous_cleanup_failure_is_finalization_pending_not_install_failure(tm
 
 def test_interrupt_after_accept_preserves_journal_without_running_cleanup(tmp_path,monkeypatch):
     candidate,target,root,kwargs=fixture(tmp_path)
-    original=module.write_record
+    original=module._persist_journal
     def interrupt(path,value):
         original(path,value)
         if value.get('phase')=='accepted': raise KeyboardInterrupt()
-    monkeypatch.setattr(module,'write_record',interrupt)
+    monkeypatch.setattr(module,'_persist_journal',interrupt)
     with pytest.raises(KeyboardInterrupt): module.install(candidate,target,root,**kwargs)
     assert_new(target,root)
     assert (root/'updates/component-install-journal.json').exists()
