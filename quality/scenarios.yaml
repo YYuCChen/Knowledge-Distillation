@@ -219,8 +219,7 @@
       "runner": {
         "adapter": "pytest",
         "paths": [
-          "tests/v1/test_desktop_pages.py",
-          "tests/v1/test_mac_app.py"
+          "tests/v1/test_desktop_pages.py"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -505,7 +504,8 @@
           "tests/test_installer_packaging.py"
         ],
         "deselect": [
-          "tests/test_build_job.py::test_windows_killed_worker_terminates_owned_child"
+          "tests/test_build_job.py::test_windows_killed_worker_terminates_owned_child",
+          "tests/test_build_job.py::test_killed_worker_child_retains_host_lock_until_it_exits"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -518,7 +518,8 @@
         "native Windows/macOS",
         "real model",
         "visual or remote availability",
-        "Windows owned-child process termination is registered separately as SC-BUILD-CHILD--windows-x64"
+        "Windows owned-child process termination is registered separately as SC-BUILD-CHILD--windows-x64",
+        "POSIX inherited host-lock process assertion is registered separately as SC-BUILD-CHILD--macos-arm64"
       ]
     },
     {
@@ -1742,6 +1743,63 @@
         "recognition semantic accuracy",
         "final candidate main package",
         "root incompleteness is injected in recovery probe"
+      ]
+    },
+    {
+      "id": "SC-DESKTOP-REOPEN--macos-arm64--synthetic",
+      "requirements": [
+        "BUG-20260914-08"
+      ],
+      "components": [
+        "desktop"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "macos-arm64",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_mac_app.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-BUILD-CHILD--macos-arm64",
+      "requirements": [
+        "HISTORICAL-REGRESSION"
+      ],
+      "components": [
+        "build"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "macos-arm64",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/test_build_job.py"
+        ],
+        "nodeids": [
+          "tests/test_build_job.py::test_killed_worker_child_retains_host_lock_until_it_exits"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "actual POSIX child retains inherited host lock until exit"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "frozen candidate installer or runtime"
       ]
     }
   ]

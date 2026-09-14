@@ -240,7 +240,14 @@ def test_windows_only_assertion_is_registered_separately():
     _,scenarios,_,_=q.registry()
     normal=next(s for s in scenarios if s['id']=='SC-RELEASE-INTEGRITY--synthetic')
     windows=next(s for s in scenarios if s['id']=='SC-BUILD-CHILD--windows-x64')
-    assert windows['runner']['nodeids']==normal['runner']['deselect']
+    assert set(windows['runner']['nodeids']) < set(normal['runner']['deselect'])
+    mac=next(s for s in scenarios if s['id']=='SC-BUILD-CHILD--macos-arm64')
+    assert set(normal['runner']['deselect']) == set(windows['runner']['nodeids'] + mac['runner']['nodeids'])
+    assert mac['platform']=='macos-arm64'
+    desktop=next(s for s in scenarios if s['id']=='SC-DESKTOP-REOPEN--synthetic')
+    mac_desktop=next(s for s in scenarios if s['id']=='SC-DESKTOP-REOPEN--macos-arm64--synthetic')
+    assert 'tests/v1/test_mac_app.py' not in desktop['runner']['paths']
+    assert mac_desktop['platform']=='macos-arm64' and mac_desktop['runner']['paths']==['tests/v1/test_mac_app.py']
     assert windows['platform']=='windows-x64' and windows['level']=='integration'
     command=q.command_for(windows,{'source_root':str(q.ROOT)},Path('/tmp/isolated'))
     assert windows['runner']['nodeids'][0] in command

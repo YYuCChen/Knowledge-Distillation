@@ -140,7 +140,8 @@
         "tests/v1/test_model_json.py",
         "tests/v1/test_ocr_review_policy.py",
         "tests/v1/test_response_receipts.py",
-        "tests/v1/test_review_response_receipts.py"
+        "tests/v1/test_review_response_receipts.py",
+        "src/knowledge_distiller/v1/windows_platform.py"
       ],
       "depends_on": [],
       "artifact": false
