@@ -368,3 +368,141 @@ def test_audio_model_runtime_cannot_escape_registered_component(tmp_path):
         'components':{'macos-arm64':{'root':str(component),'tree_sha256':q.tree_digest(component),'python':str(outside),'model':str(component/'model')}}}
     with pytest.raises(q.Blocked,match='runtime/model'):
         q.audio_identity(config,{'runner':{'adapter':'audio_engine'},'platform':'macos-arm64'})
+
+
+def test_cross_host_report_checks_measured_execution_not_collector(repository,tmp_path,monkeypatch):
+    root,git,base=repository
+    scenarios=q.read(root/'quality/scenarios.yaml');scenarios['scenarios'][0]['always']=True
+    q.atomic(root/'quality/scenarios.yaml',scenarios);git('add','.');git('commit','-qm','collect')
+    directory=tmp_path/'native-host';plan=q.make_plan(base,'HEAD',None,directory,root)
+    assert q.run(plan,directory/'plan.json','module',tmp_path/'data')['exit_code']==0
+    passport=q.read(directory/'evidence/unit.json');scenario=plan['scenarios'][0]
+    # The evidence was executed for real above. Simulate the receiving collector OS only.
+    monkeypatch.setattr(q,'host_platform',lambda:'windows-x64')
+    monkeypatch.setattr(q.platform,'platform',lambda:'Windows-10-collector')
+    assert q.verify_passport(passport,scenario,plan,directory)
+    other=dict(scenario,platform='windows-x64')
+    with pytest.raises(q.Blocked,match='platform mismatch'):q.verify_passport(passport,other,plan,directory)
+    environment_record=next(r for r in passport['outputs'] if r['path'].endswith('execution-environment.json'))
+    environment_path=directory/environment_record['path'];measurement=q.read(environment_path)
+    measurement['python']='3.11.15';q.atomic(environment_path,measurement)
+    environment_record['sha256']=q.digest(environment_path);seal(passport)
+    with pytest.raises(q.Blocked,match='environment mismatch'):q.verify_passport(passport,scenario,plan,directory)
+
+
+def test_portable_export_preserves_passport_and_rejects_missing_or_changed_output(repository,tmp_path):
+    root,git,base=repository
+    scenarios=q.read(root/'quality/scenarios.yaml');scenarios['scenarios'][0]['always']=True
+    q.atomic(root/'quality/scenarios.yaml',scenarios);git('add','.');git('commit','-qm','collect')
+    directory=tmp_path/'plan';plan=q.make_plan(base,'HEAD',None,directory,root)
+    assert q.run(plan,directory/'plan.json','module',tmp_path/'data')['exit_code']==0
+    original=(directory/'evidence/unit.json').read_bytes()
+    bundle=tmp_path/'portable';assert q.export_evidence(directory/'plan.json',bundle)['exit_code']==0
+    assert (bundle/'evidence/unit.json').read_bytes()==original
+    portable=q.load_portable_plan(bundle/'plan.json',root)
+    assert q.inspect(portable,bundle/'plan.json','module')['exit_code']==0
+    (bundle/'evidence/unit.json').write_text('{}')
+    with pytest.raises(q.Blocked,match='portable file changed'):q.load_portable_plan(bundle/'plan.json',root)
+
+
+def test_artifact_closure_reuses_only_independent_bootstrap_and_binds_shared_inputs(repository,tmp_path):
+    root,git,_=repository
+    impact=q.read(root/'quality/change-impact.yaml')
+    impact['components']['shared']={'owner':'D','paths':['platform_bridge.py'],'depends_on':[],'artifact':False}
+    impact['components']['installer']={'owner':'D','paths':['bootstrap.py'],'depends_on':['shared'],'artifact':True}
+    impact['components']['main']['depends_on'].append('shared')
+    impact['artifact_inputs']={'main':{'components':['main'],'paths':[]}}
+    q.atomic(root/'quality/change-impact.yaml',impact)
+    (root/'bootstrap.py').write_text('picker_timeout=1\n');(root/'platform_bridge.py').write_text('shortcut=True\n')
+    git('add','.');git('commit','-qm','artifact graph');base=git('rev-parse','HEAD')
+    build=tmp_path/'build';build.mkdir();q.atomic(build/'build-manifest.json',{'git_head':base,'git_dirty':False})
+    artifact=tmp_path/'app.zip';artifact.write_bytes(b'old immutable main')
+    entry={'path':str(artifact),'sha256':q.digest(artifact),'build':str(build),'build_sha256':q.tree_digest(build)}
+    (root/'bootstrap.py').write_text('picker_timeout=2\n');git('add','.');git('commit','-qm','bootstrap only')
+    plan=q.make_plan(base,'HEAD',None,tmp_path/'plan',root)
+    assert plan['rebuild_components']==['installer']
+    plan['release_input']={'artifacts':{'macos-arm64':entry}}
+    scenario={'platform':'macos-arm64','level':'native'}
+    assert q.candidate_source(plan,scenario)==base
+    proof=q.candidate_source(plan,scenario,proof=True)
+    assert proof['method']=='unchanged_artifact_input_closure' and proof['independent_changed_paths']==['bootstrap.py']
+    assert 'platform_bridge.py' in proof['input_files'] and 'bootstrap.py' not in proof['input_files']
+    (root/'platform_bridge.py').write_text('shortcut=False\n');git('add','.');git('commit','-qm','shared changes')
+    shared=q.make_plan(base,'HEAD',None,tmp_path/'shared-plan',root)
+    assert shared['rebuild_components']==['installer','main']
+    plan['head_commit']=git('rev-parse','HEAD')
+    with pytest.raises(q.Blocked,match='product/build inputs changed'):q.candidate_source(plan,scenario)
+    # Removing the shared dependency from today's graph must not erase historical inputs.
+    impact['components']['main']['depends_on'].remove('shared')
+    q.atomic(root/'quality/change-impact.yaml',impact);git('add','.');git('commit','-qm','remove dependency')
+    plan['head_commit']=git('rev-parse','HEAD')
+    with pytest.raises(q.Blocked,match='product/build inputs changed'):q.candidate_source(plan,scenario)
+
+
+def test_real_main_mapping_includes_shared_module_and_excludes_bootstrap():
+    _,_,impact,_=q.registry()
+    assert 'installer_shared' in impact['components']['main']['depends_on']
+    assert 'src/knowledge_distiller/v1/installer_platform.py' in impact['components']['installer_shared']['paths']
+    assert 'src/knowledge_distiller/v1/component_bootstrap.py' in impact['components']['installer']['paths']
+    # installer HTML/SVG are also copied by application_datas and cannot be installer-only.
+    assert 'src/knowledge_distiller/v1/installer_assets/page.html' in impact['components']['installer_shared']['paths']
+
+
+def test_candidate_rejects_nonancestor_source_even_with_matching_artifact(repository,tmp_path):
+    root,git,base=repository
+    git('checkout','-qb','other');(root/'main.py').write_text('other branch\n')
+    git('add','.');git('commit','-qm','other source');other=git('rev-parse','HEAD');git('checkout','-q','-')
+    build=tmp_path/'build';build.mkdir();q.atomic(build/'build-manifest.json',{'git_head':other,'git_dirty':False})
+    archive=tmp_path/'app.zip';archive.write_bytes(b'immutable')
+    plan={'source_root':str(root),'head_commit':base,'release_input':{'artifacts':{'macos-arm64':{
+        'path':str(archive),'sha256':q.digest(archive),'build':str(build),'build_sha256':q.tree_digest(build)}}}}
+    with pytest.raises(q.Blocked,match='not an ancestor'):
+        q.candidate_source(plan,{'platform':'macos-arm64','level':'native'})
+
+
+def test_windows_audio_paths_are_replayed_without_accessing_original_drive(tmp_path):
+    import wave
+    root=q.ROOT;fixture=tmp_path/'fixtures';fixture.mkdir();folder=tmp_path/'verification';folder.mkdir()
+    standard=b'\0\0'*(312*16000);short=standard[:24*32000]
+    def wav(path,pcm):
+        path.parent.mkdir(parents=True,exist_ok=True)
+        with wave.open(str(path),'wb') as out:out.setparams((1,2,16000,0,'NONE','not compressed'));out.writeframes(pcm)
+    wav(fixture/'standard.wav',standard);wav(fixture/'short.wav',short)
+    wav(folder/'long/asr-segments/000/audio.wav',standard)
+    wav(folder/'locations/location-recovery/000/audio.wav',short)
+    wav(folder/'recovery/asr-recovery/000/audio.wav',short)
+    wav(folder/'calls/001/input.wav',short)
+    q.atomic(folder/'summary.json',dict(long_success=True,location_text_unchanged=True,location_pcm_equal=True,
+        recovery_pcm_equal=True,recovery_success=True,actual_worker_calls=1))
+    version=q.read(root/'src/knowledge_distiller/v1/adapters/python-runtime.json')['version']
+    q.atomic(folder/'runtime.json',dict(driver_python=version+' actual fixture',component_python=version+' actual fixture',
+        worker_sha256=q.digest(root/'src/knowledge_distiller/v1/adapters/qwen_windows_worker.py')))
+    q.atomic(folder/'probe-binding.json',{'output_root':r'C:\isolated\attempt\verification'})
+    measured=dict(source=r'C:\isolated\attempt\verification\calls\001\input.wav',frames=len(short)//2,
+        pcm_sha256=q.hashlib.sha256(short).hexdigest(),returncode=0)
+    q.atomic(folder/'calls/001/input.json',measured);q.atomic(folder/'calls/001/result.json',{'text':'validator fixture only'})
+    (folder/'calls/001/stderr.txt').write_text('')
+    scenario={'id':'engine','platform':'windows-x64','runner':{'adapter':'audio_engine'}}
+    identity={'fixture':'measured'}
+    plan={'source_root':str(root),'release_input':{'audio_input':{'fixtures':str(fixture)}},
+        'snapshots':{'engine':{'audio_inputs':identity}},'_portable_audio':{'engine':identity},
+        '_original_audio_fixture':r'C:\isolated\fixtures'}
+    assert q.validate_audio(folder,plan,scenario)==('passed',None)
+    measured['source']=r'C:\outside\input.wav';q.atomic(folder/'calls/001/input.json',measured)
+    assert q.validate_audio(folder,plan,scenario)==('failed','audio_call_source_outside_probe')
+
+
+def test_peer_bundle_fills_exact_foreign_rows_without_bypassing_s1(repository,tmp_path):
+    root,git,base=repository
+    scenarios=q.read(root/'quality/scenarios.yaml');scenario=scenarios['scenarios'][0]
+    scenario.update(always=True,platform=q.host_platform(),level='integration',gate='contract')
+    q.atomic(root/'quality/scenarios.yaml',scenarios);git('add','.');git('commit','-qm','native host contract fixture')
+    directory=tmp_path/'peer-plan';peer=q.make_plan(base,'HEAD',None,directory,root)
+    assert q.run(peer,directory/'plan.json','contract',tmp_path/'data')['exit_code']==0
+    bundle=tmp_path/'bundle';q.export_evidence(directory/'plan.json',bundle)
+    central=dict(peer,execution_platform='different-collector',gaps={'unit':['not executable on collector']})
+    result=q.inspect_with_peers(central,tmp_path/'central/plan.json','contract',[bundle])
+    assert result['exit_code']==0 and result['scenarios'][0]['peer_plan_id']==peer['change_id']
+    central['new_defects']=[{'id':'live-failure','severity':'S1','status':'open'}]
+    result=q.inspect_with_peers(central,tmp_path/'central/plan.json','candidate',[bundle])
+    assert result['exit_code']==1 and 'S0/S1' in result['reason']

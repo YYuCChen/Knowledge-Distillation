@@ -67,7 +67,7 @@ python scripts/quality.py report --plan <plan-directory>/plan.json --gate native
 
 开放 S0/S1 允许采集登记场景以取得修复证据，但 `status/report` 与门退出码仍为 blocked，并列出逐项状态。未映射路径继续禁止执行。事故索引中的模块交付日志是可核对线索，不能当作当前候选护照；安装接受回退 S0、正常零页恢复 S1 在成品门未关闭。
 
-当计划源码晚于成品时，成品源码身份来自受 build tree 摘要绑定的 `build-manifest.json.git_head`。只有它是计划 HEAD 的祖先，且全部差异仅限测试、文档或精确登记的质量采集器，才允许使用该原成品 commit 调用验收。护照同时保留计划源码与 `artifact_source_commit`；产品、打包或依赖输入有变化即拒绝。此规则不重写成品原始 commit，也不把采集器变更当作需要重新构建产品。
+当计划源码晚于成品时，成品源码身份来自受 build tree 摘要绑定的 `build-manifest.json.git_head`。它必须是计划 HEAD 的祖先。差异仅限测试、文档或精确登记的质量采集器时沿用原规则；若存在独立组件改动，则按 `artifact_inputs.main` 和历史/当前两份依赖图取主包输入闭包，逐 Git blob 与文件模式比较旧新输入，未知路径、闭包内容变化或依赖遗漏均拒绝。不能将整个 installer 目录豁免。护照同时保留计划源码、`artifact_source_commit` 和 `artifact_input_proof`（实际原来源、祖先关系、输入摘要及独立变化路径）；主包产品、打包或依赖输入有变化即拒绝。此规则不重写成品原始 commit，也不把采集器变更当作需要重新构建产品。
 
 音频探针登记为 contract/integration。可选本地 `audio_input` 格式为：
 
@@ -91,3 +91,36 @@ python scripts/quality.py report --plan <plan-directory>/plan.json --gate native
 ```
 
 把上述对象作为 release-input 的 `audio_input` 值；Windows 同理增加 windows-x64。许可支持 self_created/redistributable，仍须保留许可出处与真实词语脚本。PCM 探针重算标准化和五个片段字节，真实引擎探针核对组件树、Python/worker、各调用输入/原始结果/日志与分段连续性。缺平台组件、夹具或执行失败保持未验/失败；不会自动下载模型。该证据不证明识别语义无误、用户原音故障或最终主包旅程，native 音频门仍独立存在。
+
+
+## 组件来源与双平台汇总
+
+`installer` 只拥有 bootstrap 入口及它的直接测试；`installer_shared` 拥有主程序/helper 也固化的安装模块，以及由 `application_datas` 复制的安装器 HTML/SVG。主程序与独立安装器均依赖 shared。`installer_platform` 经两平台 spec 的 hidden import 和 helper 的快捷方式调用进入实物，不能因只改 picker 函数就视为 installer-only。独占 bootstrap 修改可只重建独立安装器，前提是对目标成品导入清单的核验与登记闭包一致；新增文件和动态依赖须补映射。
+
+独立 installer 的版本和源码由自己的 build-manifest 记录。`verify_candidate` 仍只验证主程序及包内 helper，`prepare_component_release` 仍要求 recipe 来源等于目标主程序实际来源。交付清单分别列主包、installer、模型的版本、源码和字节身份，不把 installer 新提交写入旧主包。
+
+每次实际 runner 执行前使用同一解释器独立采集 `execution-environment.json`，绑定真实 system/machine、OS、Python、解释器路径。汇总验证的是执行环境而非汇总机 OS。旧护照没有独立环境记录时仍只能在原平台/同 OS 范围复用；不能通过改 platform 获得 Windows 证据。外平台场景在当前机器不执行，也不写入冒充本机执行的占位护照，报告保持 not_run。
+
+Windows 执行完实际 contract 后，在同一干净源码和原实测组件仍存在时导出：
+
+```sh
+python scripts/quality.py export --plan <windows-plan>/plan.json --output <new-private-bundle>
+```
+
+导出重新核对原计划、输出哈希、音频组件/夹具和配置身份；保留 plan/passport 原字节，复制原始输出和许可合成音频夹具，组件树只重新测量身份，不复制模型。私有构建配置只记录摘要，不复制内容。bundle 仍含本地路径和诊断，须保留在本地交付范围，不自动公开。
+
+将 bundle 取回 Mac 后可只读核验原 Windows 报告：
+
+```sh
+python scripts/quality.py report --plan <bundle>/plan.json --source-root <exact-clean-checkout> --gate contract --output <windows-report.json>
+```
+
+`--source-root` 必须指向原 plan 的同一源码提交、干净 checkout；注册、runner、fixture、上游源码和所有输出逐项重查。原 Windows `C:\...` 路径按 Windows 路径语义映射到 bundle 中同字节 PCM，不访问汇总机上伪造的 C 盘路径。该离线报告证明记录时的实际运行与组件身份，不声称远端机器此刻仍可用。
+
+当前 Mac 计划和 Windows 计划采用相同源码提交及发行目标后，可集中汇总：
+
+```sh
+python scripts/quality.py report --plan <mac-plan>/plan.json --gate contract --peer-bundle <windows-bundle> --output <combined-report.json>
+```
+
+peer 只补精确匹配其执行平台的 source/synthetic/integration 子场景；保留原 evidence ID、peer plan ID 和各平台配置/音频身份。`host` 行不混用，native、model_real、visual、remote_readback 不通过 peer 导入放行。缺场景、原始失败、hash/契约不符、开放 S0/S1 仍然阻断。最终成品及独立 native/发行门继续使用各自实物证据。

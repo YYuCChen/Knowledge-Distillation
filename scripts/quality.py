@@ -12,9 +12,10 @@ import fnmatch
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath, PurePosixPath
 import platform
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -285,7 +286,7 @@ def make_plan(base, head, release_input, output, root=ROOT):
                 scenarios=selected, snapshots=snapshots, gaps=gaps, unmapped_paths=unmapped,
                 release_input=config, release_input_sha256=object_hash(config),
                 registry_hashes={p.relative_to(root).as_posix(): digest(p) for p in sorted((root/'quality').rglob('*.yaml'))},
-                created_at=now())
+                execution_platform=host_platform(), created_at=now())
     for reuse in config.get('reuse_evidence',[]):
         old_path=Path(reuse['passport']); old_dir=Path(reuse['plan_dir']).resolve()
         if not reuse.get('reason'): raise Gap('evidence reuse needs a compatibility reason')
@@ -362,7 +363,7 @@ def artifact_identity(plan, scenario):
     return entry['sha256']
 
 
-def candidate_source(plan,scenario):
+def candidate_source(plan,scenario, *, proof=False):
     entry=plan['release_input'].get('artifacts',{}).get(scenario['platform'])
     if not entry:raise Gap('missing candidate build source identity')
     artifact_identity(plan,scenario)
@@ -378,8 +379,50 @@ def candidate_source(plan,scenario):
     allowed=['docs/**','quality/**','tests/**','.github/**','AGENTS.md','README.md','CONTRIBUTING.md','SECURITY.md',
              *impact.get('collector_paths',['scripts/quality.py'])]
     changed=git('diff','--no-renames','--name-only',commit,plan['head_commit'],root=root).splitlines()
-    if any(not matches(path,allowed) for path in changed):raise Blocked('candidate product/build inputs changed')
-    return commit
+    provenance={'source_commit':commit,'plan_commit':plan['head_commit'],'component':entry.get('component','main'),
+        'ancestor':True,'changed_paths':changed,'method':'collector_or_document_only'}
+    product_changes=[path for path in changed if not matches(path,allowed)]
+    if product_changes:
+        # The default adapter verifies the main app, never the independently built bootstrap.
+        # Use both historical and current mapped dependencies so a removed mapping cannot hide
+        # a changed input. Unknown paths and absent explicit artifact contracts fail closed.
+        component=entry.get('component','main')
+        contract=impact.get('artifact_inputs',{}).get(component)
+        if component!='main' or not contract:raise Blocked('candidate product/build inputs changed')
+        historical=json.loads(git('show',commit+':quality/change-impact.yaml',root=root))
+        historical_contract=historical.get('artifact_inputs',{}).get(component,contract)
+        patterns=[]
+        for graph,definition_contract in ((historical,historical_contract),(impact,contract)):
+            patterns+=definition_contract['paths']
+            pending=list(definition_contract['components']);seen=set()
+            while pending:
+                name=pending.pop()
+                if name in seen:continue
+                seen.add(name)
+                definition=graph['components'].get(name)
+                # Newly explicit shared dependencies are still checked using current paths.
+                if definition is None:definition=impact['components'].get(name)
+                if definition is None:raise Blocked('unknown artifact dependency')
+                patterns+=definition['paths'];pending+=definition.get('depends_on',[])
+        exclusions=set(contract.get('exclude_paths',[])) & set(historical_contract.get('exclude_paths',[]))
+        for path in product_changes:
+            if not any(matches(path,spec['paths']) for spec in impact['components'].values()):
+                raise Blocked('candidate product/build inputs changed: unmapped '+path)
+        def inputs(ref):
+            records={}
+            for line in git('ls-tree','-r','-z',ref,root=root).split('\0'):
+                if not line:continue
+                meta,name=line.split('\t',1)
+                if matches(name,patterns) and not matches(name,allowed+list(exclusions)):
+                    records[name]=meta  # Git object identity includes exact bytes and file mode.
+            return records
+        original_inputs=inputs(commit);current_inputs=inputs(plan['head_commit'])
+        if not original_inputs or original_inputs!=current_inputs:
+            raise Blocked('candidate product/build inputs changed')
+        provenance.update(method='unchanged_artifact_input_closure',input_sha256=object_hash(original_inputs),
+            input_files=original_inputs,independent_changed_paths=product_changes)
+        # A mapped change outside the measured main closure is a different component.
+    return provenance if proof else commit
 
 
 def command_for(scenario, plan, attempt):
@@ -453,9 +496,15 @@ def read_pcm(path):
         return stream.readframes(stream.getnframes())
 
 
+def measured_audio_identity(plan,scenario):
+    if '_portable_audio' in plan:
+        return plan['_portable_audio'][scenario['id']]
+    return audio_identity(plan['release_input']['audio_input'],scenario)
+
+
 def validate_audio(folder,plan,scenario):
     config=plan['release_input']['audio_input']
-    if audio_identity(config,scenario)!=plan['snapshots'][scenario['id']]['audio_inputs']:
+    if measured_audio_identity(plan,scenario)!=plan['snapshots'][scenario['id']]['audio_inputs']:
         return 'failed','audio_input_identity_changed'
     fixture=protected(config['fixtures']);standard=read_pcm(fixture/'standard.wav');short=read_pcm(fixture/'short.wav')
     if len(standard)<312*32000 or len(short)!=24*32000 or standard[:len(short)]!=short:
@@ -486,11 +535,13 @@ def validate_audio(folder,plan,scenario):
             return 'failed','audio_engine_journey_failure'
         calls=sorted((folder/'calls').glob('*/input.json'))
         if not calls or len(calls)!=summary.get('actual_worker_calls'):return 'not_run','audio_calls_missing'
-        original=Path(read(folder/'probe-binding.json')['output_root'])
+        path_class=PureWindowsPath if scenario['platform'].startswith('windows-') else PurePosixPath
+        original=path_class(read(folder/'probe-binding.json')['output_root'])
+        original_fixture=path_class(plan.get('_original_audio_fixture',str(fixture)))
         for path in calls:
-            measured=read(path);source=Path(measured['source'])
-            if contained(source,original): pcm_source=folder/source.relative_to(original)
-            elif source in (fixture/'standard.wav',fixture/'short.wav'):pcm_source=source
+            measured=read(path);source=path_class(measured['source'])
+            if contained(source,original): pcm_source=folder.joinpath(*source.relative_to(original).parts)
+            elif source in (original_fixture/'standard.wav',original_fixture/'short.wav'):pcm_source=fixture/source.name
             else:return 'failed','audio_call_source_outside_probe'
             pcm=read_pcm(pcm_source)
             if measured.get('returncode')!=0 or measured.get('frames')!=len(pcm)//2 or measured.get('pcm_sha256')!=hashlib.sha256(pcm).hexdigest():
@@ -527,8 +578,8 @@ def validate_manual_browser(folder,plan):
     version=read(root/'src/knowledge_distiller/v1/adapters/python-runtime.json')['version']
     if (result.get('status')!='passed' or result.get('level')!='integration'
             or result.get('fixture')!='synthetic_queue' or result.get('python')!=version
-            or result.get('platform')!=platform.platform() or not result.get('browser') or not result.get('browser_full_version')
-            or result.get('source_commit')!=plan['head_commit'] or result.get('source_dirty') is not False
+            or result.get('platform')!=plan.get('_evidence_environment',{}).get('os',platform.platform()) or not result.get('browser') or not result.get('browser_full_version')
+            or result.get('source_commit')!=plan.get('_evidence_source_commit',plan['head_commit']) or result.get('source_dirty') is not False
             or result.get('source_sha256')!=digest(root/'src/knowledge_distiller/v1/static/home.js')):
         return 'failed','browser_identity_or_result_mismatch'
     if not isinstance(commands,list) or not commands or any(c.get('returncode')!=0 for c in commands):
@@ -558,7 +609,7 @@ def validate_desktop_browser(folder,plan,case):
     runner='run_browser_protocol.py' if case=='protocol' else 'slow_open_browser.py'
     root=Path(plan['source_root']);runner_hash=digest(root/'tests/v1/desktop'/runner)
     measured_hash=parameters.get('runner',{}).get('sha256') if case=='protocol' else parameters.get('runner_sha256')
-    if (result.get('result')!='passed' or parameters.get('source_commit')!=plan['head_commit']
+    if (result.get('result')!='passed' or parameters.get('source_commit')!=plan.get('_evidence_source_commit',plan['head_commit'])
             or parameters.get('dirty') is not False or measured_hash!=runner_hash
             or parameters.get('fixture_sha256')!=digest(root/'tests/v1/desktop/browser_fixture.py')
             or not parameters.get('browser') or parameters.get('native_dock')!='not_run'):
@@ -636,12 +687,31 @@ def validate_result(scenario, attempt, returncode, plan=None, logdir=None):
     return 'passed', None
 
 
+def verify_execution_environment(passport, expected_platform, plan_dir):
+    """Collector OS is irrelevant; verify the execution-host record bound into the passport."""
+    environment=passport.get('environment',{})
+    records=[r for r in passport['outputs'] if Path(r['path']).name=='execution-environment.json']
+    if not records:
+        # Old passports retain their original scope; only same-host historical evidence is reusable.
+        if environment.get('os')!=platform.platform() or passport['platform']!=host_platform():
+            raise Blocked('missing measured execution environment for cross-host evidence')
+        return
+    if len(records)!=1:raise Blocked('ambiguous execution environment')
+    measured=read(plan_dir/records[0]['path'])
+    machine={'aarch64':'arm64','amd64':'x64','x86_64':'x64'}.get(str(measured.get('machine','')).lower(),str(measured.get('machine','')).lower())
+    system={'Darwin':'macos','Windows':'windows','Linux':'linux'}.get(measured.get('system'))
+    if not system or system+'-'+machine!=expected_platform:
+        raise Blocked('measured execution platform mismatch')
+    if any(not measured.get(k) or measured[k]!=environment.get(k) for k in ('os','python','executable')):
+        raise Blocked('measured execution environment mismatch')
+
+
 def verify_passport(passport, scenario, plan, plan_dir):
     check = dict(passport); signature = check.pop('passport_sha256',None)
     if not signature or object_hash(check) != signature: raise Blocked('passport hash mismatch')
     if passport.get('scenario_id') != scenario['id'] or passport.get('level') != scenario['level']:
         raise Blocked('scenario/evidence level mismatch')
-    expected_platform = host_platform() if scenario['platform']=='host' else scenario['platform']
+    expected_platform = plan.get('execution_platform',host_platform()) if scenario['platform']=='host' else scenario['platform']
     if passport.get('platform') != expected_platform: raise Blocked('platform mismatch')
     if not passport.get('source_commit') or not passport.get('started_at') or not passport.get('finished_at'):
         raise Blocked('missing evidence source/time identity')
@@ -660,9 +730,12 @@ def verify_passport(passport, scenario, plan, plan_dir):
         if digest(path) != record.get('sha256'): raise Blocked('output hash mismatch')
     if passport['result'] != 'passed': raise Gap('evidence is ' + passport['result'])
     if scenario.get('runner'):
-        if passport.get('environment',{}).get('os')!=platform.platform():raise Blocked('OS environment changed')
+        verify_execution_environment(passport, expected_platform, plan_dir)
         if scenario['runner']['adapter']=='verify_candidate' and passport.get('artifact_source_commit')!=candidate_source(plan,scenario):
             raise Blocked('candidate source identity mismatch')
+        if scenario['runner']['adapter']=='verify_candidate' and passport.get('artifact_input_proof') is not None:
+            if passport['artifact_input_proof']!=candidate_source(plan,scenario,proof=True):
+                raise Blocked('candidate input closure proof changed')
         directories={Path(r['path']).parent for r in passport['outputs'] if Path(r['path']).name=='stdout.log'}
         if len(directories)!=1: raise Blocked('missing unique execution logs')
         logdir=plan_dir/next(iter(directories))
@@ -670,7 +743,8 @@ def verify_passport(passport, scenario, plan, plan_dir):
         recorded={str(Path(r['path']).relative_to(logdir.relative_to(plan_dir))) for r in passport['outputs']
                   if contained(Path(r['path']),logdir.relative_to(plan_dir))}
         if not required <= recorded: raise Blocked('missing required runner outputs')
-        result,_=validate_result(scenario,logdir,passport.get('exit_code',-1),plan,logdir)
+        validation_plan=dict(plan, _evidence_environment=passport['environment'], _evidence_source_commit=passport['source_commit'])
+        result,_=validate_result(scenario,logdir,passport.get('exit_code',-1),validation_plan,logdir)
         if result != 'passed': raise Blocked('runner outputs do not attest pass')
     return True
 
@@ -710,6 +784,7 @@ def run(plan, path, gate, disposable):
         with lock(disposable/'.data.lock'):
             for scenario in gate_scenarios(plan,gate):
                 if plan['gaps'].get(scenario['id']): continue
+                if scenario['platform'] not in ('host',host_platform()):continue
                 evidence_path = path.parent/'evidence'/(scenario['id']+'.json')
                 if evidence_path.exists():
                     try:
@@ -732,8 +807,13 @@ def run(plan, path, gate, disposable):
                 try:
                     if scenario['platform'] not in ('host',host_platform()): raise Gap('requires native host ' + scenario['platform'])
                     passport['artifact_sha256'] = artifact_identity(plan,scenario)
+                    environment_probe=[sys.executable,'-c',
+                        'import json,platform,sys; print(json.dumps(dict(os=platform.platform(),system=platform.system(),machine=platform.machine(),python=platform.python_version(),executable=sys.executable)))']
+                    measured=json.loads(subprocess.check_output(environment_probe,text=True))
+                    atomic(logdir/'execution-environment.json',measured)
                     if scenario['runner']['adapter']=='verify_candidate':
                         passport['artifact_source_commit']=candidate_source(plan,scenario)
+                        passport['artifact_input_proof']=candidate_source(plan,scenario,proof=True)
                     command = command_for(scenario,plan,attempt); passport['invocation']=command
                     env = {k:v for k,v in os.environ.items() if not k.startswith(('PYTHON','CONDA','VIRTUAL_ENV','KNOWLEDGE_DISTILLER'))}
                     home = attempt/'home'; home.mkdir()
@@ -795,17 +875,150 @@ def run(plan, path, gate, disposable):
     return inspect(plan,path,gate)
 
 
+def export_evidence(path, output):
+    """Capture checked input identities and immutable output bytes on the execution host.
+
+    Model/runtime trees are remeasured, not copied. Offline review proves this recorded
+    execution, never current availability of the former host's component or online assets.
+    """
+    plan=load_plan(path)
+    output=protected(output)
+    if output.exists():raise Gap('use a new portable evidence directory')
+    output.mkdir(parents=True)
+    files={}
+    def copy(source,name):
+        target=output/name
+        target.parent.mkdir(parents=True,exist_ok=True)
+        expected=digest(source)
+        shutil.copyfile(source,target)
+        if digest(target)!=expected:raise Blocked('evidence changed during export')
+        files[name]=expected
+    copy(path,'plan.json')
+    for passport_path in sorted((path.parent/'evidence').glob('*.json')):
+        passport=read(passport_path)
+        check=dict(passport);expected=check.pop('passport_sha256',None)
+        if object_hash(check)!=expected:raise Blocked('passport changed before export')
+        copy(passport_path,passport_path.relative_to(path.parent).as_posix())
+        for record in passport.get('outputs',[]):
+            source=(path.parent/record['path']).resolve()
+            if not contained(source,path.parent.resolve()) or digest(source)!=record['sha256']:
+                raise Blocked('invalid portable output')
+            copy(source,record['path'])
+    audio={}
+    for scenario in plan['scenarios']:
+        snap=plan['snapshots'].get(scenario['id'],{})
+        if 'audio_inputs' in snap:
+            measured=audio_identity(plan['release_input']['audio_input'],scenario)
+            if measured!=snap['audio_inputs']:raise Blocked('audio input changed before export')
+            audio[scenario['id']]=measured
+    original_fixture=None
+    if audio:
+        original_fixture=plan['release_input']['audio_input']['fixtures']
+        for name in ('source.m4a','standard.wav','short.wav','script.txt'):
+            copy(Path(original_fixture)/name,'inputs/audio/'+name)
+    configuration_identities={key:digest(Path(plan['release_input'][key])) for key in ('build_config','parameter_lock')
+        if plan['release_input'].get(key)}
+    receipt={'schema_version':1,'plan_sha256':plan['plan_sha256'],'source_commit':plan['head_commit'],
+        'execution_platform':plan.get('execution_platform',host_platform()),'files':files,
+        'audio_inputs':audio,'configuration_identities':configuration_identities,
+        'original_audio_fixture':original_fixture,'exported_at':now(),
+        'scope':'Recorded execution and component identity; not current remote availability.'}
+    receipt['receipt_sha256']=object_hash(receipt)
+    atomic(output/'portable-inputs.json',receipt)
+    return {'output':str(output),'files':len(files),'exit_code':0,'scope':receipt['scope']}
+
+
+def load_portable_plan(path, source_root):
+    """Read-only relocation: original plan and passports stay byte-for-byte unchanged."""
+    plan=read(path);check=dict(plan);expected=check.pop('plan_sha256',None)
+    if not expected or object_hash(check)!=expected:raise Blocked('plan hash mismatch')
+    receipt=read(path.parent/'portable-inputs.json');check=dict(receipt);signature=check.pop('receipt_sha256',None)
+    if not signature or object_hash(check)!=signature or receipt['plan_sha256']!=expected:
+        raise Blocked('portable receipt mismatch')
+    for name,expected_hash in receipt['files'].items():
+        target=(path.parent/name).resolve()
+        if not contained(target,path.parent.resolve()) or digest(target)!=expected_hash:
+            raise Blocked('portable file changed or escaped')
+    if receipt['files'].get('plan.json')!=digest(path):raise Blocked('portable plan is unbound')
+    source_root=Path(source_root).resolve()
+    if git('rev-parse','HEAD',root=source_root)!=plan['head_commit'] or git('status','--porcelain',root=source_root):
+        raise Blocked('portable review needs exact clean source checkout')
+    for name,expected_hash in plan['registry_hashes'].items():
+        if digest(source_root/name)!=expected_hash:raise Blocked('portable registry changed')
+    for scenario in plan['scenarios']:
+        snap=plan['snapshots'].get(scenario['id'])
+        if not snap:continue
+        current=snapshot(scenario,read(source_root/'quality/change-impact.yaml'),source_root)
+        if any(snap.get(k)!=v for k,v in current.items()):raise Blocked('portable source dependencies changed')
+        if 'audio_inputs' in snap and receipt['audio_inputs'].get(scenario['id'])!=snap['audio_inputs']:
+            raise Blocked('portable component identity changed')
+        for key,expected_hash in snap.get('execution_inputs',{}).items():
+            if receipt.get('configuration_identities',{}).get(key)!=expected_hash:
+                raise Blocked('portable execution configuration changed')
+    # A new in-memory inspection view only. No re-sealing, editing or execution of old evidence.
+    plan['source_root']=str(source_root)
+    plan['_portable_audio']=receipt['audio_inputs']
+    plan['_original_audio_fixture']=receipt['original_audio_fixture']
+    if receipt['audio_inputs']:
+        config=plan['release_input']['audio_input']
+        config['fixtures']=str(path.parent/'inputs/audio')
+        for name,expected_hash in config['fixture_hashes'].items():
+            if digest(Path(config['fixtures'])/name)!=expected_hash:raise Blocked('portable fixture changed')
+    return plan
+
+
+def inspect_with_peers(plan,path,gate,bundles):
+    result=inspect(plan,path,gate)
+    scenarios={s['id']:s for s in gate_scenarios(plan,gate)}
+    rows={r['scenario_id']:r for r in result['scenarios']}
+    sources={}
+    for bundle in bundles:
+        peer_path=Path(bundle)/'plan.json'
+        peer=load_portable_plan(peer_path,Path(plan['source_root']))
+        if any(peer['release_input'].get(k)!=plan['release_input'].get(k) for k in ('version','product_version')):
+            raise Blocked('peer release identity differs')
+        peer_scenarios={s['id']:s for s in peer['scenarios']}
+        for scenario_id,scenario in scenarios.items():
+            # Only fill exact foreign-platform source/integration rows. Native artifacts need
+            # their own local byte verification; never import a release/native pass here.
+            if (scenario['platform'] in ('host',plan.get('execution_platform',host_platform()))
+                    or scenario['platform']!=peer.get('execution_platform')
+                    or scenario['level'] not in ('source','synthetic','integration')):continue
+            if peer_scenarios.get(scenario_id)!=scenario:raise Blocked('peer scenario contract differs')
+            passport_path=peer_path.parent/'evidence'/(scenario_id+'.json')
+            if not passport_path.is_file():continue
+            passport=read(passport_path)
+            verify_passport(passport,scenario,peer,peer_path.parent)
+            if scenario_id in sources and sources[scenario_id]['evidence_id']!=passport['evidence_id']:
+                raise Blocked('ambiguous peer evidence')
+            sources[scenario_id]={'bundle':str(bundle),'plan_id':peer['change_id'],
+                'evidence_id':passport['evidence_id'],'execution_inputs':peer['snapshots'][scenario_id].get('execution_inputs',{}),
+                'audio_inputs':peer['snapshots'][scenario_id].get('audio_inputs')}
+            rows[scenario_id]={'scenario_id':scenario_id,'level':scenario['level'],'platform':scenario['platform'],
+                'result':'passed','evidence_id':passport['evidence_id'],'peer_plan_id':peer['change_id']}
+    all_rows=list(rows.values())
+    # Keep promotion blockers and every unfilled/failed row. No total-count shortcut.
+    code=1 if result.get('reason') or any(r['result'] in ('failed','invalid','cancelled','timeout','tool_error') for r in all_rows) else 2 if not all_rows or any(r['result']!='passed' for r in all_rows) else 0
+    result.update(scenarios=all_rows,peer_evidence=sources,exit_code=code,
+        result='passed' if code==0 else 'blocked' if code==1 else 'not_run')
+    return result
+
+
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     commands=parser.add_subparsers(dest='action',required=True)
     p=commands.add_parser('plan'); p.add_argument('--base',required=True); p.add_argument('--head',required=True)
     p.add_argument('--release-input',type=Path); p.add_argument('--output',type=Path,required=True)
     p.add_argument('--gate',choices=GATES,default='module')
+    p=commands.add_parser('export'); p.add_argument('--plan',type=Path,required=True); p.add_argument('--output',type=Path,required=True)
     for action in ('run','status','report'):
         p=commands.add_parser(action); p.add_argument('--plan',type=Path,required=True)
         p.add_argument('--gate',choices=GATES,default='module')
         if action=='run':p.add_argument('--data-root',type=Path,required=True)
-        if action=='report':p.add_argument('--output',type=Path,required=True)
+        if action=='report':
+            p.add_argument('--output',type=Path,required=True)
+            p.add_argument('--peer-bundle',type=Path,action='append',default=[],help='Execution-host export for exact foreign-platform integration rows')
+        if action in ('status','report'):p.add_argument('--source-root',type=Path,help='Read-only portable export review against exact clean source commit')
     args=parser.parse_args(argv)
     try:
         if args.action=='plan':
@@ -813,10 +1026,14 @@ def main(argv=None):
             check_promotion(plan,args.gate)
             gaps=[v for s,v in plan['gaps'].items() if s in {s['id'] for s in gate_scenarios(plan,args.gate)} and v]
             result={'plan':str(args.output/'plan.json'),'scenarios':len(plan['scenarios']),'gaps':gaps,'rebuild_components':plan['rebuild_components'],'exit_code':2 if gaps else 0}
+        elif args.action=='export':
+            result=export_evidence(args.plan,args.output)
         else:
-            plan=load_plan(args.plan)
+            plan=load_portable_plan(args.plan,args.source_root) if getattr(args,'source_root',None) else load_plan(args.plan)
             result=run(plan,args.plan,args.gate,args.data_root) if args.action=='run' else inspect(plan,args.plan,args.gate)
-            if args.action=='report':atomic(protected(args.output),result)
+            if args.action=='report':
+                if args.peer_bundle:result=inspect_with_peers(plan,args.plan,args.gate,args.peer_bundle)
+                atomic(protected(args.output),result)
         print(json.dumps(result,ensure_ascii=False,indent=2));return result['exit_code']
     except (Gap,OSError,ValueError,KeyError,subprocess.SubprocessError) as exc:
         result={'result':'blocked' if isinstance(exc,Blocked) else 'not_run','reason':str(exc),'exit_code':1 if isinstance(exc,Blocked) else 2}
