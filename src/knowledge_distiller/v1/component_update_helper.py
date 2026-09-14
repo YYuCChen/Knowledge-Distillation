@@ -73,7 +73,9 @@ def run(plan_path):
         request_exit(root, plan, platform)
         outcome = install(candidate, target, root, platform=platform, version=release['version'],
                 target_identity=release['target_identity'])
-        outcome = finalize_install(outcome, capability=assembler.capability_for(candidate))
+        from .installer_platform import create_shortcut
+        outcome = finalize_install(outcome, capability=assembler.capability_for(candidate),
+            shortcut=lambda:create_shortcut(target,root))
         try:
             from .local_records import write_record
             write_record(root / 'updates/component-install-outcome.json', outcome)

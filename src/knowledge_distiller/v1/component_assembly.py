@@ -52,7 +52,7 @@ class ComponentAssembly:
             verified_model_identity=model_id, verified_cached_assets=cached)
 
     def assemble(self, release, plan, work_root, *, installed=None, cancelled=lambda: False,
-                 progress=lambda received, total: None):
+                 progress=lambda received, total: None, event=lambda *a, **k:None):
         """Never stops or replaces an installed application; produces a checked candidate."""
         started = time.monotonic()
         root = Path(work_root)
@@ -67,6 +67,8 @@ class ComponentAssembly:
         for asset in plan.assets:
             if cancelled():
                 raise InterruptedError('component_assembly_cancelled')
+            from urllib.parse import urlsplit
+            event('prepare', asset=urlsplit(asset['url']).path.rsplit('/',1)[-1], bytes_done=0, bytes_total=asset['size'])
             assets[asset['sha256']] = self.downloader.fetch(asset, cancelled=cancelled, progress=progress)
         model = DoclingComponent(self.components_root)
         if release['docling']['sha256'] in assets:
@@ -103,6 +105,7 @@ class ComponentAssembly:
                 subprocess.run([str(self.binary_delta), 'apply', str(baseline), str(candidate),
                                 str(assets[delta['sha256']])], check=True, timeout=900,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        event('verify', bytes_done=0, bytes_total=0, asset='')
         if identity(candidate, self.platform) != release['target_identity']:
             raise UpdateError('最终程序内容校验失败，当前应用未改变。')
         if self.platform == 'macos-arm64':

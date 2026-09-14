@@ -85,7 +85,7 @@ def confirm_activation(root, state):
 
 def _outcome(state):
     return {'accepted': True, 'target': state['target'], 'platform': state['platform'],
-            'target_identity': state['target_identity'], 'version': state.get('version'),
+            'target_identity': state['target_identity'], 'version': state.get('version'), 'pid': state.get('pid'),
             'activation': {'status': 'pending'}, 'finalization': {'status': 'pending'},
             'cleanup': {'status': 'pending', 'reason': 'no_process_capability'},
             'shortcut': {'status': 'not_run'}, 'warnings': []}
@@ -200,7 +200,7 @@ def recover(target, data_root, *, activation=confirm_activation):
 
 
 def install(candidate, target, data_root, *, platform, version, target_identity,
-            launcher=launch, acceptance=accept_startup, activation=confirm_activation):
+            launcher=launch, acceptance=accept_startup, activation=confirm_activation, event=lambda *a, **k:None):
     candidate, target, root = Path(candidate), Path(target), Path(data_root)
     validate_install_paths(root, target)
     from .windows_platform import is_link_or_reparse
@@ -248,6 +248,7 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
         except BlockingIOError as error:
             raise UpdateError('请先正常退出知识蒸馏器，再继续安装；已下载内容会保留。') from error
         try:
+            event('install')
             write_record(journal, state)
             shutil.copytree(filesystem_path(candidate), filesystem_path(stage), symlinks=True)
             if identity(stage, platform) != target_identity:
@@ -266,6 +267,7 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
             write_record(journal, state)
             handshake.unlink(missing_ok=True)
             instance.close()
+            event('startup')
             process = launcher(target, root, platform, handshake)
             state['pid'] = getattr(process, 'pid', None)
             acceptance(process, root, version)

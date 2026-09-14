@@ -10,7 +10,7 @@ from uuid import uuid4
 import webbrowser
 
 import httpx
-from flask import Flask, request, render_template_string, redirect, make_response
+from flask import Flask, request, render_template_string, redirect, make_response, jsonify, send_file
 from werkzeug.serving import make_server
 
 from .adapters.python_policy import check_current
@@ -18,53 +18,66 @@ from .component_assembly import ComponentAssembly
 from .component_install import install, recover, finalize_install
 from .component_release import MAX_MANIFEST
 from .component_download import ComponentDownloader
+from .installer_platform import pick_path, create_shortcut, manual_command, KINDS
 from .updates import UpdateError, validate_install_paths
 
 
-PAGE = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>安装知识蒸馏器</title><style>body{font:16px system-ui;margin:64px auto;padding:0 24px;max-width:640px;background:#f7f7f4;color:#202724}h1{font-size:28px}p{line-height:1.7}label{display:block;margin:18px 0}input{display:block;width:100%;box-sizing:border-box;padding:12px;margin-top:8px}button{padding:12px 20px;border:0;border-radius:8px;background:#264e42;color:white;cursor:pointer}form{margin:16px 0}button:disabled{opacity:.5}.note{color:#56635d}progress{width:100%}</style>
-<h1>安装知识蒸馏器</h1><p>{{ state.message }}</p>
-{% if state.busy %}<progress></progress><script>setTimeout(()=>location.reload(),2000)</script>{% endif %}
-{% if state.error %}<p role="alert">{{ state.error }}</p>{% endif %}
-<p class="note">知识和设置保留在现有数据目录。切换程序前，请先正常退出知识蒸馏器；已有下载会保留。</p>
-{% if not state.busy and not state.complete %}<form method="post"><input type="hidden" name="token" value="{{ token }}">
-{% if not state.ready %}<label>程序安装位置<input name="target" value="{{ target }}" required></label>
-<label>现有数据目录<input name="data_root" value="{{ data_root }}" required></label>
-<label>离线发行清单（可选）<input name="manifest_path" value="{{ manifest_path }}" placeholder="已下载清单的完整路径；组件放在同一目录"></label>
-<button name="action" value="prepare">检查安装内容</button>
-{% else %}<p>目标版本：{{ state.version }}<br>需要下载：{{ state.download }}<br>安装位置：{{ target }}</p>
-<button name="action" value="install">安装此版本</button>{% endif %}
-{% if state.recovery %}<button name="action" value="recover">恢复中断的安装</button>{% endif %}
-</form>{% endif %}
-{% if state.complete %}<p>安装已验收，程序已启动。可以关闭此安装页面。</p>{% endif %}
-<form method="post"><input type="hidden" name="token" value="{{ token }}">
-{% if state.busy and state.cancellable %}<button name="action" value="cancel">取消准备</button>
-{% elif not state.busy %}<button name="action" value="close">关闭安装器</button>{% endif %}</form></html>'''
+PAGE = (Path(__file__).parent / 'installer_assets/page.html').read_text(encoding='utf-8')
 
 
 def create_installer(*, target, data_root, platform, public_key, manifest_url,
                      binary_delta=None, windows_tools=None, manifest_path=None):
     app = Flask(__name__)
     token = secrets.token_urlsafe(32)
-    state = {'busy': False, 'ready': False, 'complete': False, 'error': '',
+    state = {'steps': ['pending'] * 6, 'seq': 0, 'accepted': False, 'busy': False, 'ready': False, 'complete': False, 'error': '',
              'message': '检查当前版本和可复用组件后，显示本次需要下载的内容。'}
     context = {'target': Path(target), 'root': Path(data_root), 'candidate': None, 'manifest_path': Path(manifest_path) if manifest_path else None}
     operation = threading.Lock()
     cancelled = threading.Event()
 
+    def event(stage, **details):
+        index = {'paths':0,'prepare':1,'verify':2,'install':3,'startup':4,'complete':5}[stage]
+        state['seq'] += 1
+        for previous in range(index):
+            if state['steps'][previous] == 'working': state['steps'][previous] = 'complete'
+        state['steps'][index] = 'complete' if stage == 'complete' else 'working'
+        state.update(stage=stage, **details)
+
+    def publish_outcome(outcome):
+        context['outcome'] = outcome
+        state.update(accepted=bool(outcome.get('accepted')), complete=outcome.get('activation',{}).get('status') == 'ready',
+            ready=False, warnings=outcome.get('warnings', []),
+            manual_command=manual_command(context['target'],context['root']) if platform == 'windows-x86_64' else '')
+        if state['complete']: event('complete')
+        else: state['steps'][4] = 'attention'
+
+    def open_product():
+        from .component_install import confirm_activation
+        outcome = context.get('outcome', {})
+        if not outcome.get('accepted') or outcome.get('activation',{}).get('status') != 'ready':
+            raise UpdateError('请先恢复安装并完成启动检查。')
+        confirm_activation(context['root'], outcome)
+        instance = json.loads((context['root']/'.desktop-instance.json').read_text(encoding='utf-8'))
+        webbrowser.open('http://127.0.0.1:' + str(instance['port']) + '/')
+
+
     def task(action):
         try:
             root, target = context['root'], context['target']
             if action == 'recover':
+                state['cancellable'] = False
+                event('startup')
                 outcome = recover(target, root)
-                context['outcome'] = outcome
                 if outcome.get('accepted'):
+                    publish_outcome(outcome)
                     state.update(complete=outcome['activation']['status'] == 'ready', ready=False,
                         message='安装已接受。' + ' '.join(outcome.get('warnings', [])))
                 else:
                     state.update(message='中断的安装已恢复，可以重新检查安装内容。', ready=False)
                 return
             if action == 'prepare':
+                state['steps'] = ['pending'] * 6
+                event('paths')
                 validate_install_paths(root, target)
                 current = '0'
                 if target.exists():
@@ -73,6 +86,7 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                         current = plistlib.loads((target / 'Contents/Info.plist').read_bytes())['CFBundleVersion']
                     else:
                         current = json.loads((target / '_internal/windows-version.json').read_text(encoding='utf-8'))['version']
+                state['steps'][0] = 'complete'
                 offline = context['manifest_path']
                 if offline is not None:
                     with offline.open('rb') as stream:
@@ -110,22 +124,24 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                     raise UpdateError('请先检查安装内容。')
                 release = context['release']
                 if context['candidate'] is None:
+                    event('prepare', bytes_done=0, bytes_total=0, asset='')
                     state['message'] = '正在下载并校验组件，已有可用内容会复用。'
                     candidate, metrics = context['assembler'].assemble(release, context['plan'],
                         root / 'updates/component-attempts' / uuid4().hex,
                         installed=target if target.exists() else None,
-                        cancelled=cancelled.is_set,
+                        cancelled=cancelled.is_set, event=event,
                         progress=lambda received, total: state.update(
-                            message=f'正在准备组件：{received / 1024**2:.1f} / {total / 1024**2:.1f} MB'))
+                            bytes_done=received, bytes_total=total))
                     context['candidate'] = candidate
                 if cancelled.is_set():
                     raise InterruptedError('安装准备已取消，已有下载会保留。')
                 state['message'] = '候选程序已校验，正在安装并检查启动状态。'
                 state['cancellable'] = False
                 outcome = install(context['candidate'], target, root, platform=platform,
-                        version=release['version'], target_identity=release['target_identity'])
-                outcome = finalize_install(outcome, capability=context['assembler'].capability_for(context['candidate']))
-                context['outcome'] = outcome
+                        version=release['version'], target_identity=release['target_identity'], event=event)
+                outcome = finalize_install(outcome, capability=context['assembler'].capability_for(context['candidate']),
+                    shortcut=lambda:create_shortcut(target,root))
+                publish_outcome(outcome)
                 state.update(complete=outcome['activation']['status'] == 'ready', ready=False,
                     message=('知识蒸馏器已安装并通过启动检查。' if outcome['activation']['status'] == 'ready'
                              else '安装已接受，启动放行待恢复。') + ' '.join(outcome['warnings']))
@@ -139,6 +155,8 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
             state['error'] = '无法连接下载服务，请检查网络后重试。已有下载会保留。'
         except Exception as error:
             state['error'] = str(error)
+            for index, status in enumerate(state['steps']):
+                if status == 'working': state['steps'][index] = 'cancelled' if isinstance(error,InterruptedError) else 'attention'
         finally:
             state['busy'] = False
             operation.release()
@@ -151,12 +169,40 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
         if origin and origin != request.host_url.rstrip('/'):
             return '安装请求来源无效。', 403
 
+
+    @app.get('/status')
+    def status():
+        state['recovery'] = (context['root'] / 'updates/component-install-journal.json').exists()
+        return jsonify(state)
+
+    @app.get('/installer-logo.svg')
+    def installer_logo():
+        return send_file(Path(__file__).parent / 'installer_assets/installer-logo.svg', mimetype='image/svg+xml')
+
+    @app.post('/picker')
+    def picker():
+        body = request.get_json(silent=True) or {}
+        if not secrets.compare_digest(str(body.get('token','')),token): return jsonify(status='forbidden'),403
+        if body.get('kind') not in KINDS: return jsonify(status='invalid'),400
+        if state['busy']: return jsonify(status='unavailable',message='正在安装，请完成后再选择位置。'),409
+        result = pick_path(body['kind'])
+        # An application picker selects a folder. macOS installation targets
+        # retain the bundle name when the selected folder is not itself an app.
+        if result.get('status') == 'selected' and body['kind'] == 'folder_app' and platform == 'macos-arm64':
+            path = Path(result['path'])
+            if path.suffix != '.app': result['path'] = str(path/'知识蒸馏器.app')
+        return jsonify(result)
+
     @app.route('/', methods=['GET', 'POST'])
     def home():
         if request.method == 'POST':
             if not secrets.compare_digest(request.form.get('token', ''), token):
                 return '安装请求已失效。', 403
             action = request.form.get('action')
+            if action == 'open' and not state['busy']:
+                try: open_product()
+                except Exception as error: state['error'] = str(error)
+                return redirect('/')
             if action == 'cancel':
                 if not state.get('cancellable'):
                     return '程序正在切换或验证，完成后即可关闭安装器。', 409
@@ -188,7 +234,7 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                         operation.release()
                         return '请填写离线清单的完整路径。', 400
                     context.update(target=target, root=root, manifest_path=Path(offline).expanduser() if offline else None)
-                state.update(busy=True, error='', cancellable=True)
+                state.update(busy=True, error='', cancellable=action != 'recover')
                 threading.Thread(target=task, args=(action,), daemon=True).start()
             return redirect('/')
         state['recovery'] = (context['root'] / 'updates/component-install-journal.json').exists()
@@ -235,7 +281,19 @@ def main(argv=None):
     print(url, flush=True)
     if not args.no_open:
         webbrowser.open(url)
-    server.serve_forever()
+    if sys.platform == 'darwin':
+        from AppKit import NSApplication
+        from Foundation import NSOperationQueue
+        native = NSApplication.sharedApplication()
+        native.setActivationPolicy_(0)
+        def shutdown():
+            server.shutdown()
+            NSOperationQueue.mainQueue().addOperationWithBlock_(lambda:native.terminate_(None))
+        app.config['SHUTDOWN'] = shutdown
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        native.run()
+    else:
+        server.serve_forever()
 
 
 if __name__ == '__main__':
