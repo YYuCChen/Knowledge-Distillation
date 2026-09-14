@@ -52,6 +52,9 @@ try:
             'agent_browser': subprocess.check_output(['agent-browser', '--version'], text=True).strip(),
             'parameters': {'navigation_grace': 2, 'probe_timeout': 1, 'recovery_timeout': 3, 'opening_timeout': 10},
             'status': 'initial_parameters_browser_protocol_only', 'native_dock': 'not_run'}
+    lock['browser']['full_version'] = json.loads(json.loads(command('eval',
+        '(async () => JSON.stringify(await navigator.userAgentData.getHighEntropyValues(["fullVersionList"])))()')))
+    lock['parameters']['collision_probe'] = .25
     (args.output/'parameter-lock.json').write_text(json.dumps(lock, ensure_ascii=False, indent=2))
     before = wait(lambda s: any(p['route'] == '/settings' and p['transport_state'] == 'connected' for p in s['pages']))
     page = next(p for p in before['pages'] if p['transport_state'] == 'connected')

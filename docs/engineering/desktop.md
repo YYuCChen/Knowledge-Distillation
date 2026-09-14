@@ -2,7 +2,7 @@
 
 V1.3 协议实现说明。原生 Chrome/Safari 成品的真实 Dock 验收另行记录；单元测试或网页 ACK 不证明用户前台已经显示目标标签。
 
-`app.py` 继续调用 `desktop_pages.install(app)`。SSE 首次返回服务端分配的 page_id 与 connection_epoch；页面在 sessionStorage 保留 page_id，当前文档另有内存 document_id。同文档重连更新 epoch，旧流 disconnect、旧 close 和旧 ACK 均不能修改新代际。复制标签携同一 sessionStorage 时，新文档在未离开旧页的情况下获分配另一个 page_id，不合并两页内容。
+`app.py` 继续调用 `desktop_pages.install(app)`。SSE 首次返回服务端分配的 page_id 与 connection_epoch；页面在 sessionStorage 保留 page_id，当前文档另有内存 document_id。同文档重连更新 epoch，旧流 disconnect、旧 close 和旧 ACK 均不能修改新代际。新文档握手先于旧 pagehide Beacon 到达时，服务端先为精确旧文档等待最多 0.25 秒，避免把普通导航误判成复制。复制标签携同一 sessionStorage 时，新文档在未离开旧页的情况下获分配另一个 page_id，不合并两页内容。
 
 页面仅报告相对路由、浏览器家族提示、可见性和焦点。最近可见且聚焦或真实交互页优先，然后按稳定注册顺序回退；后台窗口虽报告 visible，但未聚焦不能抢优先级。已有页不导航或改写输入。UA 提示只能协助尽力激活浏览器，不能当进程归属或实际前台证明。
 
