@@ -1,3 +1,4 @@
+from knowledge_distiller.v1.database import SCHEMA_VERSION
 import pytest
 
 from knowledge_distiller.growth_modeling import HistoricalRecallAdapter, RelationInsightAdapter
@@ -137,18 +138,24 @@ def test_v6_upgrade_preserves_source_knowledge_and_topic_snapshot(tmp_path):
         db.executescript(SCHEMA+SUBMITTED_SCHEMA)
         for statement in TOPIC_STATEMENTS:
             db.execute(statement)
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
         db.execute('PRAGMA user_version=6')
     audio=ForbiddenAudio(); vault=tmp_path/'vault';vault.mkdir()
     worker=SingleWorker(store,Distiller(store=store,source=audio,normalizer=audio,recognizer=audio,
         reviewer=audio,confirmation_clipper=audio,knowledge_model=Model(),runtime_root=tmp_path/'runtime',vault=vault))
-    for body in ('正文甲。','正文乙。'):
-        # Populate historical facts before migration; current review workers
-        # require schema 18 and are started only after initialize in production.
-        from knowledge_distiller.v1.file_sources import parse_submitted_source
-        submitted = prepare_direct_text(body)
-        item = store.submit_source(submitted)
-        store.establish_submitted_fact(item, submitted, parse_submitted_source(submitted))
-        worker.distiller._finish(item)
+    # Fixture construction predates manual_cards; do not run a v19 write hook
+    # against the historical schema before exercising the real migration below.
+    from unittest.mock import patch
+    with patch('knowledge_distiller.v1.store._sync_manual_cards'):
+        for body in ('正文甲。','正文乙。'):
+            # Populate historical facts before migration; current review workers
+            # require schema 18 and are started only after initialize in production.
+            from knowledge_distiller.v1.file_sources import parse_submitted_source
+            submitted = prepare_direct_text(body)
+            item = store.submit_source(submitted)
+            store.establish_submitted_fact(item, submitted, parse_submitted_source(submitted))
+            worker.distiller._finish(item)
     lib=TopicLibrary(store)
     points,old,guard=lib.prepare();lib.commit(plan_for(points),guard)
     snapshot=lib.snapshot()
@@ -158,7 +165,7 @@ def test_v6_upgrade_preserves_source_knowledge_and_topic_snapshot(tmp_path):
     assert lib.snapshot()==snapshot
     with connect(store.path) as db:
         assert [tuple(row) for row in db.execute('SELECT * FROM knowledge_results')]==before
-        assert db.execute('PRAGMA user_version').fetchone()[0]==18
+        assert db.execute('PRAGMA user_version').fetchone()[0]== SCHEMA_VERSION
         assert db.execute('PRAGMA foreign_key_check').fetchall()==[]
     service,_=organization(store)
     assert service.drive(service.start_or_reuse().event_id).event.status is EventStatus.SUCCEEDED

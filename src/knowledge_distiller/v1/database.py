@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 TOPIC_STATEMENTS = (
     """CREATE TABLE topic_entries (
         topic_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,7 +175,7 @@ def initialize(path: Path) -> None:
             connection.execute(SUBMITTED_SCHEMA)
             connection.execute("ALTER TABLE source_facts ADD COLUMN lineage_json TEXT NOT NULL DEFAULT '{}'")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, SCHEMA_VERSION):
+        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, SCHEMA_VERSION):
             raise RuntimeError(f"unsupported database version: {version}")
 
         if version < 6:
@@ -331,4 +331,11 @@ def initialize(path: Path) -> None:
                 status TEXT NOT NULL CHECK(status IN ('complete','failed')),
                 result_json TEXT NOT NULL, created_at TEXT NOT NULL,
                 PRIMARY KEY(item_id, revision))""")
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+        if version < 19:
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+            from .confirmation_schema import migrate
+            migrate(connection)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

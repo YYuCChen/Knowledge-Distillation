@@ -96,6 +96,8 @@ def test_v5_upgrade_keeps_knowledge_and_does_not_create_topics(tmp_path):
     with sqlite3.connect(path) as db:
         db.executescript(SCHEMA + SUBMITTED_SCHEMA)
         db.execute("INSERT INTO settings VALUES('vault_path','/old')")
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
         db.execute('PRAGMA user_version=5')
     store = Store(path)
     store.initialize()
@@ -130,6 +132,8 @@ def test_schema_upgrade_failure_rolls_back_version_and_tables(tmp_path, monkeypa
     path = tmp_path / 'old.sqlite3'
     with sqlite3.connect(path) as db:
         db.executescript(SCHEMA + SUBMITTED_SCHEMA)
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
         db.execute('PRAGMA user_version=5')
     monkeypatch.setattr(database, 'TOPIC_STATEMENTS', (*database.TOPIC_STATEMENTS[:1], 'INVALID SQL'))
     with pytest.raises(sqlite3.OperationalError):
