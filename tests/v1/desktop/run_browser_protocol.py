@@ -92,7 +92,7 @@ try:
             value = wait(lambda s: len(s['results']) > before_count and
                 any(p['route'] == '/_fixture/slow' and p['document_id'] not in previous_documents
                     and p['transport_state'] == 'connected' for p in s['pages']))
-            command('wait', '--load', 'domcontentloaded')
+            command('wait', '--fn', 'document.readyState !== "loading"')
             assert not value['opened'], (seconds, action, value)
             capture(f'slow_{action}_{seconds}s_no_duplicate')
     command('open', base+'/_fixture/icons')
