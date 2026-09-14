@@ -115,3 +115,71 @@ def test_pipeline_retry_retains_item_candidate_and_cleans_after_commit(tmp_path)
     assert store.item_bundle(item)['error_code'] == 'vault_not_configured'
     assert len(second.calls) == 1
     assert not checkpoint.exists()
+
+
+@pytest.mark.parametrize('newline', ['\n', '\r\n'])
+def test_fenced_parent_and_field_recovery_preserve_evidence_and_reuse_prepared(tmp_path, newline):
+    value = payload()
+    value['subtitle'] = value['title']
+    class Fenced(Client):
+        def complete(self, **kwargs):
+            return '```json' + newline + super().complete(**kwargs) + newline + '```'
+    client = Fenced([value, {'subtitle': '损耗的来源与边界。'}])
+    model = AnthropicKnowledgeModel(client, tmp_path)
+    result = model.derive(SOURCE)
+    assert result.core_points[0].argument == value['core_points'][0]['argument']
+    assert result.evidence[0].text == SOURCE
+    assert model.derive(SOURCE) == result
+    assert len(client.calls) == 2
+    states = [json.loads(p.read_text())['state'] for p in tmp_path.glob('*/responses/pending.json')]
+    assert states == ['prepared']
+
+
+def test_interrupted_presentation_save_resumes_received_field_without_new_request(tmp_path, monkeypatch):
+    from knowledge_distiller.v1.knowledge_presentation import PresentationRecord
+    value = payload()
+    value['subtitle'] = value['title']
+    client = Client([value, {'subtitle': '损耗的来源与边界。'}])
+    complete = PresentationRecord.complete
+    def fail(*args, **kwargs):
+        raise OSError('injected result save interruption')
+    monkeypatch.setattr(PresentationRecord, 'complete', fail)
+    with pytest.raises(KnowledgeModelError, match='knowledge_checkpoint_unavailable'):
+        AnthropicKnowledgeModel(client, tmp_path).derive(SOURCE)
+    monkeypatch.setattr(PresentationRecord, 'complete', complete)
+    result = AnthropicKnowledgeModel(client, tmp_path).derive(SOURCE)
+    assert result.evidence[0].text == SOURCE
+    assert len(client.calls) == 2
+
+
+def test_source_or_model_change_starts_new_request_and_preserves_prior_records(tmp_path):
+    client = Client([payload(), payload()])
+    AnthropicKnowledgeModel(client, tmp_path).derive(SOURCE)
+    client.model = 'different-fixture-model'
+    AnthropicKnowledgeModel(client, tmp_path).derive(SOURCE)
+    assert len(client.calls) == 2
+    assert len(list(tmp_path.glob('*/responses/pending.json'))) == 2
+
+
+def test_two_simultaneous_derivations_cannot_replace_each_others_response(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    started, release = Event(), Event()
+    class Slow(Client):
+        def complete(self, **kwargs):
+            started.set()
+            assert release.wait(5)
+            return super().complete(**kwargs)
+    client = Slow([payload()])
+    model = AnthropicKnowledgeModel(client, tmp_path)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(model.derive, SOURCE)
+        assert started.wait(5)
+        try:
+            with pytest.raises(KnowledgeModelError, match='knowledge_checkpoint_unavailable'):
+                model.derive(SOURCE)
+        finally:
+            release.set()
+        result = first.result(5)
+    assert model.derive(SOURCE) == result
+    assert len(client.calls) == 1

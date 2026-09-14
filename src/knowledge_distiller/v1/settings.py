@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from knowledge_distiller.v1.model_json import parse_model_json
 import logging
 import re
 import sqlite3
@@ -459,7 +460,7 @@ class SettingsService:
         try:
             answer = self.codex_client(selected, effort, service_tier=service_tier).complete(
                 system='Return exactly {"connected":true}.', user='Connection check.', max_tokens=32)
-            if json.loads(answer) != {"connected": True}:
+            if parse_model_json(answer).value != {"connected": True}:
                 raise ValueError("invalid connection response")
         except (LLMRequestError, ValueError) as error:
             raise SettingsError("codex_connection_failed") from error

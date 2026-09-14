@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from knowledge_distiller.v1.model_json import parse_model_json
 import re
 from dataclasses import replace
 from difflib import SequenceMatcher
@@ -32,13 +33,14 @@ def validate_response(source, raw):
                             'rule_version': RULE_VERSION})
 
     try:
-        payload = json.loads(raw)
+        payload = parse_model_json(raw).value
         if (not isinstance(payload, dict) or not isinstance(payload.get('candidate_text'), str)
                 or not payload['candidate_text'].strip() or not isinstance(payload.get('issues'), list)
                 or not isinstance(payload.get('repairs', []), list)):
             raise ValueError
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as error:
         report(None, 'response', 'invalid_json_or_shape')
+        diagnostics[-1]['category'] = getattr(error, 'category', 'schema_invalid')
         return FaithfulReviewCandidate(source, (), (), tuple(diagnostics))
 
     proposed = payload['candidate_text']
@@ -189,7 +191,7 @@ def retry_context(source, candidate):
 def merge_retry(source, first, revised, raw):
     """Omission is not resolution; explicit source-backed dismissal is retained."""
     try:
-        resolutions = json.loads(raw).get('resolutions', [])
+        resolutions = parse_model_json(raw).value.get('resolutions', [])
     except (ValueError, TypeError, AttributeError):
         resolutions = []
     if not isinstance(resolutions, list):

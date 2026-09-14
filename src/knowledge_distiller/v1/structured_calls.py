@@ -1,6 +1,7 @@
 """One request/validation contract and bounded diagnostic files for organization."""
 import hashlib
 import json
+from knowledge_distiller.v1.model_json import parse_model_json
 import logging
 import os
 import tempfile
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator, ValidationError
 from .llm import OpenAIResponsesClient, LLMRequestError
+from .response_receipts import ResponseReceipts, text_hash
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,20 @@ class StructuredCalls:
         self.records = {}
 
     def complete(self, stage, system, payload, schema, max_tokens):
+        if self.directory is None:
+            return self._complete(stage, system, payload, schema, max_tokens)
+        from .file_lock import acquire
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            lock = self.directory / (stage + '.call.lock')
+            if self.directory.is_symlink() or lock.is_symlink():
+                raise OSError('organization_checkpoint_unsafe')
+            with acquire(lock):
+                return self._complete(stage, system, payload, schema, max_tokens)
+        except OSError as error:
+            raise LLMRequestError('llm_request_failed') from error
+
+    def _complete(self, stage, system, payload, schema, max_tokens):
         validator = Draft202012Validator(schema)
         identity = {'stage': stage, 'system': system, 'input': payload, 'schema': schema,
             'model': self.client.model, 'endpoint': self.client.base_url,
@@ -28,10 +44,15 @@ class StructuredCalls:
             'service_tier': getattr(self.client, 'service_tier', None), 'max_tokens': max_tokens}
         fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         path = self.directory / f'{stage}.json' if self.directory else None
+        receipts = ResponseReceipts(self.directory / (stage + '-responses') if self.directory else None,
+            operation='organization:' + stage, source=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            contract=identity, model_identity={k: identity[k] for k in ('model', 'endpoint', 'effort', 'service_tier')},
+            validator_version='organization-schema-1')
+        retained = receipts.pending()
         if path and path.is_file() and not path.is_symlink():
             try:
                 saved = json.loads(path.read_text(encoding='utf-8'))
-                if saved.get('fingerprint') == fingerprint and (saved.get('accepted') or (stage == 'growth' and saved.get('field_recovery_pending'))):
+                if saved.get('fingerprint') == fingerprint and retained == saved.get('text') and retained is not None and (saved.get('accepted') or (stage == 'growth' and saved.get('field_recovery_pending'))):
                     value = _response_value(saved['text'], schema)
                     validator.validate(value)
                     self.records[stage] = saved
@@ -48,19 +69,33 @@ class StructuredCalls:
         record = {'fingerprint': fingerprint, 'request': identity, 'accepted': False}
         self.records[stage] = record
         try:
-            text = client.complete(system=system, user=json.dumps(payload, ensure_ascii=False), max_tokens=max_tokens)
+            if retained is not None and receipts.last_state == 'received':
+                text, request_id = retained, receipts.last_request_id
+            else:
+                request_id = receipts.begin()
+                text = client.complete(system=system, user=json.dumps(payload, ensure_ascii=False), max_tokens=max_tokens)
+                receipts.receive(request_id, text)
+            record['request_id'] = request_id
+            record['raw_response_hash'] = text_hash(text)
             record['text'] = text
             value = _response_value(text, schema)
             validator.validate(value)
+            receipts.mark(text, 'prepared')
             record['validation'] = 'structure_valid'
             return value
         except (ValueError, ValidationError) as error:
+            if 'text' in record:
+                receipts.mark(record['text'], 'parse_failed' if isinstance(error, ValueError) else 'validation_failed',
+                              category=getattr(error, 'category', 'schema_invalid'))
             record['validation'] = 'invalid_json' if isinstance(error, ValueError) else 'schema_invalid'
             if isinstance(error, ValidationError):
                 record['error_path'] = list(error.absolute_path)
                 record['validator'] = error.validator
             logger.warning('Organization %s response failed %s', stage, record['validation'])
             raise LLMRequestError('llm_response_invalid') from error
+        except OSError as error:
+            record['validation'] = 'checkpoint_unavailable'
+            raise LLMRequestError('llm_request_failed') from error
         except LLMRequestError as error:
             record['validation'] = 'provider_failed'
             raise
@@ -93,10 +128,7 @@ class StructuredCalls:
 
 
 def _response_value(text, schema):
-    raw = text.strip()
-    if raw.startswith('```json\n') and raw.endswith('\n```'):
-        raw = raw[len('```json\n'):-len('\n```')]
-    value = json.loads(raw)
+    value = parse_model_json(text).value
     # Some compatible transports echo the exact supplied schema beside the
     # instance. Only remove a provably identical envelope; never drop unknown
     # model fields or repair a domain decision.

@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import replace
 import json
+from knowledge_distiller.v1.model_json import parse_model_json
 from knowledge_distiller.semantic_support import ASSESSMENT_PROMPT, assess_correction
 from .domain import SourceFact
 from .ocr import OcrError
@@ -30,7 +31,7 @@ def review_ocr(fact, lineage, client):
         try:
             response=client.complete(system=PROMPT,user=json.dumps({'snapshot':fact.snapshot,'concerns':[
                 {'index':start+i,'text':u['text'],'reason':u.get('reason','')} for i,u in enumerate(group)]},ensure_ascii=False),max_tokens=3072)
-            rows=json.loads(response)['decisions']
+            rows=parse_model_json(response).value['decisions']
             if not isinstance(rows,list): raise ValueError
         except (LLMRequestError,ValueError,KeyError,TypeError):
             rows=[]
