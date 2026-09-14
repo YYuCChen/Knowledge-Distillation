@@ -288,13 +288,17 @@ def main(argv=None):
     if not args.no_open:
         webbrowser.open(url)
     if sys.platform == 'darwin':
-        from AppKit import NSApplication
-        from Foundation import NSOperationQueue
+        from AppKit import NSApplication, NSModalPanelRunLoopMode
+        from Foundation import NSDefaultRunLoopMode
         native = NSApplication.sharedApplication()
         native.setActivationPolicy_(0)
         def shutdown():
             server.shutdown()
-            NSOperationQueue.mainQueue().addOperationWithBlock_(lambda:native.terminate_(None))
+            # A picker runs a nested modal loop inside a main-queue operation.
+            # Target that run loop directly: another queued operation cannot run
+            # until the picker completes, leaving the installer alive on close.
+            native.performSelectorOnMainThread_withObject_waitUntilDone_modes_(
+                'terminate:', None, False, [NSDefaultRunLoopMode, NSModalPanelRunLoopMode])
         app.config['SHUTDOWN'] = shutdown
         threading.Thread(target=server.serve_forever, daemon=True).start()
         native.run()
