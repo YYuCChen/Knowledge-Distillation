@@ -1,0 +1,44 @@
+{
+  "id": "SC-RECORD-LONG-PATH",
+  "requirement_ids": [
+    "BUG-20260914-04"
+  ],
+  "symptom": "Windows response checkpoints exceeded MAX_PATH during write and subsequent cleanup.",
+  "evidence_state": "specific_long_path_lifecycle_fixed_windows_verified",
+  "severity": "S1",
+  "decision": "must_fix_now",
+  "affected_components": [
+    "model_json",
+    "main"
+  ],
+  "corruption_or_privacy": "Checkpoint write failure blocks derived knowledge; cleanup failure retains disposable checkpoint.",
+  "core_path": true,
+  "propagation": [
+    "model_json",
+    "main"
+  ],
+  "workaround": null,
+  "verification": [
+    "tests/v1/test_knowledge_presentation.py",
+    "tests/v1/test_response_receipts.py",
+    "tests/v1/test_temporary_artifacts.py"
+  ],
+  "owner": "A",
+  "target": "V1.3",
+  "status": "closed",
+  "original_evidence": "V1.3开发-20260914/audio-evidence/windows-quality-old-progress/plan",
+  "scenario_ids": [
+    "SC-JSON-ENVELOPE--synthetic"
+  ],
+  "closure_scope": "Lexical extended Win32 paths cover checkpoint write, lock, recovery, atomic retry, retention and cleanup. Windows 63 tests passed with original long root and added paths exceeding 440 characters.",
+  "closure_limits": [
+    "final packaged Windows runtime remains an independent acceptance requirement"
+  ],
+  "evidence_references": [
+    {
+      "locator": "V1.3开发-20260914/audio-evidence/windows-record-paths-result-r3/junit.xml",
+      "sha256": "e17b9811393eb35fa35aeda58f9d10a5295c8244b17e8a52c11a5e01cd5419b8",
+      "scope": "actual Windows module regression; not a packaged native scenario passport"
+    }
+  ]
+}
