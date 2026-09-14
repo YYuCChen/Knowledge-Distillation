@@ -128,7 +128,8 @@ class StructuredCalls:
 
 
 def _response_value(text, schema):
-    value = parse_model_json(text).value
+    # Preserve this organization entry's pre-existing outer whitespace policy.
+    value = parse_model_json(text.strip()).value
     # Some compatible transports echo the exact supplied schema beside the
     # instance. Only remove a provably identical envelope; never drop unknown
     # model fields or repair a domain decision.

@@ -81,3 +81,9 @@ def test_organization_schema_echo_is_not_a_global_policy():
     # arbitrary properties out of an echoed request schema.
     with pytest.raises(KnowledgeModelError):
         parse_knowledge('来源。', raw)
+
+
+def test_organization_retains_its_existing_trim_policy_only_here():
+    assert _response_value('\u00a0{"ok":true}\u00a0', {}) == {'ok': True}
+    with pytest.raises(ModelJSONError):
+        parse_model_json('\u00a0{"ok":true}\u00a0')
