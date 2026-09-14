@@ -213,3 +213,19 @@ def test_request_identity_conflict_cannot_be_hidden_by_semantic_replay(tmp_path)
                  json.dumps({'state': 'waiting_user'}), '[]', 'fixture'))
     with pytest.raises(ConfirmationConflict, match='payload_conflict'):
         store.group_decision(item, {**first, 'request_id': 'second'})
+
+
+def test_deferred_members_leave_an_actionable_review_card(store):
+    item=store.create_item('https://www.douyin.com/video/704')
+    value=pending()
+    store.mark_waiting(item,value)
+    value=store.confirmation_view(item)
+    value['deferred_concerns']=value.pop('concerns')
+    value['concerns']=[]
+    value['review_required']=True
+    store.mark_waiting(item,value)
+    active=store.manual_cards()
+    assert len(active)==1
+    assert json.loads(active[0]['mapping_json'])['group']['kind']=='review'
+    restored=store.confirmation_view(item)
+    assert len(restored['deferred_concerns'])==2

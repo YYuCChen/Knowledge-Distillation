@@ -112,7 +112,7 @@ def normalize(pending, item_id, previous=(), *, legacy=False):
         if uid not in covered:
             normalized_groups.append({'group_id': digest(['single', round_id, uid]), 'member_uids': [uid],
                 'equivalence_basis': {'kind': 'single_member'}, 'formation_version': 1})
-    if result.get('review_required') and not normalized_groups:
+    if result.get('review_required') and not result.get('concerns') and not any(g.get('kind') == 'review' for g in normalized_groups):
         normalized_groups.append({'group_id': digest(['review', round_id]), 'member_uids': [],
             'kind': 'review', 'equivalence_basis': {'kind': 'single_review'}, 'formation_version': 1})
     for group in normalized_groups:
@@ -169,7 +169,8 @@ def sync(db, item_id, *, migration=False):
              'migration_inferred' if migration else 'observed', reason, row['created_at'] if migration else row['updated_at'], encoded(mapping)))
     for card in db.execute('SELECT group_id FROM manual_cards WHERE item_id=? AND review_round_id=?', (item_id,pending['review_round_id'])).fetchall():
         if card['group_id'] not in live_groups:
-            db.execute("UPDATE manual_cards SET lifecycle='resolved' WHERE item_id=? AND review_round_id=? AND group_id=?", (item_id,pending['review_round_id'],card['group_id']))
+            lifecycle = 'superseded' if card['group_id'] in pending.get('superseded_group_ids', []) else 'resolved'
+            db.execute("UPDATE manual_cards SET lifecycle=? WHERE item_id=? AND review_round_id=? AND group_id=?", (lifecycle,item_id,pending['review_round_id'],card['group_id']))
 
 
 def migrate(db):
