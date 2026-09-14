@@ -37,3 +37,12 @@ def test_long_aligned_target_cannot_fall_back_to_short_alternative(tmp_path):
     start, end = candidate.index('alpha'), candidate.index(' finish')
     concern = ReviewConcern(start, end, candidate[start:end], 'unclear', True, ('gamma',))
     assert locate_concern_audio(StandardAudio(path, 28), recovery, candidate, concern) is None
+
+
+def test_target_beyond_source_duration_is_unavailable(tmp_path):
+    path = tmp_path / 'source.wav'
+    path.write_bytes(b'present')
+    text = 'tail'
+    recovery = PrimaryRecovery(text, 'en', (PrimaryChunk(text, 18, 20.2, 'en'),))
+    concern = ReviewConcern(0, len(text), text, 'unclear', True)
+    assert locate_concern_audio(StandardAudio(path, 20), recovery, text, concern) is None
