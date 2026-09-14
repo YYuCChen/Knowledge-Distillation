@@ -1,0 +1,35 @@
+{
+  "id": "SC-DESKTOP-EXIT",
+  "requirement_ids": [
+    "BUG-20260914-08"
+  ],
+  "symptom": "Confirmed browser exit uses floating-point grace backdating; a same-tick rounding boundary leaves exited pages registered.",
+  "evidence_state": "reproduced_on_windows_fix_in_progress",
+  "severity": "S1",
+  "decision": "must_fix_now",
+  "affected_components": [
+    "desktop"
+  ],
+  "corruption_or_privacy": "Core desktop reopening state may retain a browser instance already confirmed exited.",
+  "core_path": true,
+  "propagation": [
+    "desktop",
+    "main"
+  ],
+  "workaround": null,
+  "verification": [
+    "tests/v1/test_desktop_pages.py"
+  ],
+  "owner": "C",
+  "target": "V1.3",
+  "status": "open",
+  "original_evidence": "V1.3开发-20260914/audio-evidence/windows-0d9-desktop-failure.log",
+  "scenario_ids": [
+    "SC-DESKTOP-REOPEN--synthetic"
+  ],
+  "expected_assertions": [
+    "confirmed exited browser removes only its associated pages without dependence on wall-clock progress",
+    "unassociated manual pages survive",
+    "target acknowledgement cannot remain valid after removal"
+  ]
+}
