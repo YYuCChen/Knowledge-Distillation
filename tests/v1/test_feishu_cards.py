@@ -299,3 +299,15 @@ def test_long_optional_group_candidates_cannot_overflow_card_or_hide_scope():
     assert '作用于全部 32 处' in value
     assert '下段上下文' in value
     assert 'group_choice_' not in value
+
+
+def test_group_deferred_card_offers_restore_not_finish(inbox):
+    inbox.receive(history_message(message()),history=True)
+    item=inbox.store.create_item('https://www.douyin.com/video/706',receipt_key=(inbox.app_id,'om_1',0))
+    inbox.store.mark_waiting(item,{'snapshot':'词','concerns':[],
+        'deferred_concerns':[{'text':'词','start':0,'end':1,'audio_name':'deferred'}],
+        'review_required':True,'group_confirmation_contract':1})
+    card=FeishuCards(inbox,None,None).card('om_1')
+    value=json.dumps(card,ensure_ascii=False)
+    assert 'restore_deferred' in value
+    assert 'finish_transcript' not in value

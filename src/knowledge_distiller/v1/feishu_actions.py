@@ -81,9 +81,10 @@ class FeishuActions:
                 if not isinstance(submitted,str):
                     return self._toast('error','请输入正确文字。')
                 engine=self.distiller() if callable(self.distiller) else self.distiller
-                engine.resolve_group(item_id,value.get('action'),submitted,token=value['token'],
-                    request_id=value.get('request_id',''),group_id=value['group_id'],
+                kwargs=dict(token=value['token'],request_id=value.get('request_id',''),group_id=value['group_id'],
                     group_revision=value['group_revision'],selected_member_uids=value.get('selected_member_uids',[]),actor='feishu')
+                if value.get('action')=='rerecognize_reference':engine.rerecognize_group(item_id,**kwargs)
+                else:engine.resolve_group(item_id,value.get('action'),submitted,**kwargs)
                 if self.wake:self.wake()
                 return self._toast('success','已保存所示范围的判断。')
             if value.get('kind')!='source_confirmation':
@@ -125,6 +126,10 @@ class FeishuActions:
                 if not view.get('edits'):return self._toast('error','没有可提交的分段修改，请先保存草稿。')
                 value={**value,'action':'manual','value':''.join(view.get('edits',{}).get(str(n),part) for n,part in enumerate(pages))}
                 action={**action,'form_value':{'correction':value['value']}}
+            if value.get('action')=='restore_deferred':
+                engine=self.distiller() if callable(self.distiller) else self.distiller
+                engine.restore_group_deferred(item_id,token=value['token'])
+                return self._toast('success','未决位置已恢复，请逐处核对。')
             if value.get('action')=='finish_transcript':
                 if pending.get('kind')=='image' or pending.get('concerns'):
                     return self._toast('error','请先完成当前疑点确认。')

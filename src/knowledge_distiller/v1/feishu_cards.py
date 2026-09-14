@@ -219,6 +219,8 @@ class FeishuCards:
         single={**base,'selected_member_uids':[member['concern_uid']],
                 'request_id':group['group_revision']+'-'+member['concern_uid']}
         elements.append(button('仅此处无法确认','group_unable',{**single,'action':'unable'}))
+        elements.append(button('仅此处重新识别参考','group_reference',{**single,'action':'rerecognize_reference',
+            'request_id':single['request_id']+'-reference'}))
         elements.append(text('如需只采用某个答案，请在电脑的本组卡片勾选所需位置；本卡上述批量操作范围始终为全部所示位置。'))
         return elements
 
@@ -233,6 +235,9 @@ class FeishuCards:
         from .feishu_views import chunks,read,controls
         view=read(self.inbox,message_id,pending['token'])
         if not pending['concerns']:
+            if pending.get('group_confirmation_contract') and pending.get('deferred_concerns'):
+                return [text('仍有未决位置，原文和原音保留，请重新核对。'),
+                        button('重新核对未决位置','restore_deferred',{**base,'action':'restore_deferred'})]
             pages=chunks(pending['snapshot'],2000)
             page=min(view.get('page',0),len(pages)-1)
             return [text(pages[page]),*controls(base,page,len(pages)),button('完成核对并继续','finish_transcript',

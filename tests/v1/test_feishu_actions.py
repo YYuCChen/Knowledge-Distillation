@@ -133,3 +133,16 @@ def test_busy_database_returns_prompt_retry_without_false_receipt(inbox):
     finally:blocker.rollback();blocker.close()
     with connect(inbox.store.path) as db:
         assert db.execute('SELECT count(*) FROM feishu_action_queue').fetchone()[0]==0
+
+
+def test_group_replay_reaches_shared_ledger_before_stale_token_rejection(inbox):
+    item,payload=setup_action(inbox)
+    payload['event']['action']['value']={
+        'kind':'group_confirmation','item_id':item,'token':'previous-successful-token',
+        'action':'keep','request_id':'recorded-request','group_id':'recorded-group',
+        'group_revision':'recorded-revision','selected_member_uids':['member-a']}
+    engine=SimpleNamespace(resolve_group=Mock())
+    assert FeishuActions(inbox,None,engine).handle(payload)['toast']['type']=='success'
+    engine.resolve_group.assert_called_once_with(item,'keep','',token='previous-successful-token',
+        request_id='recorded-request',group_id='recorded-group',group_revision='recorded-revision',
+        selected_member_uids=['member-a'],actor='feishu')

@@ -383,3 +383,7 @@ mark {
 .group-confirmation-card audio { max-width: 100%; }
 .group-confirmation-card input[name="value"] { display: block; max-width: 100%; width: 100%; }
 .group-confirmation-card [data-sync-key^="member-"] { margin-block: 16px; }
+.group-confirmation-card .primary-small,
+.group-confirmation-card .secondary-small { width: auto; min-height: 28px; height: auto; white-space: normal; line-height: 1.4; overflow: visible; }
+.group-confirmation-card .candidate-actions { max-width: 100%; }
+[data-audio-switch] { width: auto; min-height: 28px; height: auto; white-space: normal; line-height: 1.4; overflow: visible; }
