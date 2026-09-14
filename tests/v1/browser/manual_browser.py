@@ -22,7 +22,33 @@ server=serve()
 threading.Thread(target=server.serve_forever,daemon=True).start()
 log=[]
 def browser(*command,js=None):
-    result=subprocess.run(['agent-browser','--session',session,*command],input=js,text=True,capture_output=True,timeout=45)
+    argv=['agent-browser','--session',session,*command]
+    if platform.system()=='Windows':
+        # The browser daemon inherits PIPE handles on Windows, preventing EOF
+        # after the CLI exits. Files preserve output without waiting on the daemon.
+        capture=args.output/'command-capture'
+        capture.mkdir(exist_ok=True)
+        prefix=capture/str(len(log))
+        stdin_path=prefix.with_suffix('.stdin')
+        stdout_path=prefix.with_suffix('.stdout')
+        stderr_path=prefix.with_suffix('.stderr')
+        stdin_path.write_text(js or '',encoding='utf-8')
+        timeout_error=None
+        with stdin_path.open('rb') as stdin,stdout_path.open('wb') as stdout,stderr_path.open('wb') as stderr:
+            try:
+                completed=subprocess.run(argv,stdin=stdin,stdout=stdout,stderr=stderr,timeout=45)
+            except subprocess.TimeoutExpired as error:
+                timeout_error=error
+        stdout_text=stdout_path.read_text(encoding='utf-8',errors='replace')
+        stderr_text=stderr_path.read_text(encoding='utf-8',errors='replace')
+        if timeout_error is not None:
+            log.append({'command':list(command),'returncode':None,'timeout_seconds':45,'stdout':stdout_text,'stderr':stderr_text})
+            timeout_error.output=stdout_text
+            timeout_error.stderr=stderr_text
+            raise timeout_error
+        result=subprocess.CompletedProcess(argv,completed.returncode,stdout_text,stderr_text)
+    else:
+        result=subprocess.run(argv,input=js,text=True,capture_output=True,timeout=45)
     log.append({'command':list(command),'returncode':result.returncode,'stdout':result.stdout,'stderr':result.stderr})
     if result.returncode:raise RuntimeError('browser command failed: '+str(command))
     return result.stdout
