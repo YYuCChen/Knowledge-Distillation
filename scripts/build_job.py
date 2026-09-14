@@ -73,8 +73,21 @@ def locked(path, timeout=0):
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
 
+def read_status_json(path):
+    # Windows may reject a reader briefly while the writer replaces status.
+    # Persistent ACL errors still surface; malformed JSON is never retried.
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            return json.loads(path.read_text(encoding='utf-8'))
+        except PermissionError:
+            if sys.platform != 'win32' or time.monotonic() >= deadline:
+                raise
+            time.sleep(.01)
+
+
 def status(job):
-    state = json.loads((job / 'status.json').read_text(encoding='utf-8')) if (job / 'status.json').exists() else {'status': 'interrupted' if any(job.glob('attempt-*')) else 'not-started'}
+    state = read_status_json(job / 'status.json') if (job / 'status.json').exists() else {'status': 'interrupted' if any(job.glob('attempt-*')) else 'not-started'}
     if state['status'] == 'running':
         try:
             with locked(job / 'worker.lock'):
