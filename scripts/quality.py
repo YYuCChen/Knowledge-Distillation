@@ -728,6 +728,7 @@ def run(plan, path, gate, disposable):
                                 result='running',outputs=[],artifact_sha256=None,invocation=[])
                 atomic(evidence_path,passport)
                 process = None
+                browser_sockets = None
                 try:
                     if scenario['platform'] not in ('host',host_platform()): raise Gap('requires native host ' + scenario['platform'])
                     passport['artifact_sha256'] = artifact_identity(plan,scenario)
@@ -740,6 +741,10 @@ def run(plan, path, gate, disposable):
                                LOCALAPPDATA=str(home/'AppData/Local'),TMPDIR=str(attempt),TEMP=str(attempt),TMP=str(attempt),
                                PYTHONPATH=str(root/'src')+os.pathsep+str(root),PYTHONUTF8='1',PYTHONDONTWRITEBYTECODE='1',
                                PYTEST_DISABLE_PLUGIN_AUTOLOAD='1',KNOWLEDGE_DISTILLER_DATA_DIR=str(attempt/'data'))
+                    if os.name != 'nt' and scenario['runner']['adapter'] in ('desktop_browser', 'manual_browser'):
+                        # Unix socket paths have a 103-byte macOS limit; the isolated HOME is longer.
+                        browser_sockets = tempfile.TemporaryDirectory(prefix='kdbr-', dir='/tmp')
+                        env['AGENT_BROWSER_SOCKET_DIR'] = browser_sockets.name
                     with (logdir/'stdout.log').open('wb') as stdout, (logdir/'stderr.log').open('wb') as stderr:
                         process = subprocess.Popen(command,cwd=root,env=env,stdout=stdout,stderr=stderr,start_new_session=os.name!='nt')
                         passport['exit_code']=process.wait(timeout=scenario['timeout'])
@@ -767,6 +772,8 @@ def run(plan, path, gate, disposable):
                             if os.name!='nt': os.killpg(process.pid,signal.SIGKILL)
                             else: process.kill()
                             process.wait()
+                    if browser_sockets is not None:
+                        browser_sockets.cleanup()
                     # Copy machine-readable assertion result, retain raw attempt data locally.
                     for relative in output_paths(scenario,attempt):
                         source=attempt/relative

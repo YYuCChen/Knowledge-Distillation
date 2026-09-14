@@ -9,8 +9,8 @@ def test_poll_in_flight_never_discards_submit_or_overwrites_its_result():
 const vm=require('vm'), fs=require('fs'), assert=require('assert');
 const handlers={},requests=[],applied=[];
 const feedback={textContent:"",hidden:true,setAttribute(){}}, organization={textContent:""};
-const context={console,Map,Array,Error,FormData:class{append(){}},
- document:{getElementById:()=>null,querySelector:s=>s==='[data-live-status]'?{}:s==='#confirmation-action-feedback'?feedback:s==='.organization-feedback'?organization:null,querySelectorAll:()=>[],
+const context={console,Map,Array,Error,AbortController,setTimeout(){},clearTimeout(){},FormData:class{append(){}},
+ document:{getElementById:()=>null,querySelector:s=>s==='#home-results'?{}:s==='#confirmation-action-feedback'?feedback:s==='.organization-feedback'?organization:null,querySelectorAll:()=>[],
  addEventListener:(name,fn)=>{handlers[name]=fn},fonts:{ready:Promise.resolve()}},
  window:{setTimeout(){},addEventListener(){},location:{href:'/'},kdDialog:async()=>true},
  localStorage:{getItem(){return null}},ResizeObserver:class{observe(){}disconnect(){}},
@@ -19,7 +19,7 @@ vm.createContext(context);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'
 context.applyPage=(html)=>applied.push(html);
 (async()=>{
 const poll=context.pollStatus();assert.equal(requests.length,1);
-const button={disabled:false,textContent:'采用'};
+const button={disabled:false,textContent:'采用',getAttribute:()=>null};
 const form={id:'candidate-1',matches:()=>false,closest:()=>true,getAttribute:()=>'/confirm'};
 const submit=handlers.submit({target:form,submitter:button,preventDefault(){}});
 await Promise.resolve();assert.equal(requests.length,2,'click during polling must issue POST');
