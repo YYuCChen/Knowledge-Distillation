@@ -248,6 +248,14 @@ def test_windows_only_assertion_is_registered_separately():
     mac_desktop=next(s for s in scenarios if s['id']=='SC-DESKTOP-REOPEN--macos-arm64--synthetic')
     assert 'tests/v1/test_mac_app.py' not in desktop['runner']['paths']
     assert mac_desktop['platform']=='macos-arm64' and mac_desktop['runner']['paths']==['tests/v1/test_mac_app.py']
+    launcher_node='tests/v1/test_desktop_pages.py::test_second_launcher_queues_on_owning_server'
+    launcher=next(s for s in scenarios if s['id']=='SC-DESKTOP-LAUNCHER--macos-arm64')
+    assert desktop['runner']['deselect'].count(launcher_node)==1
+    assert launcher['platform']=='macos-arm64' and launcher['runner']['nodeids']==[launcher_node]
+    launcher_command=q.command_for(launcher,{'source_root':str(q.ROOT)},Path('/tmp/isolated'))
+    assert launcher_node in launcher_command
+    assert 'tests/v1/test_mac_app.py' not in launcher_command
+    assert '--deselect='+launcher_node in q.command_for(desktop,{'source_root':str(q.ROOT)},Path('/tmp/isolated'))
     assert windows['platform']=='windows-x64' and windows['level']=='integration'
     command=q.command_for(windows,{'source_root':str(q.ROOT)},Path('/tmp/isolated'))
     assert windows['runner']['nodeids'][0] in command
@@ -385,10 +393,12 @@ def test_cross_host_report_checks_measured_execution_not_collector(repository,tm
     assert q.run(plan,directory/'plan.json','module',tmp_path/'data')['exit_code']==0
     passport=q.read(directory/'evidence/unit.json');scenario=plan['scenarios'][0]
     # The evidence was executed for real above. Simulate the receiving collector OS only.
-    monkeypatch.setattr(q,'host_platform',lambda:'windows-x64')
-    monkeypatch.setattr(q.platform,'platform',lambda:'Windows-10-collector')
+    foreign_platform='macos-arm64' if passport['platform']=='windows-x64' else 'windows-x64'
+    assert foreign_platform != passport['platform']
+    monkeypatch.setattr(q,'host_platform',lambda:foreign_platform)
+    monkeypatch.setattr(q.platform,'platform',lambda:'foreign-collector-os')
     assert q.verify_passport(passport,scenario,plan,directory)
-    other=dict(scenario,platform='windows-x64')
+    other=dict(scenario,platform=foreign_platform)
     with pytest.raises(q.Blocked,match='platform mismatch'):q.verify_passport(passport,other,plan,directory)
     environment_record=next(r for r in passport['outputs'] if r['path'].endswith('execution-environment.json'))
     environment_path=directory/environment_record['path'];measurement=q.read(environment_path)
