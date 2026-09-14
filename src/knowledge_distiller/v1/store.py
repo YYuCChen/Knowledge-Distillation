@@ -995,10 +995,11 @@ def _group_payload(request):
 
 def _group_decision(db, item_id, request):
     from .confirmation_schema import digest
-    row = db.execute('''SELECT * FROM group_decisions WHERE item_id=? AND
-        (request_id=? OR (submitted_revision=? AND selection_digest=?))''',
-        (item_id, request['request_id'], request['group_revision'],
-         digest(sorted(request['selected_member_uids'])))).fetchone()
+    row = db.execute('SELECT * FROM group_decisions WHERE item_id=? AND request_id=?',
+                     (item_id, request['request_id'])).fetchone()
+    if row is None:
+        row = db.execute('SELECT * FROM group_decisions WHERE item_id=? AND submitted_revision=? AND selection_digest=?',
+                         (item_id, request['group_revision'], digest(sorted(request['selected_member_uids'])))).fetchone()
     if row is None:
         return None
     if row['payload_digest'] != digest(_group_payload(request)):

@@ -190,3 +190,26 @@ def test_unselected_group_member_change_prevents_partial_commit(store):
     assert store.item_bundle(item)['confirmation_json'] == raw
     with connect(store.path) as db:
         assert db.execute('SELECT COUNT(*) FROM group_decisions').fetchone()[0] == 0
+
+
+def test_request_identity_conflict_cannot_be_hidden_by_semantic_replay(tmp_path):
+    from knowledge_distiller.v1.store import Store, _group_payload
+    from knowledge_distiller.v1.confirmation_schema import digest
+    from knowledge_distiller.v1.database import connect
+    from knowledge_distiller.v1.confirmation_revision import ConfirmationConflict
+    import json
+    import pytest
+    store = Store(tmp_path / 'ledger.sqlite3')
+    store.initialize()
+    item = store.create_item('https://www.douyin.com/video/ledger')
+    first = {'request_id': 'first', 'group_id': 'group', 'group_revision': 'revision-one',
+             'selected_member_uids': ['a'], 'action': 'keep', 'value': ''}
+    second = {**first, 'request_id': 'second', 'group_revision': 'revision-two'}
+    with connect(store.path) as db:
+        for request in (first, second):
+            db.execute('INSERT INTO group_decisions VALUES (?,?,?,?,?,?,?,?,?)',
+                (item, request['request_id'], request['group_id'], request['group_revision'],
+                 digest(request['selected_member_uids']), digest(_group_payload(request)),
+                 json.dumps({'state': 'waiting_user'}), '[]', 'fixture'))
+    with pytest.raises(ConfirmationConflict, match='payload_conflict'):
+        store.group_decision(item, {**first, 'request_id': 'second'})
