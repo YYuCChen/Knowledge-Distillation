@@ -14,7 +14,7 @@ import wave
 worker = sys.argv.pop(1)
 source = Path(sys.argv[6]).resolve()
 output = Path(sys.argv[-1]).with_suffix('.pcm-reads.json')
-reads = []
+reads, writes = [], []
 original_open = wave.open
 
 
@@ -31,6 +31,13 @@ def traced_open(file, mode=None):
                           'pcm_sha256': hashlib.sha256(data).hexdigest()})
             return data
         stream.readframes = readframes
+    if mode == 'wb' and isinstance(file, (str, Path)) and Path(file).name == 'chunk.wav':
+        original_write = stream.writeframes
+        def writeframes(data):
+            writes.append({'frames': len(data) // (stream.getnchannels() * stream.getsampwidth()),
+                           'pcm_sha256': hashlib.sha256(data).hexdigest()})
+            return original_write(data)
+        stream.writeframes = writeframes
     return stream
 
 
@@ -38,4 +45,4 @@ wave.open = traced_open
 try:
     runpy.run_path(worker, run_name='__main__')
 finally:
-    output.write_text(json.dumps({'source': str(source), 'reads': reads}, indent=2))
+    output.write_text(json.dumps({'source': str(source), 'reads': reads, 'decoder_piece_writes': writes}, indent=2))

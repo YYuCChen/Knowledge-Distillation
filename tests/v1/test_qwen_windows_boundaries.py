@@ -25,3 +25,21 @@ def test_continuous_audio_keeps_a_bounded_contiguous_fallback():
     rate = 16000
     assert worker.source_ranges(b'\xe8\x03' * (rate*41), rate) == [
         (0,rate*20),(rate*20,rate*40),(rate*40,rate*41)]
+
+
+def test_windows_worker_change_invalidates_only_its_cache_identity(tmp_path, monkeypatch):
+    from knowledge_distiller.v1 import qwen_component
+    for name in ('qwen_windows_worker.py', 'qwen_worker.py'):
+        (tmp_path / name).write_text('old worker')
+    monkeypatch.setattr(qwen_component, 'ASSETS', tmp_path)
+    class Component:
+        def __init__(self, windows):
+            self.windows = windows
+        def identity(self):
+            return ('test-runtime', 'test-model')
+    windows = qwen_component.ComponentQwenRuntime(Component(True))
+    mac = qwen_component.ComponentQwenRuntime(Component(False))
+    old_windows, old_mac = windows.cache_identity, mac.cache_identity
+    (tmp_path / 'qwen_windows_worker.py').write_text('pause-aware worker')
+    assert windows.cache_identity != old_windows
+    assert mac.cache_identity == old_mac

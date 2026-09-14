@@ -53,7 +53,9 @@ class Binding:
                'HF_HOME': str(self.args.output / 'hf-cache'),
                'XDG_CACHE_HOME': str(self.args.output / 'cache'),
                'TMPDIR': str(self.args.output / 'tmp'), 'PYTHONUTF8': '1'}
-        command = [str(self.args.python), '-I', '-B', str(self.args.worker), 'transcribe',
+        entry = ([str(Path(__file__).with_name('trace_qwen_pcm_reads.py'))]
+                 if getattr(self.args, 'trace_worker_pcm', False) else [])
+        command = [str(self.args.python), '-I', '-B', *entry, str(self.args.worker), 'transcribe',
                    str(self.args.model), model_id, revision, runtime, str(path), str(run / 'result.json')]
         started = time.time()
         with (run / 'stderr.txt').open('wb') as errors:
@@ -82,6 +84,7 @@ def main():
     parser = argparse.ArgumentParser()
     for name in ('python', 'worker', 'model', 'fixtures', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--trace-worker-pcm', action='store_true')
     parser.add_argument('--engine', choices=('mlx', 'transformers'), required=True)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
