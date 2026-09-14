@@ -3,8 +3,8 @@
   "requirement_ids": [
     "BUG-20260914-08"
   ],
-  "symptom": "SC-DESKTOP-REOPEN frozen regression family",
-  "evidence_state": "module_evidence_recorded_candidate_not_run",
+  "symptom": "Normal product page closed while the app remains running; clicking Dock must reopen an owned page instead of trusting stale page presence.",
+  "evidence_state": "specific_normal_close_defect_verified_on_signed_candidate",
   "severity": "S1",
   "decision": "must_fix_now",
   "affected_components": [
@@ -22,7 +22,7 @@
   ],
   "owner": "C",
   "target": "V1.3",
-  "status": "module_fixed_candidate_pending",
+  "status": "closed",
   "original_evidence": "窗口5 §12.3 / 窗口6 §7",
   "synthetic_counterexample": [
     "tests/v1/test_desktop_pages.py",
@@ -35,16 +35,21 @@
     "SC-DESKTOP-REOPEN--synthetic",
     "SC-DESKTOP-REOPEN--macos-arm64--native"
   ],
-  "review_note": "Registered regressions are execution requirements; this index does not promote old logs into current candidate passports.",
+  "review_note": "Closed only the reproduced normal-close recovery defect: one isolated signed r2 app, one real Chrome page, actual user Dock click, 0 to 1 owned page with opened_handshake and visible_reported. No fake native event or forced browser foreground. Full Chrome/Safari, multiple windows, frozen tab and browser-exit matrix remains for W8; reopen this incident on a failing counterexample.",
   "evidence_references": [
     {
       "scope": "local delivery index; not a reusable quality passport",
       "locator": "项目治理/执行核验/V1.3开发-20260914/C-desktop/handoff.json",
       "sha256": "fda4c94c1ea6d5cd6b2e3612464bc1060da55a5ffe133a45db2f16962099507c"
+    },
+    {
+      "scope": "native user-triggered minimal regression; not a complete native scenario passport",
+      "locator": "项目治理/执行核验/V1.3开发-20260914/C-desktop/native-minimum-20260915/result.json",
+      "sha256": "c16cf0caebb5492b31a8e8a15ce8f067846269a223fcf42a94eb214418b1b7f3"
     }
   ],
   "remaining_verification": [
     "SC-DESKTOP-REOPEN--macos-arm64--native"
   ],
-  "severity_basis": "Normal zero-page recovery is a frozen core path; protocol/module repair does not close the missing native Dock matrix."
+  "severity_basis": "The concrete normal-close recovery defect has user-triggered Dock and observed signed-candidate evidence. Remaining full native matrix is a separate acceptance requirement, not silently marked passed."
 }
