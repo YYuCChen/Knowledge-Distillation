@@ -468,12 +468,14 @@
       "runner": {
         "adapter": "pytest",
         "paths": [
-          "tests/v1/test_asr_recovery.py"
+          "tests/v1/test_asr_recovery.py",
+          "tests/v1/test_qwen_windows_boundaries.py"
         ]
       },
       "fixture": "quality/fixtures.json",
       "assertions": [
-        "existing_registered_test_assertions"
+        "existing_registered_test_assertions",
+        "Windows pause-aware ranges cover every PCM frame exactly once, with bounded no-pause fallback and platform-specific worker cache invalidation"
       ],
       "timeout": 300,
       "not_proven": [

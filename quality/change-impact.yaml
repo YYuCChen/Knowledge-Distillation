@@ -303,7 +303,8 @@
         "tests/v1/test_docling_source.py",
         "tests/v1/test_qwen_component.py",
         "tests/v1/test_qwen_migration.py",
-        "tests/v1/test_qwen_windows_decode.py"
+        "tests/v1/test_qwen_windows_decode.py",
+        "tests/v1/test_qwen_windows_boundaries.py"
       ],
       "depends_on": [],
       "artifact": true
@@ -702,7 +703,8 @@
         "packaging/assets/installer-icon.ico",
         "packaging/assets/installer-icon.json",
         "scripts/build_installer_icon.py",
-        "tests/test_installer_packaging.py"
+        "tests/test_installer_packaging.py",
+        "packaging/version_metadata.py"
       ],
       "depends_on": [
         "main",
