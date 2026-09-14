@@ -4,7 +4,9 @@ import json
 
 
 class ConfirmationConflict(ValueError):
-    pass
+    def __init__(self, message, *, affected_member_uids=()):
+        super().__init__(message)
+        self.affected_member_uids = tuple(affected_member_uids)
 
 
 def revision(pending, concern):
