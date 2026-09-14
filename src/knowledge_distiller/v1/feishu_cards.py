@@ -36,7 +36,7 @@ def option_rows(options):
     return rows
 
 
-def concern_context(snapshot,concern):
+def concern_context(snapshot,concern,*,shorten=True):
     start,end=concern.get('start'),concern.get('end')
     if not (isinstance(start,int) and isinstance(end,int) and
             0<=start<end<=len(snapshot) and snapshot[start:end]==concern['text']):
@@ -51,11 +51,42 @@ def concern_context(snapshot,concern):
     from .confirmation_display import _clusters
     marked = view['marked']
     clusters = _clusters(marked)
-    if len(clusters) > 120:
+    if shorten and len(clusters) > 120:
         marked = marked[:clusters[59][1]] + '…' + marked[clusters[-60][0]:]
     excerpt = ('…' if view['omitted_before'] else '') + view['before'] + '【' + marked + '】' + view['after'] + ('…' if view['omitted_after'] else '')
     return re.sub(r'\s+', ' ', excerpt).strip()
 
+
+
+def fit_card(card):
+    """Leave headroom under the documented 30 KB card update limit.
+
+    Optional group candidates are removed first. Full group context remains
+    available through the card's paragraph navigation; scope is never hidden.
+    """
+    def size():return len(json.dumps(card,ensure_ascii=False).encode('utf-8'))
+    elements=card['body']['elements']
+    def optional(element):
+        if isinstance(element,dict):
+            if str(element.get('name','')).startswith('group_choice_'):return True
+            return any(optional(value) for value in element.values())
+        return isinstance(element,list) and any(optional(value) for value in element)
+    removed=False
+    for element in list(reversed(elements)):
+        if size()<=28000:break
+        if optional(element):elements.remove(element);removed=True
+    if removed:elements.append(text('部分长候选未在本卡展示；可自填完整答案，或在电脑查看所有候选。'))
+    if size()>28000:
+        from .confirmation_display import _clusters
+        for element in elements:
+            value=element.get('text',{})
+            content=value.get('content','')
+            if len(content)>2000:
+                clusters=_clusters(content)
+                value['content']=content[:clusters[min(255,len(clusters)-1)][1]]+'…（完整上下文请使用分段查看）'
+    if size()>30000:
+        raise ValueError('卡片内容超过容量，已保留待办；请在电脑打开知识蒸馏器查看。')
+    return card
 
 
 class FeishuCards:
@@ -70,6 +101,9 @@ class FeishuCards:
             parts=db.execute('SELECT * FROM feishu_parts WHERE app_id=? AND message_id=? ORDER BY position',
                 (self.inbox.app_id,message_id)).fetchall()
         if receipt is None:raise ValueError('unknown receipt')
+        from .feishu_scopes import items as receipt_items
+        items=receipt_items(self.inbox,message_id)
+        actionable=False
         elements=[text('已收到这条投递。')]
         title='知识蒸馏器'
         if receipt['state']=='needs_desktop' and receipt['error']:
@@ -77,6 +111,7 @@ class FeishuCards:
         elif receipt['state']=='rejected':
             elements=[text(receipt['error'])]
         elif receipt['state']=='waiting_input' and receipt['content_kind'] is None:
+            actionable=True
             title='请选择处理方式'
             elements=[text('这条消息同时包含正文和链接，请选择本次要处理的内容。'),
                 button('处理链接','choose_links',{'kind':'content_choice','choice':'links'}),
@@ -86,7 +121,11 @@ class FeishuCards:
             items=receipt_items(self.inbox,message_id)
             scope_elements=self._scope(parts,message_id)
             waiting=[r for r in items if r['state']=='waiting_user' and r['confirmation_json']]
+            with connect(self.inbox.store.path) as db:
+                queue_order={r['item_id']:r['seq'] for r in db.execute("SELECT item_id,MIN(enqueue_seq) AS seq FROM manual_cards WHERE lifecycle='active' GROUP BY item_id")}
+            waiting.sort(key=lambda r:queue_order.get(r['item_id'],float('inf')))
             if waiting:
+                actionable=True
                 title='有内容待你确认'
                 # One decision at a time keeps the form within client limits.
                 # Every update reprojects the authoritative pending token.
@@ -97,6 +136,7 @@ class FeishuCards:
                 elements=[text(f'待确认 {total-remaining+1} / {total}' if remaining else '请核对全文。')]
                 elements.extend(self._pending(waiting[0],message_id))
             elif scope_elements:
+                actionable=True
                 title='请确认内容范围'
                 elements.extend(scope_elements)
             elif items and all(r['state']=='failed' and r['error_code']=='knowledge_not_qualified' for r in items):
@@ -120,11 +160,74 @@ class FeishuCards:
         if latest:
             result=json.loads(latest['result']) if latest['result'] else None
             elements.append(text(result.get('toast',{}).get('content','操作已处理。') if result else '已接收操作，正在保存。'))
-        return {'schema':'2.0','config':{'update_multi':True,'enable_forward':False},
-                'header':{'title':{'tag':'plain_text','content':title}},'body':{'elements':elements}}
+        from .feishu_status import project
+        status=project(receipt,items,parts,actionable=actionable)
+        title=status['label']
+        group_count=position_count=0
+        for row in items:
+            if row['state']!='waiting_user' or not row['confirmation_json']:continue
+            pending=self.inbox.store.confirmation_view(row['item_id'])
+            active={c['concern_uid'] for c in pending.get('concerns',[])}
+            position_count+=len(active)
+            group_count+=sum(bool(active.intersection(g['member_uids'])) for g in pending.get('groups',[]))
+        if position_count:elements.append(text(f'待确认组 {group_count} · 待确认位置 {position_count}'))
+        elements.extend([text(status['summary']),text(status['count_text'])])
+        return fit_card({'schema':'2.0','config':{'update_multi':True,'enable_forward':False},
+                'header':{'title':{'tag':'plain_text','content':title}},'body':{'elements':elements}})
+
+    def _group_pending(self,row,pending,group,message_id):
+        from .feishu_views import read
+        members=[c for c in pending['concerns'] if c['concern_uid'] in group['member_uids']]
+        view=read(self.inbox,message_id,group['group_revision'])
+        index=min(max(0,view.get('page',0)),len(members)-1)
+        member=members[index]
+        base={'kind':'group_confirmation','item_id':row['item_id'],'token':pending['token'],
+              'request_id':group['group_revision'],'group_id':group['group_id'],
+              'group_revision':group['group_revision'],
+              'selected_member_uids':[c['concern_uid'] for c in members]}
+        elements=[text(f'同类疑点共 {len(members)} 处；候选、保留、自填将应用于全部 {len(members)} 处。'),
+                  text(f'当前查看第 {index+1} 处，原文位置 {member["start"]}–{member["end"]}。'),
+                  text(concern_context(pending['snapshot'],member) or '当前定位不可用，请在电脑核对。')]
+        from .feishu_views import chunks
+        context_pages=chunks(concern_context(pending['snapshot'],member,shorten=False) or member['text'])
+        context_page=min(max(0,view.get('context_page',0)),len(context_pages)-1)
+        if len(context_pages)>1:
+            elements.append(text(f'完整上下文 {context_page+1} / {len(context_pages)} 段：'+context_pages[context_page]))
+            for step,label in ((-1,'上段上下文'),(1,'下段上下文')):
+                if 0<=context_page+step<len(context_pages):
+                    elements.append(button(label,'context_'+str(context_page+step),{**base,'action':'group_context_page',
+                        'member_page':index,'page':context_page+step}))
+        engine=self.distiller() if callable(self.distiller) else self.distiller
+        if pending.get('kind')!='image':
+            path=engine.confirmation_audio(row['item_id'],member['audio_name'])
+            if path:elements.append({'tag':'audio','file_key':self.media.audio(path)})
+            else:elements.append(text('此处原音暂不可用，仍保留未决。'))
+        for page in (index-1,index+1):
+            if not 0<=page<len(members):continue
+            elements.append(button(f'查看第 {page+1} 处','member_'+str(page),{**base,'action':'member_page','page':page}))
+        from .confirmation_display import _clusters
+        def choice_label(choice):
+            clusters=_clusters(choice)
+            return choice if len(clusters)<=120 else choice[:clusters[119][1]]+'…'
+        elements.extend(option_rows([button(choice_label(choice),'group_choice_'+str(i),{**base,'action':'candidate',
+                                    'value':choice}) for i,choice in enumerate(member.get('candidates',[])[:4])]))
+        if len(member.get('candidates',[]))>4:elements.append(text('其他候选可在电脑查看并逐处处理。'))
+        elements.append(button('保留全部所示原文','group_keep',{**base,'action':'keep'}))
+        elements.append({'tag':'form','name':'group_correction','elements':[
+            {'tag':'input','name':'correction','input_type':'text','placeholder':{'tag':'plain_text','content':'填写全部所示位置的完整替换文字'}},
+            button('提交全部所示位置','group_manual',{**base,'action':'manual'},submit=True)]})
+        single={**base,'selected_member_uids':[member['concern_uid']],
+                'request_id':group['group_revision']+'-'+member['concern_uid']}
+        elements.append(button('仅此处无法确认','group_unable',{**single,'action':'unable'}))
+        elements.append(text('如需只采用某个答案，请在电脑的本组卡片勾选所需位置；本卡上述批量操作范围始终为全部所示位置。'))
+        return elements
 
     def _pending(self,row,message_id):
-        pending=json.loads(row['confirmation_json'])
+        pending=self.inbox.store.confirmation_view(row['item_id'])
+        active=set(c['concern_uid'] for c in pending.get('concerns', []))
+        groups=[g for g in pending.get('groups', []) if active.intersection(g['member_uids'])]
+        if groups and len([u for u in groups[0]['member_uids'] if u in active])>1:
+            return self._group_pending(row,pending,groups[0],message_id)
         base={'kind':'source_confirmation','item_id':row['item_id'],'token':pending['token']}
         from .confirmation_display import english_assistance
         from .feishu_views import chunks,read,controls

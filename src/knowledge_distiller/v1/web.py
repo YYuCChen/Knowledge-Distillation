@@ -218,6 +218,11 @@ def create_app(
 ) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     store.initialize()
+    from werkzeug.exceptions import HTTPException
+    @app.errorhandler(HTTPException)
+    def http_error(error):
+        return render_template('http_error.html', status=error.code,
+            message='页面或内容不可用，请返回首页查看当前状态。'), error.code
     from .update_web import register_updates
     register_updates(app, store.path.parent)
     settings_service = settings_service or SettingsService(store)
@@ -390,6 +395,43 @@ def create_app(
         response.headers['Cache-Control'] = 'no-store'
         return response
 
+    @app.post('/items/<int:item_id>/restore-group-deferred')
+    def restore_group_deferred(item_id):
+        try:
+            service().restore_group_deferred(item_id, token=request.form.get('token', ''))
+        except ValueError as error:
+            return render_template('home.html', **_home_context(store, item_id,
+                confirmation_error={'id': item_id, 'concern_id': '', 'message': str(error), 'value': ''})), 409
+        return redirect(url_for('home', item=item_id))
+
+    @app.post('/items/<int:item_id>/rerecognize-group')
+    def rerecognize_group(item_id):
+        try:
+            service().rerecognize_group(item_id, token=request.form.get('token', ''),
+                request_id=request.form.get('request_id', ''), group_id=request.form.get('group_id', ''),
+                group_revision=request.form.get('group_revision', ''),
+                selected_member_uids=request.form.getlist('selected_member_uids'), actor='local')
+        except ValueError as error:
+            return render_template('home.html', **_home_context(store, item_id,
+                confirmation_error={'id': item_id, 'concern_id': '', 'message': str(error), 'value': ''})), 409
+        return redirect(url_for('home', item=item_id))
+
+    @app.post('/items/<int:item_id>/confirm-group')
+    def confirm_group(item_id):
+        action = 'candidate' if 'candidate_value' in request.form else request.form.get('action', '')
+        value = request.form.get('candidate_value', request.form.get('value', ''))
+        try:
+            result = service().resolve_group(item_id, action, value,
+                token=request.form.get('token', ''), request_id=request.form.get('request_id', ''),
+                group_id=request.form.get('group_id', ''), group_revision=request.form.get('group_revision', ''),
+                selected_member_uids=request.form.getlist('selected_member_uids'), actor='local')
+        except ValueError as error:
+            return render_template('home.html', **_home_context(store, item_id,
+                confirmation_error={'id': item_id, 'concern_id': '', 'message': str(error), 'value': value})), 409
+        if result.state == 'queued' and wake_worker is not None:
+            wake_worker()
+        return redirect(url_for('home', item=item_id))
+
     @app.post("/items/<int:item_id>/confirm")
     def confirm(item_id: int):
         action = request.form.get("action", "")
@@ -548,11 +590,31 @@ def _home_context(
         _item_view(row, vault_path, store.path.parent) for row in sorted((r for r in rows if r["state"] == "queued"),
             key=lambda r: (r["queued_at"] or "", r["item_id"]))
     )
-    todo = tuple(
-        _item_view(row, vault_path, store.path.parent)
-        for row in rows
-        if row["state"] in {"waiting_user", "failed"}
-    )
+    # Queue identities belong to cards, not each item's most recent update.
+    scopes = [('items', 'independent')]
+    if selected_collection:
+        scopes.append(('collection', str(selected_collection['operation_id'])))
+    queue = [entry for kind, scope in scopes for entry in store.manual_cards(kind, scope)]
+    queue.sort(key=lambda entry: entry['enqueue_seq'])
+    row_by_id = {row['item_id']: row for row in rows}
+    todo_cards = []
+    for entry in queue:
+        row = row_by_id.get(entry['item_id'])
+        if row is None or row['state'] != 'waiting_user':
+            continue
+        pending = store.confirmation_view(row['item_id'])
+        group = next((g for g in pending.get('groups', []) if g['group_id'] == entry['group_id']), None)
+        if group is None:
+            continue
+        members = set(group['member_uids'])
+        projected = {**pending, 'concerns': [c for c in pending.get('concerns', []) if c['concern_uid'] in members]}
+        view = _item_view({**dict(row), 'confirmation_json': json.dumps(projected)}, vault_path, store.path.parent)
+        view['group'] = group
+        view['enqueue_seq'] = entry['enqueue_seq']
+        todo_cards.append(view)
+    todo = tuple(todo_cards + [
+        _item_view(row, vault_path, store.path.parent) for row in rows if row['state'] == 'failed'
+    ])
     recent = tuple(
         _item_view(row, vault_path, store.path.parent)
         for row in rows

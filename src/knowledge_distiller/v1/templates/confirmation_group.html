@@ -1,0 +1,51 @@
+{% set group = item.group %}
+{% set group_key = item.id|string ~ '-' ~ group.group_id %}
+{% set members = item.confirmation.concerns %}
+<div class="todo-card-shell" data-sync-key="group-{{ group_key }}">
+<article class="todo-card confirmation-card group-confirmation-card">
+  <span class="todo-index">{{ cards.index }}</span>
+  <div class="todo-content">
+    <strong>同类疑点共 {{ members|length }} 处</strong>
+    <p>所选位置将使用同一答案；可取消勾选，仅处理其中几处。</p>
+    {% set representative = members[0] %}
+    {% if representative.context %}<p class="full-context">{% if representative.context.omitted_before %}…{% endif %}{{ representative.context.before }}<mark>{{ representative.context.marked }}</mark>{{ representative.context.after }}{% if representative.context.omitted_after %}…{% endif %}</p>{% endif %}
+    <form id="group-{{ group_key }}" action="{{ url_for('confirm_group', item_id=item.id) }}" method="post" data-group-confirmation>
+      <input type="hidden" name="token" value="{{ item.confirmation.token }}">
+      <input type="hidden" name="request_id" value="{{ group.group_revision }}">
+      <input type="hidden" name="group_id" value="{{ group.group_id }}">
+      <input type="hidden" name="group_revision" value="{{ group.group_revision }}">
+      {% for member in members %}
+      <label><input type="checkbox" name="selected_member_uids" value="{{ member.concern_uid }}" checked>第 {{ loop.index }} 处（原文位置 {{ member.start }}–{{ member.end }}）</label>
+      {% endfor %}
+      <p>作用范围：<span data-selection-count>{{ members|length }}</span> / {{ members|length }} 处</p>
+      <div class="candidate-actions">
+      {% for choice in representative.candidates %}
+        <button class="outline-choice" name="candidate_value" value="{{ choice }}">{{ choice }}</button>
+      {% endfor %}
+      <button class="secondary-small" name="action" value="keep">保留所选原文</button>
+      </div>
+      <label>所选位置的正确文字<input name="value" aria-label="本组正确文字" placeholder="填写完整替换文字"></label>
+      <button class="primary-small" name="action" value="manual">提交所选位置</button>
+    </form>
+    <details data-persist-details="group-members-{{ group_key }}">
+      <summary>逐处查看上下文与原音</summary>
+      {% for member in members %}
+      <section data-sync-key="member-{{ member.concern_uid }}">
+        <strong>第 {{ loop.index }} 处</strong>
+        {% if member.context %}<p class="full-context">{% if member.context.omitted_before %}…{% endif %}{{ member.context.before }}<mark>{{ member.context.marked }}</mark>{{ member.context.after }}{% if member.context.omitted_after %}…{% endif %}</p>{% else %}<p>当前定位不可用，保留未决。</p>{% endif %}
+        {% if item.confirmation.kind|default('') != 'image' %}<audio controls preload="metadata" data-audio-identity="{{ member.concern_uid }}" data-audio-revision="{{ member.audio_revision }}" src="{{ url_for('confirmation_audio', item_id=item.id, concern_id=member.audio_name, revision=member.audio_revision) }}"></audio>{% endif %}
+        <form action="{{ url_for('confirm_group', item_id=item.id) }}" method="post">
+          <input type="hidden" name="token" value="{{ item.confirmation.token }}">
+          <input type="hidden" name="request_id" value="{{ group.group_revision }}-{{ member.concern_uid }}">
+          <input type="hidden" name="group_id" value="{{ group.group_id }}">
+          <input type="hidden" name="group_revision" value="{{ group.group_revision }}">
+          <input type="hidden" name="selected_member_uids" value="{{ member.concern_uid }}">
+          <button class="secondary-small" name="action" value="unable">仅此处无法确认</button>
+          <button class="secondary-small" type="submit" formaction="{{ url_for('rerecognize_group', item_id=item.id) }}">仅此处重新识别参考</button>
+        </form>
+      </section>
+      {% endfor %}
+    </details>
+  </div>
+</article>
+</div>

@@ -16,7 +16,7 @@ def test_card_choice_then_receipt_does_not_expose_knowledge(inbox):
     intake.process('om_1')
     projection=FeishuCards(inbox,None,None)
     card=projection.card('om_1')
-    assert card['header']['title']['content']=='请选择处理方式'
+    assert card['header']['title']['content']=='待你操作'
     assert {e['behaviors'][0]['value']['choice'] for e in card['body']['elements'] if e['tag']=='button'}=={'text','links'}
     intake.choose('om_1','text');intake.process('om_1')
     assert '说明' not in json.dumps(projection.card('om_1'),ensure_ascii=False)
@@ -27,11 +27,11 @@ def test_unqualified_content_explains_outcome_without_exposing_model_output(inbo
     item=inbox.store.create_item('https://www.douyin.com/video/1',receipt_key=(inbox.app_id,'om_1',0))
     inbox.store.mark_failed(item,'distilling','knowledge_not_qualified',rejection_reason='private model explanation')
     card=FeishuCards(inbox,None,None).card('om_1')
-    assert card['header']['title']['content']=='未生成知识'
+    assert card['header']['title']['content']=='未形成知识'
     assert '没有生成知识笔记' in json.dumps(card,ensure_ascii=False)
     assert 'private model explanation' not in json.dumps(card)
     inbox.store.mark_failed(item,'distilling','model_unavailable')
-    assert '未生成知识' != FeishuCards(inbox,None,None).card('om_1')['header']['title']['content']
+    assert '未形成知识' != FeishuCards(inbox,None,None).card('om_1')['header']['title']['content']
 
 
 def test_pending_audio_form_has_current_token_and_whole_text(inbox):
@@ -102,7 +102,7 @@ def test_whole_review_finish_uses_same_desktop_cas_path(inbox):
     inbox.store.mark_waiting(item,{'snapshot':'已经逐项核对的原文','concerns':[],'review_required':True})
     with connect(inbox.store.path) as db:db.execute("UPDATE feishu_receipts SET card_id='om_card'")
     card=FeishuCards(inbox,None,None).card('om_1')
-    value=card['body']['elements'][-1]['behaviors'][0]['value']
+    value=next(e for e in card['body']['elements'] if e.get('name')=='finish_transcript')['behaviors'][0]['value']
     engine=SimpleNamespace(finish_transcript=Mock(side_effect=lambda *a,**kw:inbox.store.resolve_confirmation(
         item,inbox.store.item_bundle(item)['confirmation_json'],next_confirmation={'snapshot':'核对完成','concerns':[]})))
     payload={'event':{'operator':{'open_id':'ou_owner'},'context':{'open_chat_id':'oc_private','open_message_id':'om_card'},'action':{'value':value}}}
@@ -260,3 +260,42 @@ def test_pre_item_error_is_actionable_without_a_nonexistent_desktop_task(inbox):
     assert '该视频仍在直播' in rendered
     assert '重新投递' in rendered
     assert '有项目需要在电脑处理' not in rendered
+
+
+def test_group_card_32_member_capacity_and_visible_callback_scope(inbox):
+    inbox.receive(history_message(message()),history=True)
+    item=inbox.store.create_item('https://www.douyin.com/video/705',receipt_key=(inbox.app_id,'om_1',0))
+    ids=[f'{n:064x}' for n in range(32)]
+    inbox.store.mark_waiting(item,{'snapshot':'词'*32,'concerns':[
+        {'start':n,'end':n+1,'text':'词','audio_name':str(n),'concern_uid':uid,
+         'candidates':['词','字','表达','知识']} for n,uid in enumerate(ids)],
+        'groups':[{'group_id':'g'*64,'member_uids':ids,'equivalence_basis':{'kind':'fixture'}}]})
+    engine=SimpleNamespace(confirmation_audio=lambda *args:'/synthetic/audio.wav')
+    card=FeishuCards(inbox,engine,SimpleNamespace(audio=lambda p:'synthetic-key')).card('om_1')
+    encoded=json.dumps(card,ensure_ascii=False).encode('utf-8')
+    assert len(encoded)<30000
+    assert '同类疑点共 32 处' in encoded.decode()
+    assert '待确认组 1 · 待确认位置 32' in encoded.decode()
+    def buttons(value):
+        if isinstance(value,dict):
+            if value.get('tag')=='button':yield value
+            for child in value.values():yield from buttons(child)
+        elif isinstance(value,list):
+            for child in value:yield from buttons(child)
+    callbacks=[b['behaviors'][0]['value'] for b in buttons(card) if b.get('behaviors')]
+    batch=[c for c in callbacks if c.get('action') in {'candidate','keep','manual'}]
+    assert batch and all(c['selected_member_uids']==ids for c in batch)
+    assert next(c for c in callbacks if c.get('action')=='unable')['selected_member_uids']==[ids[0]]
+
+
+def test_long_optional_group_candidates_cannot_overflow_card_or_hide_scope():
+    from knowledge_distiller.v1.feishu_cards import fit_card,button,text
+    elements=[text('同类疑点共 32 处；作用于全部 32 处'),text('完整上下文 1 / 2 段：内容'),
+              button('下段上下文','context_1',{'action':'group_context_page','page':1})]
+    elements.extend(button('长候选','group_choice_'+str(n),{'value':'长'*10000}) for n in range(4))
+    card=fit_card({'body':{'elements':elements},'header':{'title':{'content':'待你操作'}}})
+    value=json.dumps(card,ensure_ascii=False)
+    assert len(value.encode())<30000
+    assert '作用于全部 32 处' in value
+    assert '下段上下文' in value
+    assert 'group_choice_' not in value

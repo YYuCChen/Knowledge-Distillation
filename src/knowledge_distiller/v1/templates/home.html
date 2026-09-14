@@ -87,7 +87,7 @@
     {% include "_collection_cards.html" %}
     {% if selected_collection %}<p class="collection-return">本条属于 {{ selected_collection.title }} · <a href="{{ url_for('collections.detail', operation=selected_collection.operation_id) }}">返回集合</a></p>{% endif %}
     {% if processing %}
-      <section class="section" data-live-status>
+      <section class="section" data-sync-key="processing" data-live-status>
         <h2>处理中</h2>
         {% set active = processing[0] %}
         <details class="status-panel processing-panel" data-persist-details="processing">
@@ -130,7 +130,7 @@
     {% endif %}
 
     {% if waiting %}
-      <section class="section" data-live-status>
+      <section class="section" data-sync-key="waiting" data-live-status>
         <h2>等待中</h2>
         <details class="status-panel compact-panel" data-persist-details="waiting">
           <summary class="compact-summary">
@@ -158,7 +158,7 @@
     {% endif %}
 
     {% if todo %}
-      <section class="section">
+      <section class="section" data-sync-key="todo" data-live-status>
         <h2>待处理</h2>
         {% set failed_count = todo | selectattr('state', 'equalto', 'failed') | list | length %}
         <details
@@ -187,26 +187,34 @@
                 {% endif %}
                   {% if item.confirmation.review_required and not item.confirmation.concerns %}
                   {% set cards.index = cards.index + 1 %}
-                  <div class="todo-card-shell"><article class="todo-card failure-card">
+                  <div class="todo-card-shell" data-sync-key="task-{{ item.id }}-{{ item.group.group_id if item.group is defined else 'failure' }}"><article class="todo-card failure-card">
                     <span class="todo-index">{{ cards.index }}</span>
                     <div class="todo-content failure-content">
                       <div class="failure-source"><strong title="{{ item.title }}">{{ item.title }}</strong><span>{{ item.source_type }}</span></div>
-                      <span class="failure-reason">疑点已处理，可继续生成知识</span>
+                      <span class="failure-reason">{{ '仍有未决疑点，请重新核对' if item.confirmation.deferred_concerns else '疑点已处理，可继续生成知识' }}</span>
+                      {% if item.confirmation.group_confirmation_contract and item.confirmation.deferred_concerns %}
+                      <form method="post" action="{{ url_for('restore_group_deferred', item_id=item.id) }}"><input type="hidden" name="token" value="{{ item.confirmation.token }}"><button class="primary-small">重新核对未决位置</button></form>
+                      {% else %}
                       <form class="failure-actions" method="post" action="{{ url_for('continue_knowledge', item_id=item.id) }}">
                         <input type="hidden" name="token" value="{{ item.confirmation.token }}">
                         <button class="primary-small" name="action" value="finish">继续生成</button>
                       </form>
+                      {% endif %}
                     </div>
                   </article></div>
                   {% endif %}
+                {% if item.group is defined and item.confirmation.concerns and item.group.equivalence_basis.kind|default('') != 'single_member' %}
+                  {% set cards.index = cards.index + 1 %}
+                  {% include 'confirmation_group.html' %}
+                {% else %}
                 {% for concern in item.confirmation.concerns %}
                 {% set cards.index = cards.index + 1 %}
-                {% set key = item.id|string ~ '-' ~ concern.audio_name %}
+                {% set key = item.id|string ~ '-' ~ (concern.concern_uid|default(concern.audio_name)) %}
                 {% set error = confirmation_error if confirmation_error and confirmation_error.id == item.id and confirmation_error.concern_id == concern.audio_name else none %}
                 {% if item.confirmation.kind|default('') == 'image' %}
                   {% include 'image_confirmation.html' %}
                 {% else %}
-                <div class="todo-card-shell">
+                <div class="todo-card-shell" data-sync-key="member-{{ key }}">
                   <article class="todo-card confirmation-card {{ 'english-confirmation' if item.confirmation.english_assistance else 'compact-confirmation' }}" data-confirmation-card="{{ key }}">
                     <span class="todo-index">{{ cards.index }}</span>
                     <div class="todo-content">
@@ -260,7 +268,7 @@
                           <button type="submit" class="secondary-small" data-suggest-candidates>结合上下文补充候选</button>
                         </form>
                         {% endif %}
-                        <audio controls preload="metadata" aria-label="疑点 {{ loop.index }} 原音" src="{{ url_for('confirmation_audio', item_id=item.id, concern_id=concern.audio_name) }}"></audio>
+                        <audio data-audio-identity="{{ key }}" data-audio-revision="{{ concern.audio_revision|default(concern.audio_name) }}" controls preload="metadata" aria-label="疑点 {{ loop.index }} 原音" src="{{ url_for('confirmation_audio', item_id=item.id, concern_id=concern.audio_name, revision=concern.audio_revision) }}"></audio>
                         {% if concern.audio_recovery_required|default(false) %}
                         <form action="{{ url_for('recover_confirmation_audio', item_id=item.id) }}" method="post" data-recover-audio>
                           <input type="hidden" name="token" value="{{ item.confirmation.token }}">
@@ -269,9 +277,13 @@
                         </form>
                         {% endif %}
                         <span class="source-actions">
-                          <form action="{{ url_for('rerecognize', item_id=item.id) }}" method="post" data-rerecognize>
+                          <form action="{{ url_for('rerecognize_group', item_id=item.id) }}" method="post">
                             <input type="hidden" name="token" value="{{ item.confirmation.token }}">
-                            <button class="text-action" type="submit">重新识别</button>
+                            <input type="hidden" name="request_id" value="{{ item.group.group_revision }}-reference-{{ concern.concern_uid }}">
+                            <input type="hidden" name="group_id" value="{{ item.group.group_id }}">
+                            <input type="hidden" name="group_revision" value="{{ item.group.group_revision }}">
+                            <input type="hidden" name="selected_member_uids" value="{{ concern.concern_uid }}">
+                            <button class="text-action" type="submit">仅此处重新识别参考</button>
                           </form>
                           <a href="{{ item.canonical_url }}" target="_blank" rel="noreferrer"><img class="source-action-icon" src="{{ url_for('static', filename='icons/external-link.svg') }}" alt="">查看来源</a>
                         </span>
@@ -301,9 +313,10 @@
                 </div>
                 {% endif %}
                 {% endfor %}
+                {% endif %}
               {% else %}
                 {% set cards.index = cards.index + 1 %}
-                <div class="todo-card-shell"><article class="todo-card failure-card">
+                <div class="todo-card-shell" data-sync-key="task-{{ item.id }}-{{ item.group.group_id if item.group is defined else 'failure' }}"><article class="todo-card failure-card">
                   <span class="todo-index">{{ cards.index }}</span>
                   <div class="todo-content failure-content">
                     <div class="failure-source"><strong title="{{ item.title }}">{{ item.title }}</strong><span>{{ item.source_type }}</span></div>
@@ -337,7 +350,7 @@
     {% endif %}
 
     {% if recent %}
-      <section class="section recent-section">
+      <section class="section recent-section" data-sync-key="recent">
         <h2>最近整理</h2>
         {% for item in recent %}
           <details

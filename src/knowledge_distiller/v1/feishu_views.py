@@ -18,7 +18,13 @@ def write(inbox,message,value):
 
 
 def chunks(value,size=800):
-    return [value[n:n+size] for n in range(0,len(value),size)] or ['']
+    from .confirmation_display import _clusters
+    result=[];start=0
+    for left,right in _clusters(value):
+        if right-start>size and left>start:
+            result.append(value[start:left]);start=left
+    result.append(value[start:])
+    return result
 
 
 def controls(base,page,count):

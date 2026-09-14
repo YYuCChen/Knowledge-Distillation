@@ -16,6 +16,81 @@ document.addEventListener('change', event => {
   document.querySelector('[data-source-filename]').textContent = file?.name || '';
 });
 
+// Patch stable nodes in place: a response must not reset a live audio/input node.
+function nodeKey(node) {
+  if (node.nodeType !== Node.ELEMENT_NODE) return null;
+  if (node.dataset.syncKey) return `key:${node.dataset.syncKey}`;
+  if (node.id) return `id:${node.id}`;
+  if (node.dataset.persistDetails) return `details:${node.dataset.persistDetails}`;
+  if (node.matches('audio')) return `audio:${node.dataset.audioIdentity || node.getAttribute('src')}`;
+  if (node.matches('form')) return `form:${node.getAttribute('action')}:${node.querySelector('[name="concern_id"]')?.value || ''}:${node.querySelector('[name="action"]')?.value || ''}:${node.querySelector('button[name="value"]')?.value || ''}`;
+  return null;
+}
+
+function reconcile(current, next) {
+  if (current.nodeType !== next.nodeType || current.nodeName !== next.nodeName) {
+    current.replaceWith(next.cloneNode(true)); return;
+  }
+  if (current.nodeType !== Node.ELEMENT_NODE) {
+    if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue;
+    return;
+  }
+  if (current.matches('audio')) {
+    if (current.dataset.audioRevision !== next.dataset.audioRevision || current.getAttribute('src') !== next.getAttribute('src')) {
+      let choice = current.nextElementSibling;
+      if (!choice?.hasAttribute('data-audio-switch')) {
+        choice = document.createElement('button');
+        choice.type = 'button'; choice.dataset.audioSwitch = 'true';
+        choice.className = 'secondary-small';
+        current.after(choice);
+      }
+      choice.textContent = '原音已更新，切换回听';
+      choice.onclick = () => {
+        current.pause(); current.src = next.getAttribute('src');
+        current.dataset.audioRevision = next.dataset.audioRevision || '';
+        current.load(); choice.remove();
+      };
+    }
+    return;
+  }
+  const editing = current.matches('input:not([type="hidden"]), textarea');
+  for (const attribute of Array.from(current.attributes)) {
+    if (!next.hasAttribute(attribute.name) && !(editing && attribute.name === 'value') &&
+        !(current.matches('details') && attribute.name === 'open')) current.removeAttribute(attribute.name);
+  }
+  for (const attribute of next.attributes) {
+    if (editing && attribute.name === 'value') continue;
+    if (current.matches('details') && attribute.name === 'open') continue;
+    if (current.hasAttribute('data-card-toggle') && attribute.name === 'aria-expanded') continue;
+    if (current.id?.startsWith('actions-') && attribute.name === 'hidden') continue;
+    if (current.getAttribute(attribute.name) !== attribute.value) current.setAttribute(attribute.name, attribute.value);
+  }
+  if (editing) return;
+  const old = Array.from(current.childNodes);
+  const keyed = new Map(old.map(node => [nodeKey(node), node]).filter(([key]) => key));
+  const incomingKeys = new Set(Array.from(next.childNodes).map(nodeKey).filter(Boolean));
+  for (const node of old) {
+    if (nodeKey(node) && !incomingKeys.has(nodeKey(node)) && !node.hasAttribute?.('data-audio-switch')) node.remove();
+  }
+  const used = new Set();
+  const serverNode = node => { while (node?.hasAttribute?.('data-audio-switch')) node = node.nextSibling; return node; };
+  let cursor = serverNode(current.firstChild);
+  for (const incoming of Array.from(next.childNodes)) {
+    const key = nodeKey(incoming);
+    let match = key ? keyed.get(key) : old.find(node => !used.has(node) && !nodeKey(node) && !node.hasAttribute?.('data-audio-switch') && node.nodeName === incoming.nodeName);
+    if (used.has(match)) match = null;
+    if (!match) match = incoming.cloneNode(true);
+    else reconcile(match, incoming);
+    used.add(match);
+    if (match !== cursor) {
+      if (match.parentNode === current && typeof current.moveBefore === 'function') current.moveBefore(match, cursor);
+      else current.insertBefore(match, cursor);
+    }
+    cursor = serverNode(match.nextSibling);
+  }
+  for (const node of old) if (!used.has(node) && node.parentNode === current && !node.hasAttribute?.('data-audio-switch')) node.remove();
+}
+
 function applyPage(html, submittedForm) {
   const page = new DOMParser().parseFromString(html, 'text/html');
   const current = document.querySelector('#home-results');
@@ -28,41 +103,40 @@ function applyPage(html, submittedForm) {
     feedback.hidden = nextFeedback.hidden;
   }
   const status = page.querySelector('.topbar-status');
-  if (status) document.querySelector('.topbar-status').replaceWith(status);
+  if (status) reconcile(document.querySelector('.topbar-status'), status);
   if (next.innerHTML === lastServerHTML && !submittedForm) return;
-  if (submittedForm) drafts.delete(submittedForm);
-  current.querySelectorAll('.manual-confirmation').forEach(form => {
-    if (form.id !== submittedForm) drafts.set(form.id, form.elements.value.value);
-  });
-  const expanded = new Map(Array.from(current.querySelectorAll('[data-card-toggle]'), b => [b.getAttribute('aria-controls'), b.getAttribute('aria-expanded')]));
-  const details = new Map(Array.from(current.querySelectorAll('details[data-persist-details]'), d => [d.dataset.persistDetails, d.open]));
+  const anchors = Array.from(current.querySelectorAll('[data-sync-key^="member-"], [data-sync-key^="task-"], [data-sync-key^="group-"]'))
+    .filter(node => node.getBoundingClientRect().bottom > 0);
+  const anchor = anchors.filter(node => !anchors.some(child => child !== node && node.contains(child))).find(node => page.querySelector(`[data-sync-key="${CSS.escape(node.dataset.syncKey)}"]`));
+  const anchorTop = anchor?.getBoundingClientRect().top;
   const active = document.activeElement;
-  const focused = active?.closest?.(".manual-confirmation");
-  const focus = focused ? {id: focused.id, start: active.selectionStart, end: active.selectionEnd} : null;
-  const scroll = window.scrollY;
+  const activeCard = active?.closest?.('[data-sync-key]');
+  const activeIndex = anchors.indexOf(activeCard);
+  for (const form of current.querySelectorAll('form[id]')) {
+    if (form.elements.value?.value) drafts.set(form.id, form.elements.value.value);
+  }
   lastServerHTML = next.innerHTML;
-  current.replaceWith(next);
-  observeFragments();
+  reconcile(current, next);
+  if (submittedForm) {
+    drafts.delete(submittedForm);
+    const input = document.getElementById(submittedForm)?.elements.value;
+    if (input) input.value = '';
+  }
   for (const [id, value] of drafts) {
-    const form = document.getElementById(id);
-    if (form) form.elements.value.value = value;
+    const input = document.getElementById(id)?.elements?.value;
+    if (input && !input.value) input.value = value;
   }
-  next.querySelectorAll('[data-card-toggle]').forEach(button => {
-    const id = button.getAttribute('aria-controls');
-    if (expanded.has(id) && !document.getElementById(id).querySelector('[aria-invalid="true"]')) {
-      const open = expanded.get(id) === 'true';
-      button.setAttribute('aria-expanded', String(open));
-      document.getElementById(id).hidden = !open;
-    }
-  });
-  next.querySelectorAll('details[data-persist-details]').forEach(d => {
-    if (details.has(d.dataset.persistDetails) && !d.querySelector('[aria-invalid="true"]')) d.open = details.get(d.dataset.persistDetails);
-  });
-  if (focus) {
-    const input = document.getElementById(focus.id)?.elements.value;
-    if (input) { input.focus({preventScroll:true}); if (focus.start !== null) input.setSelectionRange(focus.start, focus.end); }
+  for (const form of current.querySelectorAll('[data-group-confirmation]')) {
+    const count = form.querySelector('[data-selection-count]');
+    if (count) count.textContent = form.querySelectorAll('[name="selected_member_uids"]:checked').length;
   }
-  window.scrollTo(0, scroll);
+  if (active && !active.isConnected && activeIndex >= 0) {
+    const surviving = [...anchors.slice(activeIndex + 1), ...anchors.slice(0, activeIndex).reverse()].find(node => node.isConnected);
+    const target = surviving?.querySelector('input:not([type="hidden"]), button:not([disabled]), summary, a');
+    target?.focus({preventScroll: true});
+  }
+  observeFragments();
+  if (anchor?.isConnected) window.scrollBy(0, anchor.getBoundingClientRect().top - anchorTop);
 }
 
 document.addEventListener('click', event => {
@@ -78,6 +152,13 @@ document.addEventListener('input', event => {
     event.target.setAttribute('aria-invalid', 'false');
     event.target.placeholder = '自定义输入…';
   }
+});
+
+document.addEventListener('change', event => {
+  const form = event.target.closest('[data-group-confirmation]');
+  if (!form) return;
+  const count = form.querySelector('[data-selection-count]');
+  if (count) count.textContent = form.querySelectorAll('[name="selected_member_uids"]:checked').length;
 });
 
 const intakeForm = document.querySelector('form[data-submit]');
@@ -129,7 +210,7 @@ document.addEventListener('submit', async event => {
   if (!form.closest('#home-results')) return;
   event.preventDefault();
   if (updating) return;
-  if (form.matches('.manual-confirmation') && !form.elements.value.value.trim()) {
+  if ((form.matches('.manual-confirmation') || (form.matches('[data-group-confirmation]') && event.submitter?.value === 'manual')) && !form.elements.value.value.trim()) {
     const input = form.elements.value;
     input.value = '';
     input.placeholder = '请输入正确文字';
@@ -152,7 +233,7 @@ document.addEventListener('submit', async event => {
     if (recovering) button.textContent = '正在恢复局部原音…';
   }
   try {
-    const response = await fetch(form.getAttribute('action'), { method: 'POST', body: data });
+    const response = await fetch(button?.getAttribute('formaction') || form.getAttribute('action'), { method: 'POST', body: data });
     const html = await response.text();
     if (response.status >= 500) throw new Error(response.headers.get('Content-Type')?.startsWith('text/plain') ? html : '处理暂时失败，已保留输入，请稍后再试。');
     if (!response.ok && !html.includes('id="home-results"')) throw new Error(html);
@@ -168,21 +249,30 @@ document.addEventListener('submit', async event => {
   }
 });
 
+let pollTimer;
 async function pollStatus() {
-  try {
+  clearTimeout(pollTimer);
+  if (!polling && !updating && document.querySelector('#home-results')) {
+    polling = true;
     const generation = actionGeneration;
-    const busy = polling || updating || document.querySelector('.app-dialog[open]') || Array.from(document.querySelectorAll('audio')).some(a => !a.paused);
-    if (!busy && document.querySelector('[data-live-status]')) {
-      polling = true;
-      const response = await fetch(window.location.href, {cache: 'no-store'});
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(window.location.href, {cache: 'no-store', signal: controller.signal});
       const html = response.ok ? await response.text() : null;
       if (html && !updating && generation === actionGeneration) applyPage(html);
+    } catch (_) {
+      // Keep the current view and retry; an offline response cannot clear drafts.
+    } finally {
+      clearTimeout(timeout);
       polling = false;
     }
-  } catch (_) { polling = false; }
-  window.setTimeout(pollStatus, 2000);
+  }
+  pollTimer = setTimeout(pollStatus, document.hidden ? 15000 : 2000);
 }
-window.setTimeout(pollStatus, 2000);
+pollTimer = setTimeout(pollStatus, 2000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pollStatus(); });
+window.addEventListener('online', pollStatus);
 
 document.querySelectorAll('[data-persist-details]').forEach(d => {
   const saved = localStorage.getItem(`knowledge-distiller:home:${d.dataset.persistDetails}`);
@@ -197,8 +287,11 @@ document.addEventListener('toggle', event => {
 function fitFragment(fragment) {
   const width = fragment.getBoundingClientRect().width;
   if (!width) return;
-  const before = Array.from(fragment.dataset.contextBefore);
-  const after = Array.from(fragment.dataset.contextAfter);
+  const split = value => typeof Intl.Segmenter === 'function'
+    ? Array.from(new Intl.Segmenter(undefined, {granularity: 'grapheme'}).segment(value), part => part.segment)
+    : (value ? [value] : []);
+  const before = split(fragment.dataset.contextBefore);
+  const after = split(fragment.dataset.contextAfter);
   const probe = fragment.cloneNode(true);
   probe.removeAttribute('data-context-before');
   probe.removeAttribute('data-context-after');
