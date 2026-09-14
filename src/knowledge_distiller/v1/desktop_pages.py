@@ -61,6 +61,7 @@ class DesktopPages:
         self.generation = 0
         self.target = None
         self.request_id = None
+        self.probe_until = 0
         self.ack = None
         self.opening_id = None
         self.opening_page = None
@@ -182,7 +183,7 @@ class DesktopPages:
             if visible and focused and interaction:
                 record.last_interaction_seq = self._next()
             if (generation and generation == self.generation and page == self.target
-                    and request_id == self.request_id):
+                    and request_id == self.request_id and time.monotonic() < self.probe_until):
                 self.ack = (page, epoch, generation, visible, focused)
             self.condition.notify_all()
             return True
@@ -200,6 +201,7 @@ class DesktopPages:
     def _outcome(self, status, request_id, *, reason=''):
         record = self.pages.get(self.target)
         ack = self.ack
+        self.probe_until = 0
         return ReopenOutcome(status, request_id, self.target,
             record.connection_epoch if record else None, self.generation,
             bool(ack), bool(ack and ack[3]), bool(ack and ack[4]), reason=reason)
@@ -231,6 +233,7 @@ class DesktopPages:
                     self.target = self.selected
                     self.generation += 1
                     self.request_id = request_id
+                    self.probe_until = deadline
                     self.ack = None
                     selected = self.pages[self.target]
                     self.condition.notify_all()
@@ -249,6 +252,7 @@ class DesktopPages:
                     if self.pages:
                         return self._outcome('unknown', request_id, reason='page_not_responding')
             with self.condition:
+                self.probe_until = 0
                 self.opening_id, self.opening_page = request_id, None
                 self.opening_failed = False
                 self.opening_until = time.monotonic() + self.opening_timeout
@@ -357,7 +361,8 @@ def install(app):
                         if pages._matching(record.page_id, record.connection_epoch) is not record:
                             return
                         generation, target, request_id = pages.generation, pages.target, pages.request_id
-                    if generation != sent and target == record.page_id:
+                        probing = time.monotonic() < pages.probe_until
+                    if probing and generation != sent and target == record.page_id:
                         sent = generation
                         yield 'data: '+json.dumps({'type': 'show', 'generation': generation,
                             'request_id': request_id})+'\n\n'

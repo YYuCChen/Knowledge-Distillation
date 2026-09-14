@@ -291,3 +291,17 @@ def test_navigation_new_handshake_can_overtake_old_pagehide_beacon():
     assert after.page_id == before.page_id
     assert after.registration_seq == before.registration_seq
     assert pages.connected == {after.page_id}
+
+
+def test_reconnect_after_finished_probe_does_not_replay_old_show_request():
+    app = Flask(__name__); pages = install(app); pages.probe_timeout = .005
+    client = app.test_client(); headers = {'X-Desktop-Token': pages.token}
+    first = client.get('/desktop/events?page=p&document=d', headers=headers, buffered=False)
+    next(iter(first.response))
+    assert pages.reopen(lambda _: pytest.fail('duplicate')).status == 'unknown'
+    assert pages.probe_until == 0
+    second = client.get('/desktop/events?page=p&document=d', headers=headers, buffered=False)
+    iterator = iter(second.response)
+    assert b'hello' in next(iterator)
+    assert next(iterator).startswith(b': alive')
+    first.close(); second.close()
