@@ -77,8 +77,8 @@ def test_dock_reopen_starts_browser_when_no_app_page_survives():
     opened = []
     workspace = SimpleNamespace(URLForApplicationToOpenURL_=lambda url: '/browser', openURL_=opened.append)
     from knowledge_distiller.v1.desktop_pages import DesktopPages
-    DesktopPages().reopen(lambda:workspace.openURL_('http://127.0.0.1:1234/'),
-        lambda:reveal_browser('http://127.0.0.1:1234/', workspace, str, lambda:[], 3, 'browser.saved'))
+    DesktopPages(opening_timeout=.001).reopen(lambda nonce:workspace.openURL_('http://127.0.0.1:1234/'),
+        lambda page:reveal_browser('http://127.0.0.1:1234/', workspace, str, lambda:[], 3, 'browser.saved'))
     assert opened == ['http://127.0.0.1:1234/']
 
 
@@ -103,3 +103,51 @@ def test_changed_default_browser_does_not_duplicate_pages_after_previous_browser
     for _ in range(3):
         reveal_browser('http://127.0.0.1:1234/', workspace, str, lambda:[app], 3, 'browser.old')
     assert not opened and raised == [3, 3, 3]
+
+
+def test_native_reopen_runs_probes_off_main_loop_and_coalesces_clicks():
+    import threading
+    import time
+    from knowledge_distiller.v1.desktop_pages import DesktopPages
+    from knowledge_distiller.v1.mac_app import NativeReopener
+    pages = DesktopPages(opening_timeout=.1)
+    main = threading.get_ident()
+    calls, results = [], []
+    def open_page(nonce):
+        assert threading.get_ident() == main
+        calls.append(nonce)
+        pages.connect('page', 'document', launch=nonce)
+    native = NativeReopener(pages, open_page, lambda page: None, results.append)
+    assert native.request()
+    for _ in range(5):
+        assert not native.request()
+    deadline = time.monotonic() + 1
+    while not results and time.monotonic() < deadline:
+        native.poll()
+        time.sleep(.001)
+    assert len(calls) == 1 and results[0].status == 'online'
+    assert not native.running
+
+
+def test_native_recovery_callback_handles_unknown_on_owner_loop():
+    import threading
+    import time
+    from knowledge_distiller.v1.desktop_pages import DesktopPages
+    from knowledge_distiller.v1.mac_app import NativeReopener
+    pages = DesktopPages(probe_timeout=.05)
+    pages.connect('hidden', 'document')
+    main = threading.get_ident()
+    results = []
+    def complete(outcome):
+        assert threading.get_ident() == main
+        results.append(outcome)
+    native = NativeReopener(pages, lambda _: None, lambda _: None, complete)
+    start = time.monotonic()
+    assert native.request()
+    assert time.monotonic() - start < .04
+    deadline = time.monotonic() + 1
+    ticks = 0
+    while not results and time.monotonic() < deadline:
+        native.poll(); ticks += 1
+        time.sleep(.001)
+    assert ticks > 2 and results[0].status == 'unknown'
