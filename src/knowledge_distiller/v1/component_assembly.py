@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import time
 
+from .component_attempt import create_attempt, bind_candidate
 from .component_release import parse_release, plan_release
 from .component_download import ComponentDownloader
 from .docling_component import DoclingComponent, DoclingComponentError
@@ -17,6 +18,7 @@ from .windows_platform import filesystem_path
 class ComponentAssembly:
     def __init__(self, components_root, cache_root, *, platform, public_key, binary_delta=None,
                  windows_tools=None, downloader=None):
+        self.attempts = {}
         self.components_root = Path(components_root)
         self.platform = platform
         self.public_key = public_key
@@ -54,9 +56,10 @@ class ComponentAssembly:
         """Never stops or replaces an installed application; produces a checked candidate."""
         started = time.monotonic()
         root = Path(work_root)
-        root.mkdir(parents=True, exist_ok=True)
-        if root.is_symlink():
-            raise UpdateError('安装暂存目录无效。')
+        excluded = [self.components_root, self.downloader.root]
+        if installed is not None: excluded.append(installed)
+        capability = create_attempt(root, excluded=excluded)
+        self.attempts[str(root)] = capability
         candidate = root / ('candidate.app' if self.platform == 'macos-arm64' else 'candidate')
         if candidate.exists():
             raise UpdateError('安装暂存目录已存在，请先恢复上次安装。')
@@ -110,5 +113,9 @@ class ComponentAssembly:
             version = json.loads((candidate / '_internal/windows-version.json').read_text(encoding='utf-8'))['version']
         if version != release['version']:
             raise UpdateError('最终程序版本不符。')
+        bind_candidate(capability, candidate, release['target_identity'])
         return candidate, {'seconds': time.monotonic() - started, 'download_bytes': plan.download_bytes,
                            'target_identity': release['target_identity']}
+
+    def capability_for(self, candidate):
+        return self.attempts.get(str(Path(candidate).parent))

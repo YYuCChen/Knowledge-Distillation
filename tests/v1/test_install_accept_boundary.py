@@ -26,7 +26,7 @@ def fixture(tmp_path):
             db.execute("UPDATE facts SET value='new'")
         return Process()
     kwargs = dict(platform='windows-x86_64', version='2', target_identity=identity(candidate,'windows-x86_64'),
-                  launcher=launch, acceptance=lambda *args: None)
+                  launcher=launch, acceptance=lambda *args: None, activation=lambda *a:None)
     return candidate, target, root, kwargs
 
 
@@ -60,7 +60,7 @@ def test_handshake_failure_returns_activation_pending_and_recover_preserves_new_
     assert outcome['activation']['status']=='pending'
     assert_new(target,root)
     monkeypatch.setattr(Path,'replace',original)
-    result=module.recover(target,root)
+    result=module.recover(target,root,activation=lambda *a:None)
     assert result['accepted'] is True
     assert (root/'updates/component-startup-handshake').read_text()=='accepted'
     assert_new(target,root)

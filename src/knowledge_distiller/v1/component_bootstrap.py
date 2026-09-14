@@ -15,7 +15,7 @@ from werkzeug.serving import make_server
 
 from .adapters.python_policy import check_current
 from .component_assembly import ComponentAssembly
-from .component_install import install, recover
+from .component_install import install, recover, finalize_install
 from .component_release import MAX_MANIFEST
 from .component_download import ComponentDownloader
 from .updates import UpdateError, validate_install_paths
@@ -56,8 +56,13 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
         try:
             root, target = context['root'], context['target']
             if action == 'recover':
-                recover(target, root)
-                state.update(message='中断的安装已恢复，可以重新检查安装内容。', ready=False)
+                outcome = recover(target, root)
+                context['outcome'] = outcome
+                if outcome.get('accepted'):
+                    state.update(complete=outcome['activation']['status'] == 'ready', ready=False,
+                        message='安装已接受。' + ' '.join(outcome.get('warnings', [])))
+                else:
+                    state.update(message='中断的安装已恢复，可以重新检查安装内容。', ready=False)
                 return
             if action == 'prepare':
                 validate_install_paths(root, target)
@@ -117,9 +122,13 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                     raise InterruptedError('安装准备已取消，已有下载会保留。')
                 state['message'] = '候选程序已校验，正在安装并检查启动状态。'
                 state['cancellable'] = False
-                install(context['candidate'], target, root, platform=platform,
+                outcome = install(context['candidate'], target, root, platform=platform,
                         version=release['version'], target_identity=release['target_identity'])
-                state.update(complete=True, ready=False, message='知识蒸馏器已安装并通过启动检查。')
+                outcome = finalize_install(outcome, capability=context['assembler'].capability_for(context['candidate']))
+                context['outcome'] = outcome
+                state.update(complete=outcome['activation']['status'] == 'ready', ready=False,
+                    message=('知识蒸馏器已安装并通过启动检查。' if outcome['activation']['status'] == 'ready'
+                             else '安装已接受，启动放行待恢复。') + ' '.join(outcome['warnings']))
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
             state['error'] = (

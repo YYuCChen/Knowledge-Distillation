@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import httpx
 from .component_assembly import ComponentAssembly
-from .component_install import install
+from .component_install import install, finalize_install
 from .component_release import MAX_MANIFEST
 from .updates import UpdateError, validate_install_paths
 
@@ -71,8 +71,16 @@ def run(plan_path):
         candidate, _ = assembler.assemble(release, selected,
             root / 'updates/component-attempts' / uuid4().hex, installed=target)
         request_exit(root, plan, platform)
-        install(candidate, target, root, platform=platform, version=release['version'],
+        outcome = install(candidate, target, root, platform=platform, version=release['version'],
                 target_identity=release['target_identity'])
+        outcome = finalize_install(outcome, capability=assembler.capability_for(candidate))
+        try:
+            from .local_records import write_record
+            write_record(root / 'updates/component-install-outcome.json', outcome)
+        except Exception as error:
+            print('安装已接受，收尾记录写入失败：' + str(error), file=sys.stderr)
+        if outcome['activation']['status'] != 'ready':
+            return 2
         if not plan.get('no_open'):
             state = json.loads((root / '.desktop-instance.json').read_text(encoding='utf-8'))
             webbrowser.open('http://127.0.0.1:' + str(state['port']) + '/')
