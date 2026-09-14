@@ -7,6 +7,8 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
+import platform
 import time
 from concurrent.futures import ThreadPoolExecutor
 import urllib.request
@@ -40,7 +42,12 @@ def capture(name):
 try:
     command('open', base+'/settings')
     metadata = command('eval', 'JSON.stringify({ua:navigator.userAgent,width:innerWidth,height:innerHeight,dpr:devicePixelRatio,zoom:visualViewport.scale})')
-    lock = {'os': subprocess.check_output(['sw_vers'], text=True), 'browser': json.loads(json.loads(metadata)),
+    lock = {'os': subprocess.check_output(['sw_vers'], text=True),
+            'machine': platform.machine(), 'python': sys.version,
+            'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+            'dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], text=True).strip()),
+            'fixture_sha256': hashlib.sha256(Path(__file__).with_name('browser_fixture.py').read_bytes()).hexdigest(),
+            'browser': json.loads(json.loads(metadata)),
             'runner': {'path': __file__, 'sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()},
             'agent_browser': subprocess.check_output(['agent-browser', '--version'], text=True).strip(),
             'parameters': {'navigation_grace': 2, 'probe_timeout': 1, 'recovery_timeout': 3, 'opening_timeout': 10},
@@ -80,6 +87,9 @@ try:
             capture(f'slow_{action}_{seconds}s_no_duplicate')
     command('open', base+'/_fixture/icons')
     command('set', 'viewport', '1280', '900', '2')
+    lock['gallery_environment'] = json.loads(json.loads(command('eval',
+        'JSON.stringify({width:innerWidth,height:innerHeight,dpr:devicePixelRatio,zoom:visualViewport.scale})')))
+    (args.output/'parameter-lock.json').write_text(json.dumps(lock, ensure_ascii=False, indent=2))
     command('screenshot', str(args.output/'icons-light-dark-2x.png'))
     capture('brand_sizes_light_dark_retina_resource_gallery')
     command('open', base+'/topics')
