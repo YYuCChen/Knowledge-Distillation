@@ -12,6 +12,7 @@ import uuid
 
 from .file_lock import acquire
 from .local_records import write_record
+from .windows_platform import filesystem_path
 from .model_json import PARSER_VERSION, parse_model_json, ModelJSONError
 
 
@@ -27,7 +28,8 @@ class ResponseReceipts:
     def __init__(self, root, *, operation, source, contract, model_identity=None,
                  source_version_id=None, requested_fields=(), parent_response_hash=None,
                  validator_version='1'):
-        self.root = Path(root) if root is not None else None
+        # Lexical conversion preserves symlink checks and the existing physical scope.
+        self.root = filesystem_path(root) if root is not None else None
         self.identity = dict(operation=operation, source_hash=text_hash(source),
             source_version_id=source_version_id or text_hash(source),
             request_contract_hash=digest(contract),

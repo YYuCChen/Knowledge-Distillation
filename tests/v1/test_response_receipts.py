@@ -122,3 +122,44 @@ def test_concurrent_duplicate_receive_is_single_owned_response(tmp_path):
     assert 'received' in results
     assert r.pending() == '{}'
     assert len(list(tmp_path.glob(request + '.json'))) == 1
+
+
+def test_long_receipt_paths_atomic_failure_and_retry_keep_original_request(tmp_path, monkeypatch):
+    from knowledge_distiller.v1 import local_records
+    root = tmp_path
+    while len(str(root)) < 310:
+        root = root / ('response-scope-' + 'x' * 40)
+    r = record(root)
+    request = r.begin()
+    original_replace = local_records.os.replace
+    def interrupt(source, destination):
+        if destination.name == 'pending.json':
+            raise OSError('injected atomic publish failure')
+        return original_replace(source, destination)
+    monkeypatch.setattr(local_records.os, 'replace', interrupt)
+    with pytest.raises(OSError, match='atomic publish failure'):
+        r.receive(request, '{"kept":"response bytes"}')
+    assert record(root).pending() is None
+    assert (r.root / (request + '.json')).exists()
+    assert not list(r.root.glob('*.tmp'))
+    monkeypatch.setattr(local_records.os, 'replace', original_replace)
+    restarted = record(root)
+    restarted.receive(request, '{"kept":"response bytes"}')
+    restarted.mark('{"kept":"response bytes"}', 'prepared')
+    assert record(root).pending() == '{"kept":"response bytes"}'
+    assert record(root).root.samefile(r.root)
+    assert len(str(r.root / (request + '.json'))) > 340
+    assert len(list(r.root.glob(request + '.json'))) == 1
+
+
+def test_receipt_path_conversion_preserves_unsafe_root_rejection(tmp_path, monkeypatch):
+    from pathlib import Path
+    def forbidden_resolve(*args, **kwargs):
+        raise AssertionError('record paths must remain lexical')
+    monkeypatch.setattr(Path, 'resolve', forbidden_resolve)
+    r = record(tmp_path)
+    original = type(r.root).is_symlink
+    monkeypatch.setattr(type(r.root), 'is_symlink',lambda path: True if path == r.root else original(path))
+    with pytest.raises(OSError, match='response_checkpoint_unsafe'):
+        r.begin()
+    assert not (r.root / 'current.json').exists()

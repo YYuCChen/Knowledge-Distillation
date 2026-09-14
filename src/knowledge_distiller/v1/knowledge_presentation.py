@@ -6,6 +6,7 @@ from knowledge_distiller.v1.model_json import parse_model_json
 from pathlib import Path
 import re
 from .local_records import write_record
+from .windows_platform import filesystem_path
 from .llm import LLMRequestError
 
 FIELDS = ('title', 'subtitle', 'summary')
@@ -25,7 +26,9 @@ class PresentationRecord:
     def __init__(self, root, identity):
         from .response_receipts import ResponseReceipts, digest
         self.identity = digest(identity)
-        self.root = Path(root) / self.identity if root is not None else None
+        # Keep the full hash namespace and filenames. All checkpoint operations,
+        # including locks, reads and atomic replace, inherit one lexical Win32 path.
+        self.root = filesystem_path(Path(root) / self.identity) if root is not None else None
         self.receipts = ResponseReceipts(self.root / 'responses' if self.root else None,
             operation='knowledge', source=identity['snapshot'], contract=identity,
             model_identity={k: identity.get(k) for k in ('model', 'endpoint', 'effort', 'service_tier')},
