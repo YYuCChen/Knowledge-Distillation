@@ -43,14 +43,19 @@ def concern_context(snapshot,concern):
         # Older pending records may lack offsets. Never select an ambiguous match.
         if not concern['text'] or snapshot.count(concern['text'])!=1:return None
         start=snapshot.index(concern['text']);end=start+len(concern['text'])
-    from .confirmation_display import local_choices
-    display=local_choices({**concern,'start':start,'end':end})
-    start,end=display['start'],display['end']
-    left=max(0,start-12);right=min(len(snapshot),end+12)
-    target=snapshot[start:end]
-    if len(target)>120:target=target[:60]+'…'+target[-60:]
-    excerpt=('…' if left else '')+snapshot[left:start]+'【'+target+'】'+snapshot[end:right]+('…' if right<len(snapshot) else '')
+    from .confirmation_display import context_window
+    try:
+        view = context_window(snapshot, {**concern, 'start': start, 'end': end})
+    except ValueError:
+        return None
+    from .confirmation_display import _clusters
+    marked = view['marked']
+    clusters = _clusters(marked)
+    if len(clusters) > 120:
+        marked = marked[:clusters[59][1]] + '…' + marked[clusters[-60][0]:]
+    excerpt = ('…' if view['omitted_before'] else '') + view['before'] + '【' + marked + '】' + view['after'] + ('…' if view['omitted_after'] else '')
     return re.sub(r'\s+', ' ', excerpt).strip()
+
 
 
 class FeishuCards:
@@ -139,7 +144,7 @@ class FeishuCards:
         current=view.get('edits',{}).get(str(page),pages[page])
         context=concern_context(pending['snapshot'],concern)
         elements=[text(context)] if context else [text('待核对：'+current)]
-        if len(pages)>1:elements.extend(controls(base,page,len(pages)))
+        if len(pages)>1:elements.extend([text('完整疑点：'+current), *controls(base,page,len(pages))])
         if pending.get('kind')=='image':
             member=next((m for m in self.inbox.store.media_members(row['material_id'])
                          if m['member_id']==concern['member_id']),None)

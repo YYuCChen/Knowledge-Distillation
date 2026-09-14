@@ -354,6 +354,23 @@ def create_app(
             return render_template('home.html', **_home_context(store, None, form_error=str(error))), 400
         return redirect(url_for('home', item=item_id))
 
+    @app.get('/items/<int:item_id>/confirmation-context/<concern_id>')
+    def confirmation_context(item_id, concern_id):
+        row = store.item_bundle(item_id)
+        if row is None or not row['confirmation_json']:
+            abort(404)
+        pending = store.confirmation_view(item_id)
+        concern = next((c for c in pending.get('concerns', [])
+                        if concern_id in {c.get('concern_uid'), c.get('audio_name')}), None)
+        if concern is None:
+            abort(404)
+        from .confirmation_display import context_window
+        try:
+            context = context_window(pending['snapshot'], concern)
+        except ValueError:
+            abort(409)
+        return render_template('confirmation_context.html', context=context, item_id=item_id)
+
     @app.get('/items/<int:item_id>/confirmation-image/<concern_id>')
     def confirmation_image(item_id, concern_id):
         row = store.item_bundle(item_id)
@@ -572,6 +589,12 @@ def _item_view(row, vault_path: str | None, data_root=None) -> dict[str, object]
         from .confirmation_revision import revision
         for concern in confirmation.get("concerns", []):
             concern["revision"] = revision(confirmation, concern)
+            from .confirmation_display import context_window
+            try:
+                concern['context'] = context_window(confirmation.get('snapshot', ''), concern,
+                    full_context_ref=f"/items/{row['item_id']}/confirmation-context/{concern.get('concern_uid') or concern.get('audio_name', '')}")
+            except ValueError:
+                concern['context'] = None
         confirmation.setdefault("review_required", True)
         text = confirmation.get("snapshot", "")
         confirmation["english_assistance"] = english_assistance(text)

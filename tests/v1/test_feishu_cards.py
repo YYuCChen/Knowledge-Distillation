@@ -179,22 +179,21 @@ def test_context_never_guesses_repeated_text_and_bounds_long_excerpt():
     assert concern_context('甲乙甲乙',{'text':'甲乙'}) is None
     original='前'*100+'疑'*10000+'后'*100
     result=concern_context(original,{'text':'疑'*10000,'start':100,'end':10100})
-    assert len(result)<150
-    assert result.startswith('…'+'前'*12+'【')
-    assert result.endswith('】'+'后'*12+'…')
+    assert len(result)<230
+    assert result.startswith('…'+'前'*48+'【')
+    assert result.endswith('】'+'后'*48+'…')
 
 
-def test_context_matches_local_web_twelve_characters_around_local_difference():
+def test_context_matches_shared_full_marked_window():
     from knowledge_distiller.v1.feishu_cards import concern_context
-    from knowledge_distiller.v1.confirmation_display import local_choices
+    from knowledge_distiller.v1.confirmation_display import context_window
     phrase='它涉及到君臣辅佐使的配合'
-    snapshot='前'*30+phrase+'后'*30
-    concern={'text':phrase,'start':30,'end':30+len(phrase),
+    snapshot='前'*80+phrase+'后'*80
+    concern={'text':phrase,'start':80,'end':80+len(phrase),
              'candidates':[phrase,'它涉及到君臣佐使的配合']}
-    display=local_choices(concern)
+    display=context_window(snapshot, concern)
     assert concern_context(snapshot,concern)==(
-        '…'+snapshot[display['start']-12:display['start']]+'【'+display['text']+'】'+
-        snapshot[display['end']:display['end']+12]+'…')
+        '…'+display['before']+'【'+display['marked']+'】'+display['after']+'…')
 
 
 def test_review_fraction_tracks_same_material_across_clients_and_restart(inbox):

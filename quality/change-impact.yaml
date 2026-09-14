@@ -54,7 +54,9 @@
         "docs/research/2026-09-11-knowledge-to-tools/sources.md",
         "docs/roadmap/exploration.md",
         "docs/roadmap/next-version.md",
-        "docs/engineering/manual-confirmation.md"
+        "docs/engineering/manual-confirmation.md",
+        "docs/engineering/model-json.md",
+        "docs/engineering/confirmation-context.md"
       ],
       "depends_on": [],
       "artifact": false
@@ -122,7 +124,12 @@
         "tests/v1/test_knowledge_presentation.py",
         "tests/v1/test_ocr_review_policy.py",
         "src/knowledge_distiller/v1/model_json.py",
-        "tests/v1/test_model_json.py"
+        "tests/v1/test_model_json.py",
+        "src/knowledge_distiller/v1/response_receipts.py",
+        "src/knowledge_distiller/v1/review_responses.py",
+        "tests/v1/test_json_entrypoints.py",
+        "tests/v1/test_response_receipts.py",
+        "tests/v1/test_review_response_receipts.py"
       ],
       "depends_on": [],
       "artifact": false
@@ -189,7 +196,8 @@
         "tests/v1/test_topic_web.py",
         "tests/v1/test_web.py",
         "src/knowledge_distiller/v1/feishu_status.py",
-        "tests/v1/test_feishu_status.py"
+        "tests/v1/test_feishu_status.py",
+        "src/knowledge_distiller/v1/templates/confirmation_context.html"
       ],
       "depends_on": [
         "storage",

@@ -234,6 +234,9 @@
                         {% else %}<span class="manual-hint">请回听填写</span>{% endif %}
                       </div>
                       <div id="actions-{{ key }}" class="confirmation-actions" {% if not error %}hidden{% endif %}>
+                        {% if concern.context %}
+                        <p class="full-context">{% if concern.context.omitted_before %}…{% endif %}{{ concern.context.before }}<mark>{{ concern.context.marked }}</mark>{{ concern.context.after }}{% if concern.context.omitted_after %}…{% endif %}</p>
+                        {% else %}<p>当前疑点定位不可用，请重新检查原文范围。</p>{% endif %}
                         {% set explanations = concern.candidate_explanations|default({}) %}
                         {% if item.confirmation.english_assistance and concern.candidates %}
                         <div class="candidate-actions" aria-label="疑点 {{ loop.index }} 候选选项">
