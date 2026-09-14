@@ -277,3 +277,17 @@ def test_new_background_window_visible_but_unfocused_does_not_steal_selection():
     background = connect(pages, 'new-window')
     pages.acknowledge('new-window', background.connection_epoch, visible=True, focused=False)
     assert pages.selected == 'first'
+
+
+def test_navigation_new_handshake_can_overtake_old_pagehide_beacon():
+    pages = registry(); before = connect(pages)
+    def delayed_beacon():
+        time.sleep(.005)
+        pages.leave(before.page_id, before.connection_epoch)
+        pages.disconnect(before.page_id, before.connection_epoch)
+    thread = threading.Thread(target=delayed_beacon); thread.start()
+    after = connect(pages, document='next-document')
+    thread.join(1)
+    assert after.page_id == before.page_id
+    assert after.registration_seq == before.registration_seq
+    assert pages.connected == {after.page_id}

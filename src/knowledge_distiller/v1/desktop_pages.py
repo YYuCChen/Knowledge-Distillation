@@ -94,6 +94,13 @@ class DesktopPages:
     def connect(self, page, document, *, route='/', browser_hint='unknown', launch=None):
         with self.condition:
             previous = self.pages.get(page)
+            if previous and previous.document_id != document and previous.leaving_at is None:
+                # A navigation's new fetch can overtake its pagehide beacon.
+                # Wait briefly for that exact predecessor; a copied tab still
+                # receives a distinct ID when its source document remains live.
+                self.condition.wait_for(lambda: previous.leaving_at is not None or
+                    self.pages.get(page) is not previous, timeout=min(self.probe_timeout, .25))
+                previous = self.pages.get(page)
             browser_instance = previous.browser_instance if previous else self.launch_browsers.get(launch)
             launch_id = previous.launch_id if previous else launch
             # sessionStorage is copied when a tab is duplicated. Only the same
