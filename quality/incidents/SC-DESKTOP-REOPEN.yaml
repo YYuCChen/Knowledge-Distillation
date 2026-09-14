@@ -1,0 +1,35 @@
+{
+  "id": "SC-DESKTOP-REOPEN",
+  "requirement_ids": [
+    "BUG-20260914-08"
+  ],
+  "symptom": "SC-DESKTOP-REOPEN frozen regression family",
+  "evidence_state": "not_run",
+  "severity": "unknown",
+  "decision": "investigate_only",
+  "affected_components": [
+    "desktop"
+  ],
+  "corruption_or_privacy": "see frozen specification",
+  "core_path": true,
+  "propagation": [
+    "desktop"
+  ],
+  "workaround": null,
+  "verification": [
+    "tests/v1/test_desktop_pages.py"
+  ],
+  "owner": "C",
+  "target": "V1.3",
+  "status": "open",
+  "original_evidence": "窗口5 §12.3 / 窗口6 §7",
+  "synthetic_counterexample": [
+    "tests/v1/test_desktop_pages.py"
+  ],
+  "expected_assertions": [
+    "existing_registered_test_assertions"
+  ],
+  "scenario_ids": [
+    "SC-DESKTOP-REOPEN--synthetic"
+  ]
+}

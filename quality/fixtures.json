@@ -1,0 +1,4 @@
+{
+  "permission": "synthetic",
+  "description": "pytest fixtures are generated in explicit fresh per-run roots; test source is fingerprinted as runner input; no formal data."
+}

@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "requirements": {
+    "BUG-20260914-01": {
+      "specification": "窗口4 §10",
+      "status": "frozen"
+    },
+    "BUG-20260914-02": {
+      "specification": "窗口4 §4",
+      "status": "frozen"
+    },
+    "BUG-20260914-03": {
+      "specification": "窗口4 §7",
+      "status": "frozen"
+    },
+    "BUG-20260914-04": {
+      "specification": "窗口4 §5",
+      "status": "frozen"
+    },
+    "BUG-20260914-05": {
+      "specification": "窗口4 §11",
+      "status": "frozen"
+    },
+    "BUG-20260914-06": {
+      "specification": "窗口4 §8",
+      "status": "frozen"
+    },
+    "BUG-20260914-07": {
+      "specification": "窗口4 §6",
+      "status": "frozen"
+    },
+    "BUG-20260914-08": {
+      "specification": "窗口4 §9",
+      "status": "frozen"
+    },
+    "BUG-20260914-09": {
+      "specification": "窗口4 §12",
+      "status": "frozen"
+    },
+    "ENG-20260914-01": {
+      "specification": "窗口4 §14 / 窗口6 M13",
+      "status": "frozen"
+    },
+    "VAL-20260914-01": {
+      "specification": "窗口4 §13",
+      "status": "investigate_only"
+    },
+    "HISTORICAL-REGRESSION": {
+      "specification": "docs/engineering/testing.md",
+      "status": "regression"
+    }
+  }
+}

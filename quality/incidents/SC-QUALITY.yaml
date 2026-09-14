@@ -1,0 +1,35 @@
+{
+  "id": "SC-QUALITY",
+  "requirement_ids": [
+    "ENG-20260914-01"
+  ],
+  "symptom": "SC-QUALITY frozen regression family",
+  "evidence_state": "not_run",
+  "severity": "unknown",
+  "decision": "investigate_only",
+  "affected_components": [
+    "quality"
+  ],
+  "corruption_or_privacy": "see frozen specification",
+  "core_path": true,
+  "propagation": [
+    "quality"
+  ],
+  "workaround": null,
+  "verification": [
+    "tests/test_quality.py"
+  ],
+  "owner": "E",
+  "target": "V1.3",
+  "status": "open",
+  "original_evidence": "窗口5 §12.3 / 窗口6 §7",
+  "synthetic_counterexample": [
+    "tests/test_quality.py"
+  ],
+  "expected_assertions": [
+    "existing_registered_test_assertions"
+  ],
+  "scenario_ids": [
+    "SC-QUALITY--synthetic"
+  ]
+}

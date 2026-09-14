@@ -1,0 +1,1076 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {
+      "id": "SC-QUALITY--synthetic",
+      "requirements": [
+        "ENG-20260914-01"
+      ],
+      "components": [
+        "quality"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/test_quality.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ],
+      "always": true
+    },
+    {
+      "id": "SC-JSON-ENVELOPE--synthetic",
+      "requirements": [
+        "BUG-20260914-04"
+      ],
+      "components": [
+        "model_json"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_knowledge_model.py",
+          "tests/v1/test_knowledge_presentation.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-GROUP-ATOMIC--synthetic",
+      "requirements": [
+        "BUG-20260914-07"
+      ],
+      "components": [
+        "confirmation"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_confirmation_concurrency.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-MANUAL-FIFO--synthetic",
+      "requirements": [
+        "BUG-20260914-03"
+      ],
+      "components": [
+        "storage"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_store.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-READING-CONTINUITY--synthetic",
+      "requirements": [
+        "BUG-20260914-03"
+      ],
+      "components": [
+        "manual"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_home_polling.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-CONTEXT-FEISHU--synthetic",
+      "requirements": [
+        "BUG-20260914-06"
+      ],
+      "components": [
+        "manual"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_feishu_cards.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-DESKTOP-REOPEN--synthetic",
+      "requirements": [
+        "BUG-20260914-08"
+      ],
+      "components": [
+        "desktop"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_desktop_pages.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-AUDIO-CONTINUITY--synthetic",
+      "requirements": [
+        "BUG-20260914-02"
+      ],
+      "components": [
+        "confirmation"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_audio_location_recovery.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-INSTALL-ACCEPT--synthetic",
+      "requirements": [
+        "BUG-20260914-01"
+      ],
+      "components": [
+        "installer"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_component_install.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-INSTALL-PATH--synthetic",
+      "requirements": [
+        "BUG-20260914-05"
+      ],
+      "components": [
+        "installer"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_component_bootstrap.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-ASSET-FAILURE--synthetic",
+      "requirements": [
+        "BUG-20260914-09"
+      ],
+      "components": [
+        "installer"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_component_download.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-SOURCE-FIDELITY--synthetic",
+      "requirements": [
+        "HISTORICAL-REGRESSION"
+      ],
+      "components": [
+        "confirmation"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_v12_source_integrity.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-SOURCE-RESUME--synthetic",
+      "requirements": [
+        "HISTORICAL-REGRESSION"
+      ],
+      "components": [
+        "confirmation"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_review_resume.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-RUNTIME-MIGRATE--synthetic",
+      "requirements": [
+        "HISTORICAL-REGRESSION"
+      ],
+      "components": [
+        "runtime"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_qwen_migration.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-ENGINE-BOUNDARY--synthetic",
+      "requirements": [
+        "HISTORICAL-REGRESSION"
+      ],
+      "components": [
+        "runtime"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_asr_recovery.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-RELEASE-INTEGRITY--synthetic",
+      "requirements": [
+        "HISTORICAL-REGRESSION"
+      ],
+      "components": [
+        "build"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/test_release_sizes.py",
+          "tests/test_dual_build.py",
+          "tests/test_build_job.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-TCC-IDENTITY--synthetic",
+      "requirements": [
+        "VAL-20260914-01"
+      ],
+      "components": [
+        "desktop"
+      ],
+      "gate": "module",
+      "level": "synthetic",
+      "platform": "host",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_mac_signing.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "existing_registered_test_assertions"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "V1.3 additional acceptance cases until runner updated",
+        "native Windows/macOS",
+        "real model",
+        "visual or remote availability"
+      ]
+    },
+    {
+      "id": "SC-JSON-ENVELOPE--macos-arm64--native",
+      "requirements": [
+        "BUG-20260914-04"
+      ],
+      "components": [
+        "model_json"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-JSON-ENVELOPE--windows-x64--native",
+      "requirements": [
+        "BUG-20260914-04"
+      ],
+      "components": [
+        "model_json"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-GROUP-ATOMIC--macos-arm64--native",
+      "requirements": [
+        "BUG-20260914-07"
+      ],
+      "components": [
+        "confirmation"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-GROUP-ATOMIC--windows-x64--native",
+      "requirements": [
+        "BUG-20260914-07"
+      ],
+      "components": [
+        "confirmation"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-MANUAL-FIFO--macos-arm64--native",
+      "requirements": [
+        "BUG-20260914-03"
+      ],
+      "components": [
+        "storage"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-MANUAL-FIFO--windows-x64--native",
+      "requirements": [
+        "BUG-20260914-03"
+      ],
+      "components": [
+        "storage"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-READING-CONTINUITY--macos-arm64--native",
+      "requirements": [
+        "BUG-20260914-03"
+      ],
+      "components": [
+        "manual"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-READING-CONTINUITY--windows-x64--native",
+      "requirements": [
+        "BUG-20260914-03"
+      ],
+      "components": [
+        "manual"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-CONTEXT-FEISHU--macos-arm64--native",
+      "requirements": [
+        "BUG-20260914-06"
+      ],
+      "components": [
+        "manual"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-CONTEXT-FEISHU--windows-x64--native",
+      "requirements": [
+        "BUG-20260914-06"
+      ],
+      "components": [
+        "manual"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-DESKTOP-REOPEN--macos-arm64--native",
+      "requirements": [
+        "BUG-20260914-08"
+      ],
+      "components": [
+        "desktop"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-AUDIO-CONTINUITY--macos-arm64--native",
+      "requirements": [
+        "BUG-20260914-02"
+      ],
+      "components": [
+        "confirmation"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-AUDIO-CONTINUITY--windows-x64--native",
+      "requirements": [
+        "BUG-20260914-02"
+      ],
+      "components": [
+        "confirmation"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-INSTALL-ACCEPT--macos-arm64--native",
+      "requirements": [
+        "BUG-20260914-01"
+      ],
+      "components": [
+        "installer"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-INSTALL-ACCEPT--windows-x64--native",
+      "requirements": [
+        "BUG-20260914-01"
+      ],
+      "components": [
+        "installer"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-INSTALL-PATH--macos-arm64--native",
+      "requirements": [
+        "BUG-20260914-05"
+      ],
+      "components": [
+        "installer"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-INSTALL-PATH--windows-x64--native",
+      "requirements": [
+        "BUG-20260914-05"
+      ],
+      "components": [
+        "installer"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-ASSET-FAILURE--macos-arm64--native",
+      "requirements": [
+        "BUG-20260914-09"
+      ],
+      "components": [
+        "installer"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-ASSET-FAILURE--windows-x64--native",
+      "requirements": [
+        "BUG-20260914-09"
+      ],
+      "components": [
+        "installer"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-RUNTIME-MIGRATE--macos-arm64--native",
+      "requirements": [
+        "HISTORICAL-REGRESSION"
+      ],
+      "components": [
+        "runtime"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-RUNTIME-MIGRATE--windows-x64--native",
+      "requirements": [
+        "HISTORICAL-REGRESSION"
+      ],
+      "components": [
+        "runtime"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-RELEASE-INTEGRITY--macos-arm64--native",
+      "requirements": [
+        "HISTORICAL-REGRESSION"
+      ],
+      "components": [
+        "build"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-RELEASE-INTEGRITY--windows-x64--native",
+      "requirements": [
+        "HISTORICAL-REGRESSION"
+      ],
+      "components": [
+        "build"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-TCC-IDENTITY--macos-arm64--native",
+      "requirements": [
+        "VAL-20260914-01"
+      ],
+      "components": [
+        "desktop"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen M01-M12 real product journey; pending dedicated runner"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "missing native journey runner"
+      ]
+    },
+    {
+      "id": "SC-FROZEN-SMOKE--macos-arm64",
+      "requirements": [
+        "HISTORICAL-REGRESSION"
+      ],
+      "components": [
+        "main",
+        "installer",
+        "build"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "macos-arm64",
+      "runner": {
+        "adapter": "verify_candidate",
+        "paths": [
+          "scripts/verify_candidate.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen runtime policy",
+        "helper runtime",
+        "four routes",
+        "two launches fixed port",
+        "build source identity"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "Dock",
+        "migration",
+        "real model",
+        "installer journey"
+      ]
+    },
+    {
+      "id": "SC-FROZEN-SMOKE--windows-x64",
+      "requirements": [
+        "HISTORICAL-REGRESSION"
+      ],
+      "components": [
+        "main",
+        "installer",
+        "build"
+      ],
+      "gate": "native",
+      "level": "native",
+      "platform": "windows-x64",
+      "runner": {
+        "adapter": "verify_candidate",
+        "paths": [
+          "scripts/verify_candidate.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "frozen runtime policy",
+        "helper runtime",
+        "four routes",
+        "two launches fixed port",
+        "build source identity"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "Dock",
+        "migration",
+        "real model",
+        "installer journey"
+      ]
+    }
+  ]
+}
