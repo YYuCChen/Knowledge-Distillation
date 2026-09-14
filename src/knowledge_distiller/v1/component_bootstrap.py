@@ -135,7 +135,7 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                         root / 'updates/component-attempts' / uuid4().hex,
                         installed=target if target.exists() else None,
                         cancelled=cancelled.is_set, event=event,
-                        progress=lambda received, total: state.update(
+                        progress=lambda received, total: event('prepare',
                             bytes_done=received, bytes_total=total))
                     context['candidate'] = candidate
                 if cancelled.is_set():
@@ -163,6 +163,7 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                 if status == 'working': state['steps'][index] = 'cancelled' if problem.category=='cancelled' else 'attention'
         finally:
             state['busy'] = False
+            state['seq'] += 1
             operation.release()
 
     @app.before_request
@@ -211,6 +212,7 @@ def create_installer(*, target, data_root, platform, public_key, manifest_url,
                 if not state.get('cancellable'):
                     return '程序正在切换或验证，完成后即可关闭安装器。', 409
                 cancelled.set()
+                state['seq'] += 1
                 state['message'] = '正在停止准备，已校验的下载会保留。'
                 return redirect('/')
             if action == 'close' and not state['busy']:
