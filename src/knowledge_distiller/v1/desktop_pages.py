@@ -138,14 +138,13 @@ class DesktopPages:
     def browser_exited(self, browser_instance):
         """Native NSRunningApplication has proved this exact instance exited."""
         with self.condition:
-            for page in self.pages.values():
+            for page_id, page in list(self.pages.items()):
                 if page.browser_instance == browser_instance:
-                    page.transport_state = 'disconnected'
-                    page.navigating = False
-                    page.leaving_at = time.monotonic() - self.navigation_grace
-                    if self.target == page.page_id:
+                    # Native process termination is definitive; navigation grace
+                    # applies only to ambiguous page/transport departure signals.
+                    del self.pages[page_id]
+                    if self.target == page_id:
                         self.ack = None
-            self._retire_departed()
             self.condition.notify_all()
 
     def _matching(self, page, epoch):

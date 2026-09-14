@@ -227,19 +227,26 @@ def test_second_launcher_queues_on_owning_server(tmp_path):
         server.shutdown(); server.server_close(); thread.join(2)
 
 
-def test_native_confirmed_browser_exit_retires_only_nonce_associated_pages():
+def test_native_confirmed_browser_exit_retires_only_nonce_associated_pages(monkeypatch):
+    # Windows can report the same monotonic tick for both operations; subtracting
+    # grace then adding it back must not be used as proof of elapsed time.
+    monkeypatch.setattr(time, 'monotonic', lambda: 171816.734)
     pages = registry()
     owned = connect(pages, 'owned', launch='native-launch', browser_hint='chrome')
     manual = connect(pages, 'manual', browser_hint='chrome')
     pages.associate_launch('native-launch', 'chrome:123:instance-a')
     pages.disconnect(owned.page_id, owned.connection_epoch)
+    pages.target = owned.page_id
+    pages.ack = (owned.page_id, owned.connection_epoch, 1, True, True)
     # Same family is not proof that a manually opened document belonged to PID 123.
     pages.browser_exited('chrome:123:instance-a')
     assert set(pages.pages) == {'manual'}
+    assert pages.ack is None
     assert pages.pages['manual'] is manual
 
 
-def test_browser_identity_survives_navigation_and_copied_tab():
+def test_browser_identity_survives_navigation_and_copied_tab(monkeypatch):
+    monkeypatch.setattr(time, 'monotonic', lambda: 171816.734)
     pages = registry()
     first = connect(pages, launch='launch')
     pages.associate_launch('launch', 'browser:one')
