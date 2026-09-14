@@ -53,7 +53,8 @@
         "docs/research/2026-09-11-knowledge-to-tools/report.md",
         "docs/research/2026-09-11-knowledge-to-tools/sources.md",
         "docs/roadmap/exploration.md",
-        "docs/roadmap/next-version.md"
+        "docs/roadmap/next-version.md",
+        "docs/engineering/manual-confirmation.md"
       ],
       "depends_on": [],
       "artifact": false
