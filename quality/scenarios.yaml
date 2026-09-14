@@ -46,7 +46,13 @@
         "adapter": "pytest",
         "paths": [
           "tests/v1/test_knowledge_model.py",
-          "tests/v1/test_knowledge_presentation.py"
+          "tests/v1/test_knowledge_presentation.py",
+          "tests/v1/test_model_json.py",
+          "tests/v1/test_json_entrypoints.py",
+          "tests/v1/test_response_receipts.py",
+          "tests/v1/test_review_response_receipts.py",
+          "tests/v1/test_ocr_review_policy.py",
+          "tests/v1/test_integrated_review_contract.py"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -55,7 +61,6 @@
       ],
       "timeout": 300,
       "not_proven": [
-        "V1.3 additional acceptance cases until runner updated",
         "native Windows/macOS",
         "real model",
         "visual or remote availability"
@@ -77,7 +82,10 @@
         "adapter": "pytest",
         "paths": [
           "tests/v1/test_confirmation_concurrency.py",
-          "tests/v1/test_confirmation_schema.py"
+          "tests/v1/test_confirmation_schema.py",
+          "tests/v1/test_confirmation_groups.py",
+          "tests/v1/test_group_confirmation_pipeline.py",
+          "tests/v1/test_pipeline.py"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -89,7 +97,6 @@
       ],
       "timeout": 300,
       "not_proven": [
-        "V1.3 additional acceptance cases until runner updated",
         "native Windows/macOS",
         "real model",
         "visual or remote availability"
@@ -179,7 +186,11 @@
       "runner": {
         "adapter": "pytest",
         "paths": [
-          "tests/v1/test_feishu_cards.py"
+          "tests/v1/test_feishu_cards.py",
+          "tests/v1/test_confirmation_display.py",
+          "tests/v1/test_feishu_actions.py",
+          "tests/v1/test_feishu_receipts.py",
+          "tests/v1/test_feishu_scopes.py"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -188,7 +199,6 @@
       ],
       "timeout": 300,
       "not_proven": [
-        "V1.3 additional acceptance cases until runner updated",
         "native Windows/macOS",
         "real model",
         "visual or remote availability"
@@ -208,7 +218,8 @@
       "runner": {
         "adapter": "pytest",
         "paths": [
-          "tests/v1/test_desktop_pages.py"
+          "tests/v1/test_desktop_pages.py",
+          "tests/v1/test_mac_app.py"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -217,7 +228,6 @@
       ],
       "timeout": 300,
       "not_proven": [
-        "V1.3 additional acceptance cases until runner updated",
         "native Windows/macOS",
         "real model",
         "visual or remote availability"
@@ -266,7 +276,18 @@
       "runner": {
         "adapter": "pytest",
         "paths": [
-          "tests/v1/test_component_install.py"
+          "tests/v1/test_component_install.py",
+          "tests/v1/test_component_attempt.py",
+          "tests/v1/test_component_update_completion.py",
+          "tests/v1/test_install_accept_boundary.py",
+          "tests/v1/test_component_assembly.py"
+        ],
+        "deselect": [
+          "tests/v1/test_component_attempt.py::test_path_replacement_never_deletes_replacement_or_moved_material",
+          "tests/v1/test_component_attempt.py::test_legitimate_bundle_symlinks_remove_only_entries",
+          "tests/v1/test_component_attempt.py::test_windows_parent_and_root_rename_are_blocked_until_capability_released",
+          "tests/v1/test_component_attempt.py::test_windows_internal_junction_preserves_all_material",
+          "tests/v1/test_component_attempt.py::test_windows_long_paths_and_in_use_retry"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -275,7 +296,6 @@
       ],
       "timeout": 300,
       "not_proven": [
-        "V1.3 additional acceptance cases until runner updated",
         "native Windows/macOS",
         "real model",
         "visual or remote availability"
@@ -295,7 +315,12 @@
       "runner": {
         "adapter": "pytest",
         "paths": [
-          "tests/v1/test_component_bootstrap.py"
+          "tests/v1/test_component_bootstrap.py",
+          "tests/v1/test_installer_journey.py",
+          "tests/v1/test_installer_platform.py"
+        ],
+        "deselect": [
+          "tests/v1/test_installer_platform.py::test_native_shortcut_readback_conflict_and_custom_data"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -304,7 +329,6 @@
       ],
       "timeout": 300,
       "not_proven": [
-        "V1.3 additional acceptance cases until runner updated",
         "native Windows/macOS",
         "real model",
         "visual or remote availability"
@@ -324,7 +348,9 @@
       "runner": {
         "adapter": "pytest",
         "paths": [
-          "tests/v1/test_component_download.py"
+          "tests/v1/test_component_download.py",
+          "tests/v1/test_install_problem.py",
+          "tests/v1/test_component_release.py"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -333,7 +359,6 @@
       ],
       "timeout": 300,
       "not_proven": [
-        "V1.3 additional acceptance cases until runner updated",
         "native Windows/macOS",
         "real model",
         "visual or remote availability"
@@ -472,6 +497,9 @@
           "tests/test_release_sizes.py",
           "tests/test_dual_build.py",
           "tests/test_build_job.py"
+        ],
+        "deselect": [
+          "tests/test_build_job.py::test_windows_killed_worker_terminates_owned_child"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -483,7 +511,8 @@
         "V1.3 additional acceptance cases until runner updated",
         "native Windows/macOS",
         "real model",
-        "visual or remote availability"
+        "visual or remote availability",
+        "Windows owned-child process termination is registered separately as SC-BUILD-CHILD--windows-x64"
       ]
     },
     {
@@ -1361,6 +1390,230 @@
       "timeout": 600,
       "not_proven": [
         "no real runner/evidence yet"
+      ]
+    },
+    {
+      "id": "SC-BUILD-CHILD--windows-x64",
+      "requirements": [
+        "HISTORICAL-REGRESSION"
+      ],
+      "components": [
+        "build"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "windows-x64",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/test_build_job.py"
+        ],
+        "nodeids": [
+          "tests/test_build_job.py::test_windows_killed_worker_terminates_owned_child"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "actual Windows worker cancellation terminates its owned child process"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "frozen candidate installer or runtime"
+      ]
+    },
+    {
+      "id": "SC-DESKTOP-BROWSER--protocol",
+      "requirements": [
+        "BUG-20260914-08"
+      ],
+      "components": [
+        "desktop"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "macos-arm64",
+      "runner": {
+        "adapter": "desktop_browser",
+        "case": "protocol",
+        "paths": [
+          "quality/run_desktop_browser.py",
+          "tests/v1/desktop/browser_fixture.py",
+          "tests/v1/desktop/run_browser_protocol.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "real Chromium source desktop protocol protocol"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "native Dock",
+        "Safari",
+        "actual foreground",
+        "frozen candidate",
+        "normal native close matrix"
+      ]
+    },
+    {
+      "id": "SC-DESKTOP-BROWSER--slow-open",
+      "requirements": [
+        "BUG-20260914-08"
+      ],
+      "components": [
+        "desktop"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "macos-arm64",
+      "runner": {
+        "adapter": "desktop_browser",
+        "case": "slow-open",
+        "paths": [
+          "quality/run_desktop_browser.py",
+          "tests/v1/desktop/browser_fixture.py",
+          "tests/v1/desktop/slow_open_browser.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "real Chromium source desktop protocol slow-open"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "native Dock",
+        "Safari",
+        "actual foreground",
+        "frozen candidate",
+        "normal native close matrix"
+      ]
+    },
+    {
+      "id": "SC-MANUAL-RECONCILER--browser",
+      "requirements": [
+        "BUG-20260914-03",
+        "BUG-20260914-02"
+      ],
+      "components": [
+        "manual"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "host",
+      "runner": {
+        "adapter": "manual_browser",
+        "paths": [
+          "tests/v1/browser/manual_browser.py",
+          "tests/v1/browser/manual_fixture.py",
+          "tests/v1/browser/manual_samples.js"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "20 playing and 20 paused reconciliation samples",
+        "draft focus selection anchor and audio identity preserved",
+        "each eligible sample <= 3000 ms"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "native IME",
+        "real mutation",
+        "Feishu device",
+        "frozen application",
+        "complete M06 matrix"
+      ]
+    },
+    {
+      "id": "SC-INSTALL-HOST--POSIX",
+      "requirements": [
+        "BUG-20260914-01",
+        "BUG-20260914-05"
+      ],
+      "components": [
+        "installer"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "macos-arm64",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_component_attempt.py"
+        ],
+        "nodeids": [
+          "tests/v1/test_component_attempt.py::test_path_replacement_never_deletes_replacement_or_moved_material",
+          "tests/v1/test_component_attempt.py::test_legitimate_bundle_symlinks_remove_only_entries"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "real POSIX filesystem/API behavior with isolated synthetic data"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "frozen installer",
+        "native user journey"
+      ]
+    },
+    {
+      "id": "SC-INSTALL-HOST--NTFS-COM",
+      "requirements": [
+        "BUG-20260914-01",
+        "BUG-20260914-05"
+      ],
+      "components": [
+        "installer"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "windows-x64",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_component_attempt.py",
+          "tests/v1/test_installer_platform.py"
+        ],
+        "nodeids": [
+          "tests/v1/test_component_attempt.py::test_windows_parent_and_root_rename_are_blocked_until_capability_released",
+          "tests/v1/test_component_attempt.py::test_windows_internal_junction_preserves_all_material",
+          "tests/v1/test_component_attempt.py::test_windows_long_paths_and_in_use_retry",
+          "tests/v1/test_installer_platform.py::test_native_shortcut_readback_conflict_and_custom_data"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "real NTFS-COM filesystem/API behavior with isolated synthetic data"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "frozen installer",
+        "native user journey"
+      ]
+    },
+    {
+      "id": "SC-INSTALL-LONG-PATH--windows-x64",
+      "requirements": [
+        "BUG-20260914-05"
+      ],
+      "components": [
+        "installer"
+      ],
+      "gate": "contract",
+      "level": "integration",
+      "platform": "windows-x64",
+      "runner": {
+        "adapter": "pytest",
+        "paths": [
+          "tests/v1/test_windows_component_long_paths.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "Win32 extended paths including native binary patch; absent HDiffPatch remains not_run"
+      ],
+      "timeout": 300,
+      "not_proven": [
+        "frozen installer",
+        "native user journey"
       ]
     }
   ]

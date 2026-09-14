@@ -51,3 +51,16 @@ python scripts/quality.py report --plan <plan-directory>/plan.json --gate native
 `verify_candidate` 适配器沿用其实际 `--platform --build --output --version --commit` 参数及独立数据输出，只登记原工具覆盖的冻结运行链、helper、启动、页面和版本身份。Dock、真实模型、安装器、迁移回退、线上读回必须各自有专用 runner；不能因为 frozen smoke 通过就填写它们通过。
 
 事故索引包含需求/冻结依据、原现场索引、合成回归、预期断言、级别/平台场景、Owner、状态和处理决定。初始 unknown 表示尚需按实际结果核定，不能据此消除已知严重问题。延期记录必须有明确下一轮目标和已验证安全绕行；S0/S1 只能 must_fix_now。规格的原件保留在项目治理执行核验入口，公共索引不复制私人现场。
+
+## V1.3 最终接线
+
+通用 pytest 家族中平台专属断言按完整 nodeid 拆分登记：Windows worker 子进程清理、NTFS/COM/长路径，以及 Mac 上的 POSIX 删除边界在 contract/integration 门独立运行。原通用场景的 `deselect` 指向对应独立场景，不能用于取消必需检查；平台错误或所需 HDiffPatch 未提供仍为 not_run。
+
+浏览器适配器直接执行受注册文件摘要约束的已有源码 runner，不导入外部 JSON 作为通过结果：
+
+- `desktop_browser` 编排现有 fixture 和 protocol/slow-open 两个 Chromium runner，保留参数锁、原始子进程日志和资源截图，仅证明源码桌面协议。
+- `manual_browser` 执行 `tests/v1/browser/manual_browser.py --output <独立目录>`，重新核对 production home.js 摘要、实际平台/Python、全部浏览器命令退出状态与播放/暂停各 20 条原始样本；缺记录、时间超限、输入/音频身份或摘要异常不通过。只覆盖 reconciler 子项，不能替代完整 M06、原生 IME、真实组提交或飞书设备。
+
+这些场景登记为 integration；没有把合成 pytest 或源码浏览器晋级成 native/visual 成品。原生 Dock、真实模型、真实飞书客户端仍缺专用 runner，继续列为 not_run。
+
+成品 `verify_candidate` 适配器除退出码外核对报告中的实际平台、源码/版本、独立数据声明、冻结主程序与 helper 运行时、两次启动和页面数量；保留 runtime、helper、启动原始日志和报告。所有成品场景仍绑定当前 archive 与 build tree 摘要。对旧护照复用也重新解析必需输出；改写护照 passed 并重算摘要不能覆盖 JUnit 或业务报告中的失败。质量采集器摘要参与证据依赖，改采集器只失效证据，不触发产品重建。

@@ -23,6 +23,7 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 GATES = ('module', 'contract', 'candidate', 'native', 'release')
+ADAPTERS = {'pytest', 'verify_candidate', 'build_job', 'dual_build', 'manual_browser', 'desktop_browser'}
 LEVELS = ('source', 'synthetic', 'integration', 'native', 'model_real', 'visual', 'remote_readback')
 
 
@@ -146,8 +147,25 @@ def registry(root=ROOT):
         if s['gate'] not in GATES or s['level'] not in LEVELS:
             raise Gap('invalid gate/level: ' + s['id'])
         runner = s['runner']
+        if runner and runner.get('adapter') not in ADAPTERS:
+            raise Gap('unregistered runner adapter: ' + s['id'])
+        if runner:
+            fixed={'manual_browser':{'tests/v1/browser/manual_browser.py','tests/v1/browser/manual_fixture.py','tests/v1/browser/manual_samples.js'},
+                   'verify_candidate':{'scripts/verify_candidate.py'},'build_job':{'scripts/build_job.py'},'dual_build':{'scripts/dual_build.py'}}
+            if runner['adapter']=='desktop_browser':
+                if runner.get('case') not in ('protocol','slow-open'):raise Gap('invalid desktop browser case')
+                fixed['desktop_browser']={'quality/run_desktop_browser.py','tests/v1/desktop/browser_fixture.py',
+                    'tests/v1/desktop/'+('run_browser_protocol.py' if runner['case']=='protocol' else 'slow_open_browser.py')}
+            if not fixed.get(runner['adapter'],set())<=set(runner.get('paths',[])):
+                raise Gap('adapter execution paths must be fingerprinted: '+s['id'])
+        if runner and runner['adapter'] in ('manual_browser','desktop_browser') and s['level'] != 'integration':
+            raise Gap('source browser runner proves integration only: ' + s['id'])
         if runner and runner['adapter'] == 'pytest' and s['level'] not in ('source', 'synthetic', 'integration'):
             raise Gap('pytest cannot attest native/model/visual evidence: ' + s['id'])
+        if runner and runner['adapter'] == 'pytest':
+            for node in runner.get('nodeids', []) + runner.get('deselect', []):
+                if '::' not in node or node.split('::',1)[0] not in runner['paths']:
+                    raise Gap('pytest node must belong to registered path: ' + s['id'])
         if s['level'] in ('native','visual','model_real','remote_readback') and s['platform'] == 'host':
             raise Gap('real evidence needs an exact platform: ' + s['id'])
     needed = {'id','requirement_ids','symptom','evidence_state','severity','decision','affected_components',
@@ -183,7 +201,8 @@ def snapshot(scenario, impact, root=ROOT):
         inputs[component] = hashes_for(definition['paths'], root)
     runner = scenario['runner']
     runner_paths = [] if runner is None else runner.get('paths', [])
-    return {'component_inputs': {key: object_hash(value) for key,value in inputs.items()},
+    return {'collector_hash': digest(root/'scripts/quality.py') if (root/'scripts/quality.py').is_file() else None,
+            'component_inputs': {key: object_hash(value) for key,value in inputs.items()},
             'input_files': inputs,
             'runner_hashes': {p: digest(root / p) for p in runner_paths},
             'fixture': {'sha256': digest(root / scenario['fixture']), 'permission': 'synthetic'},
@@ -335,8 +354,13 @@ def command_for(scenario, plan, attempt):
     """Only registered adapters form argument arrays; no user supplied shell."""
     root = Path(plan['source_root']); runner = scenario['runner']; adapter = runner['adapter']
     if adapter == 'pytest':
-        return [sys.executable,'-m','pytest','-q',*runner['paths'],'--basetemp',str(attempt/'pytest-temp'),
+        return [sys.executable,'-m','pytest','-q',*runner.get('nodeids',runner['paths']),*[f'--deselect={n}' for n in runner.get('deselect',[])],'--basetemp',str(attempt/'pytest-temp'),
                 '--junitxml',str(attempt/'junit.xml'),'-p','no:cacheprovider']
+    if adapter == 'manual_browser':
+        return [sys.executable,str(root/'tests/v1/browser/manual_browser.py'),'--output',str(attempt/'verification')]
+    if adapter == 'desktop_browser':
+        return [sys.executable,str(root/'quality/run_desktop_browser.py'),'--case',runner['case'],
+                '--output',str(attempt/'verification'),'--data-dir',str(attempt/'browser-data')]
     if adapter == 'verify_candidate':
         artifact = plan['release_input'].get('artifacts',{}).get(scenario['platform'])
         if not artifact: raise Gap('missing artifact/build input')
@@ -353,6 +377,88 @@ def command_for(scenario, plan, attempt):
     raise Gap('unimplemented runner adapter: ' + adapter)
 
 
+def output_paths(scenario):
+    adapter=scenario['runner']['adapter']
+    if adapter=='pytest': return ['junit.xml']
+    if adapter=='verify_candidate':
+        return ['verification/'+n for n in ('result.json','runtime.json','helper-runtime.json','runtime.log','launch.log','support.md')]
+    if adapter=='manual_browser': return ['verification/result.json','verification/commands.json']
+    if adapter=='desktop_browser':
+        files=['result.json','parameter-lock.json','fixture.stdout.log','fixture.stderr.log','runner.stdout.log','runner.stderr.log']
+        if scenario['runner']['case']=='protocol':files.append('icons-light-dark-2x.png')
+        return ['verification/'+n for n in files]
+    return []
+
+
+def validate_manual_browser(folder,plan):
+    result=read(folder/'result.json');commands=read(folder/'commands.json')
+    root=Path(plan['source_root'])
+    version=read(root/'src/knowledge_distiller/v1/adapters/python-runtime.json')['version']
+    if (result.get('status')!='passed' or result.get('level')!='integration'
+            or result.get('fixture')!='synthetic_queue' or result.get('python')!=version
+            or result.get('platform')!=platform.platform() or not result.get('browser')
+            or result.get('source_sha256')!=digest(root/'src/knowledge_distiller/v1/static/home.js')):
+        return 'failed','browser_identity_or_result_mismatch'
+    if not isinstance(commands,list) or not commands or any(c.get('returncode')!=0 for c in commands):
+        return 'failed','browser_command_failure'
+    if not {'open','eval','close'} <= {c.get('command',[None])[0] for c in commands}:
+        return 'failed','browser_command_trace_missing'
+    if result.get('assertions') != [{'id':'reconciliation_'+mode,'passed':True} for mode in ('playing','paused')]:
+        return 'failed','browser_assertions_missing'
+    for mode in ('playing','paused'):
+        row=result.get(mode,{});samples=row.get('samples',[])
+        if len(samples)!=20:return 'not_run','browser_sample_count'
+        for sample in samples:
+            if not (sample['sameAudio'] and sample['sameInput'] and sample['focus']
+                    and sample['draft']=='保留合成草稿' and sample['selection']==[2,4]
+                    and abs(sample['anchorDelta'])<=2 and 0<=sample['ms']<=3000
+                    and (sample['playing'] and sample['audioDelta']>0 if mode=='playing'
+                         else not sample['playing'] and abs(sample['audioDelta'])<=.1)):
+                return 'failed','browser_sample_assertion'
+        times=sorted(s['ms'] for s in samples)
+        if row.get('max_ms')!=times[-1] or row.get('p95_ms')!=times[18]:
+            return 'failed','browser_summary_mismatch'
+    return 'passed',None
+
+
+def validate_desktop_browser(folder,plan,case):
+    result=read(folder/'result.json');parameters=read(folder/'parameter-lock.json')
+    runner='run_browser_protocol.py' if case=='protocol' else 'slow_open_browser.py'
+    root=Path(plan['source_root']);runner_hash=digest(root/'tests/v1/desktop'/runner)
+    measured_hash=parameters.get('runner',{}).get('sha256') if case=='protocol' else parameters.get('runner_sha256')
+    if (result.get('result')!='passed' or parameters.get('source_commit')!=plan['head_commit']
+            or parameters.get('dirty') is not False or measured_hash!=runner_hash
+            or parameters.get('fixture_sha256')!=digest(root/'tests/v1/desktop/browser_fixture.py')
+            or not parameters.get('browser') or parameters.get('native_dock')!='not_run'):
+        return 'failed','desktop_browser_identity_or_result_mismatch'
+    records=result.get('records',[])
+    if case=='protocol':
+        expected={'initial_handshake','navigation_preserves_page_new_epoch','reopen_ack_not_foreground_claim',
+                  'brand_sizes_light_dark_retina_resource_gallery','copied_session_storage_allocates_distinct_page',
+                  'browser_close_transport_observed','browser_shutdown_signal_observation'}
+        expected|={f'slow_{action}_{seconds}s_no_duplicate' for action in ('navigate','reload') for seconds in (.4,2,5)}
+        lookup={r.get('name'):r for r in records}
+        if not expected <= lookup.keys():return 'not_run','desktop_browser_cases_missing'
+        for name in expected:
+            if name.startswith('slow_') and lookup[name].get('state',{}).get('opened')!=[]:
+                return 'failed','desktop_duplicate_open'
+        state=lookup['reopen_ack_not_foreground_claim']['state']
+        if state['opened'] or not state['results'] or state['results'][-1]['foreground_verified']:
+            return 'failed','desktop_false_foreground'
+        digest(folder/'icons-light-dark-2x.png')
+    else:
+        lookup={r.get('case'):r for r in records}
+        expected={'budget_timeout','five_requests_do_not_open_again','late_matching_handshake','late_page_is_reusable'}
+        if not expected<=lookup.keys():return 'not_run','desktop_browser_cases_missing'
+        if lookup['budget_timeout']['state']['results'][0]['reason']!='open_handshake_timeout':
+            return 'failed','desktop_timeout_missing'
+        for row in lookup.values():
+            if len(row['state']['opened'])!=1:return 'failed','desktop_duplicate_open'
+        if lookup['late_page_is_reusable']['state']['results'][-1]['foreground_verified']:
+            return 'failed','desktop_false_foreground'
+    return 'passed',None
+
+
 def validate_result(scenario, attempt, returncode, plan=None, logdir=None):
     if returncode: return 'failed', 'product_failure' if returncode == 1 else 'runner_failure'
     if scenario['runner']['adapter'] == 'pytest':
@@ -364,6 +470,24 @@ def validate_result(scenario, attempt, returncode, plan=None, logdir=None):
     elif scenario['runner']['adapter'] == 'verify_candidate':
         result = read(attempt/'verification/result.json')
         if result.get('ok') is not True: return 'failed', 'candidate_verification'
+        expected_platform='mac' if scenario['platform'].startswith('macos-') else 'windows'
+        if (result.get('source_commit') != plan['head_commit'] or result.get('version') != plan['release_input']['version']
+                or result.get('platform') != expected_platform or result.get('disposable_data') is not True):
+            return 'failed','candidate_identity_mismatch'
+        version=read(Path(plan['source_root'])/'src/knowledge_distiller/v1/adapters/python-runtime.json')['version']
+        runtime=read(attempt/'verification/runtime.json');helper=read(attempt/'verification/helper-runtime.json')
+        if (not runtime.get('ok') or not runtime.get('frozen') or not runtime.get('python_inventory')
+                or runtime.get('python',{}).get('version') != version or not helper.get('frozen')
+                or helper.get('python',{}).get('version') != version or result.get('runtime') != runtime
+                or result.get('update_helper_runtime') != helper or result.get('launches') != 2
+                or result.get('pages') != 4 or result.get('fixed_port') != 57740):
+            return 'failed','candidate_runtime_or_journey_mismatch'
+        for name in ('runtime.log','launch.log','support.md'):
+            digest(attempt/'verification'/name)
+    elif scenario['runner']['adapter'] == 'manual_browser':
+        return validate_manual_browser(attempt/'verification',plan)
+    elif scenario['runner']['adapter'] == 'desktop_browser':
+        return validate_desktop_browser(attempt/'verification',plan,scenario['runner']['case'])
     elif scenario['runner']['adapter'] in ('build_job','dual_build'):
         result=read(logdir/'stdout.log')
         records=[result] if scenario['runner']['adapter']=='build_job' else [result['mac'],result['windows']]
@@ -402,6 +526,16 @@ def verify_passport(passport, scenario, plan, plan_dir):
         if not contained(path, plan_dir.resolve()): raise Blocked('evidence path escapes plan directory')
         if digest(path) != record.get('sha256'): raise Blocked('output hash mismatch')
     if passport['result'] != 'passed': raise Gap('evidence is ' + passport['result'])
+    if scenario.get('runner'):
+        directories={Path(r['path']).parent for r in passport['outputs'] if Path(r['path']).name=='stdout.log'}
+        if len(directories)!=1: raise Blocked('missing unique execution logs')
+        logdir=plan_dir/next(iter(directories))
+        required={'stdout.log','stderr.log',*output_paths(scenario)}
+        recorded={str(Path(r['path']).relative_to(logdir.relative_to(plan_dir))) for r in passport['outputs']
+                  if contained(Path(r['path']),logdir.relative_to(plan_dir))}
+        if not required <= recorded: raise Blocked('missing required runner outputs')
+        result,_=validate_result(scenario,logdir,passport.get('exit_code',-1),plan,logdir)
+        if result != 'passed': raise Blocked('runner outputs do not attest pass')
     return True
 
 
@@ -470,6 +604,10 @@ def run(plan, path, gate, disposable):
                         process = subprocess.Popen(command,cwd=root,env=env,stdout=stdout,stderr=stderr,start_new_session=os.name!='nt')
                         passport['exit_code']=process.wait(timeout=scenario['timeout'])
                     passport['result'],passport['failure_kind']=validate_result(scenario,attempt,passport['exit_code'],plan,logdir)
+                    if scenario['runner']['adapter']=='manual_browser':
+                        passport['environment']['browser']=read(attempt/'verification/result.json').get('browser')
+                    elif scenario['runner']['adapter']=='desktop_browser':
+                        passport['environment']['browser']=read(attempt/'verification/parameter-lock.json').get('browser')
                 except subprocess.TimeoutExpired:
                     passport.update(result='timeout',failure_kind='runner_timeout')
                 except KeyboardInterrupt:
@@ -488,9 +626,12 @@ def run(plan, path, gate, disposable):
                             else: process.kill()
                             process.wait()
                     # Copy machine-readable assertion result, retain raw attempt data locally.
-                    for source in (attempt/'junit.xml',attempt/'verification/result.json'):
-                        if source.is_file(): (logdir/source.name).write_bytes(source.read_bytes())
-                    for log in sorted(logdir.iterdir()):
+                    for relative in output_paths(scenario):
+                        source=attempt/relative
+                        if source.is_file():
+                            target=logdir/relative;target.parent.mkdir(parents=True,exist_ok=True)
+                            target.write_bytes(source.read_bytes())
+                    for log in sorted(p for p in logdir.rglob('*') if p.is_file()):
                         passport['outputs'].append({'path':log.relative_to(path.parent).as_posix(),'sha256':digest(log)})
                     try:
                         if git('rev-parse','HEAD',root=root)!=plan['head_commit'] or git('status','--porcelain',root=root):

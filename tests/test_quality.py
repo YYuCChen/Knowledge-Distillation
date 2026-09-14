@@ -234,3 +234,86 @@ def test_existing_build_job_status_uses_real_artifact_validation(tmp_path):
     assert q.validate_result(scenario,tmp_path,result.returncode,plan,logs)==('passed',None)
     artifact.write_text('corrupted')
     assert q.validate_result(scenario,tmp_path,0,plan,logs)==('failed','build_artifact_mismatch')
+
+
+def test_windows_only_assertion_is_registered_separately():
+    _,scenarios,_,_=q.registry()
+    normal=next(s for s in scenarios if s['id']=='SC-RELEASE-INTEGRITY--synthetic')
+    windows=next(s for s in scenarios if s['id']=='SC-BUILD-CHILD--windows-x64')
+    assert windows['runner']['nodeids']==normal['runner']['deselect']
+    assert windows['platform']=='windows-x64' and windows['level']=='integration'
+    command=q.command_for(windows,{'source_root':str(q.ROOT)},Path('/tmp/isolated'))
+    assert windows['runner']['nodeids'][0] in command
+    assert '--deselect='+windows['runner']['nodeids'][0] in q.command_for(normal,{'source_root':str(q.ROOT)},Path('/tmp/isolated'))
+
+
+@pytest.fixture
+def browser_report(tmp_path):
+    root=tmp_path/'source'
+    source=root/'src/knowledge_distiller/v1/static/home.js';source.parent.mkdir(parents=True);source.write_text('source')
+    q.atomic(root/'src/knowledge_distiller/v1/adapters/python-runtime.json',{'version':q.platform.python_version()})
+    plan={'source_root':str(root),'head_commit':'current'}
+    folder=tmp_path/'evidence';folder.mkdir()
+    result=dict(status='passed',level='integration',fixture='synthetic_queue',python=q.platform.python_version(),
+        platform=q.platform.platform(),source_sha256=q.digest(source),browser='Chromium measured version',
+        assertions=[{'id':'reconciliation_'+mode,'passed':True} for mode in ('playing','paused')])
+    for mode in ('playing','paused'):
+        result[mode]={'samples':[dict(sameAudio=True,sameInput=True,focus=True,draft='保留合成草稿',selection=[2,4],
+            anchorDelta=0,ms=100,playing=mode=='playing',audioDelta=1 if mode=='playing' else 0) for _ in range(20)],'max_ms':100,'p95_ms':100}
+    q.atomic(folder/'result.json',result)
+    q.atomic(folder/'commands.json',[{'command':[c],'returncode':0} for c in ('open','eval','close')])
+    return plan,folder,result
+
+
+def test_browser_adapter_rechecks_samples_and_identity(browser_report):
+    plan,folder,result=browser_report
+    assert q.validate_manual_browser(folder,plan)==('passed',None)
+    result['playing']['samples'][0]['ms']=3100
+    q.atomic(folder/'result.json',result)
+    assert q.validate_manual_browser(folder,plan)==('failed','browser_sample_assertion')
+
+
+@pytest.mark.parametrize('field,value',[('platform','other-platform'),('source_sha256','false'),('level','native'),('status','failed')])
+def test_browser_adapter_cannot_accept_arbitrary_pass_json(browser_report,field,value):
+    plan,folder,result=browser_report;result[field]=value;q.atomic(folder/'result.json',result)
+    assert q.validate_manual_browser(folder,plan)[0]=='failed'
+
+
+def test_browser_adapter_requires_trace_and_all_samples(browser_report):
+    plan,folder,result=browser_report
+    result['paused']['samples'].pop();q.atomic(folder/'result.json',result)
+    assert q.validate_manual_browser(folder,plan)==('not_run','browser_sample_count')
+    (folder/'commands.json').unlink()
+    with pytest.raises(OSError):q.validate_manual_browser(folder,plan)
+
+
+def test_resealed_success_passport_cannot_override_failed_actual_junit(repository,tmp_path):
+    root,git,base=repository
+    (root/'tests/test_business.py').write_text('def test_thing(): assert False\n');git('add','.');git('commit','-qm','fail')
+    output=tmp_path/'plan';plan=q.make_plan(base,'HEAD',None,output,root)
+    q.run(plan,output/'plan.json','module',tmp_path/'data')
+    passport=q.read(output/'evidence/unit.json');passport['result']='passed';passport['exit_code']=0;seal(passport)
+    with pytest.raises(q.Blocked,match='outputs do not attest pass'):
+        q.verify_passport(passport,plan['scenarios'][0],plan,output)
+    passport['outputs']=[r for r in passport['outputs'] if not r['path'].endswith('junit.xml')];seal(passport)
+    with pytest.raises(q.Blocked,match='required runner outputs'):
+        q.verify_passport(passport,plan['scenarios'][0],plan,output)
+
+
+def test_candidate_adapter_checks_actual_identity_and_required_files(tmp_path):
+    plan={'source_root':str(q.ROOT),'head_commit':'current','release_input':{'version':'candidate'}}
+    scenario={'runner':{'adapter':'verify_candidate'},'platform':'macos-arm64'}
+    report={'ok':True,'source_commit':'current','version':'candidate','platform':'windows','disposable_data':True}
+    q.atomic(tmp_path/'verification/result.json',report)
+    assert q.validate_result(scenario,tmp_path,0,plan)==('failed','candidate_identity_mismatch')
+    report['platform']='mac';q.atomic(tmp_path/'verification/result.json',report)
+    with pytest.raises(OSError):q.validate_result(scenario,tmp_path,0,plan)
+
+
+def test_browser_cannot_be_promoted_to_native_by_registry(repository):
+    root,git,base=repository
+    registry=q.read(root/'quality/scenarios.yaml');s=registry['scenarios'][0]
+    s.update(level='native',platform='macos-arm64',runner={'adapter':'manual_browser','paths':[
+        'tests/v1/browser/manual_browser.py','tests/v1/browser/manual_fixture.py','tests/v1/browser/manual_samples.js']})
+    q.atomic(root/'quality/scenarios.yaml',registry)
+    with pytest.raises(q.Gap,match='integration only'):q.registry(root)
