@@ -262,12 +262,16 @@ def make_plan(base, head, release_input, output, root=ROOT):
         if config.get(key): execution_inputs[key]=digest(Path(config[key]).resolve())
     for s in selected:
         gaps[s['id']] = scenario_gaps(s, root)
+        if s.get('runner') and s['runner']['adapter'] in ('audio_pcm','audio_engine') and not config.get('audio_input'):
+            gaps[s['id']].append('missing licensed audio fixture/component inputs')
         if not gaps[s['id']]:
             snapshots[s['id']] = snapshot(s, impact, root)
             if s['level'] not in ('source','synthetic'):
                 snapshots[s['id']]['execution_inputs']=dict(execution_inputs)
                 if s['runner']['adapter'] in ('audio_pcm','audio_engine') and config.get('audio_input'):
-                    snapshots[s['id']]['audio_inputs']=audio_identity(config['audio_input'],s)
+                    try: snapshots[s['id']]['audio_inputs']=audio_identity(config['audio_input'],s)
+                    except Blocked: raise
+                    except Gap as exc: gaps[s['id']].append(str(exc))
 
     plan = dict(schema_version=1, change_id=uuid.uuid4().hex, baseline_commit=base, head_commit=head,
                 source_root=str(root), requirement_ids=sorted({r for s in selected for r in s['requirements']}),
@@ -523,7 +527,8 @@ def validate_manual_browser(folder,plan):
     version=read(root/'src/knowledge_distiller/v1/adapters/python-runtime.json')['version']
     if (result.get('status')!='passed' or result.get('level')!='integration'
             or result.get('fixture')!='synthetic_queue' or result.get('python')!=version
-            or result.get('platform')!=platform.platform() or not result.get('browser')
+            or result.get('platform')!=platform.platform() or not result.get('browser') or not result.get('browser_full_version')
+            or result.get('source_commit')!=plan['head_commit'] or result.get('source_dirty') is not False
             or result.get('source_sha256')!=digest(root/'src/knowledge_distiller/v1/static/home.js')):
         return 'failed','browser_identity_or_result_mismatch'
     if not isinstance(commands,list) or not commands or any(c.get('returncode')!=0 for c in commands):
@@ -655,6 +660,9 @@ def verify_passport(passport, scenario, plan, plan_dir):
         if digest(path) != record.get('sha256'): raise Blocked('output hash mismatch')
     if passport['result'] != 'passed': raise Gap('evidence is ' + passport['result'])
     if scenario.get('runner'):
+        if passport.get('environment',{}).get('os')!=platform.platform():raise Blocked('OS environment changed')
+        if scenario['runner']['adapter']=='verify_candidate' and passport.get('artifact_source_commit')!=candidate_source(plan,scenario):
+            raise Blocked('candidate source identity mismatch')
         directories={Path(r['path']).parent for r in passport['outputs'] if Path(r['path']).name=='stdout.log'}
         if len(directories)!=1: raise Blocked('missing unique execution logs')
         logdir=plan_dir/next(iter(directories))
@@ -739,7 +747,7 @@ def run(plan, path, gate, disposable):
                         atomic(attempt/'verification/probe-binding.json',{'output_root':str(attempt/'verification')})
                     passport['result'],passport['failure_kind']=validate_result(scenario,attempt,passport['exit_code'],plan,logdir)
                     if scenario['runner']['adapter']=='manual_browser':
-                        passport['environment']['browser']=read(attempt/'verification/result.json').get('browser')
+                        passport['environment']['browser']={k:read(attempt/'verification/result.json').get(k) for k in ('browser','browser_full_version')}
                     elif scenario['runner']['adapter']=='desktop_browser':
                         passport['environment']['browser']=read(attempt/'verification/parameter-lock.json').get('browser')
                 except subprocess.TimeoutExpired:

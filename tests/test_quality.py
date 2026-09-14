@@ -255,7 +255,7 @@ def browser_report(tmp_path):
     plan={'source_root':str(root),'head_commit':'current'}
     folder=tmp_path/'evidence';folder.mkdir()
     result=dict(status='passed',level='integration',fixture='synthetic_queue',python=q.platform.python_version(),
-        platform=q.platform.platform(),source_sha256=q.digest(source),browser='Chromium measured version',
+        platform=q.platform.platform(),source_sha256=q.digest(source),browser='Chromium measured version',browser_full_version={'fullVersionList':['fixture']},source_commit='current',source_dirty=False,
         assertions=[{'id':'reconciliation_'+mode,'passed':True} for mode in ('playing','paused')])
     for mode in ('playing','paused'):
         result[mode]={'samples':[dict(sameAudio=True,sameInput=True,focus=True,draft='保留合成草稿',selection=[2,4],
