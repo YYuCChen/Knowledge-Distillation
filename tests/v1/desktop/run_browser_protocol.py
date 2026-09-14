@@ -29,7 +29,7 @@ def state():
     return json.load(urllib.request.urlopen(base+'/_fixture/state'))
 
 def wait(predicate):
-    deadline = time.monotonic()+5
+    deadline = time.monotonic()+15
     while time.monotonic() < deadline:
         current = state()
         if predicate(current): return current
@@ -74,15 +74,22 @@ try:
     # Delay the target response, then challenge Dock protocol while navigation
     # or a browser reload is in progress. Do not forcibly focus the target.
     for seconds in [.4, 2, 5]:
+        command('open', base+'/topics')
+        wait(lambda s: any(p['route'] == '/topics' and p['transport_state'] == 'connected' for p in s['pages']))
         command('eval', f'document.getElementById("slow").href="/_fixture/slow?seconds={seconds}"')
         for action in ['navigate', 'reload']:
-            before_count = len(state()['results'])
+            before_state = state()
+            before_count = len(before_state['results'])
+            previous_documents = {p['document_id'] for p in before_state['pages']}
             with ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(command, *(['click', '#slow'] if action == 'navigate' else ['reload']))
                 time.sleep(.15)
                 urllib.request.urlopen(urllib.request.Request(base+'/_fixture/reopen', data=b'', method='POST')).close()
                 future.result(timeout=15)
-            value = wait(lambda s: len(s['results']) > before_count)
+            value = wait(lambda s: len(s['results']) > before_count and
+                any(p['route'] == '/_fixture/slow' and p['document_id'] not in previous_documents
+                    and p['transport_state'] == 'connected' for p in s['pages']))
+            command('wait', '--load', 'domcontentloaded')
             assert not value['opened'], (seconds, action, value)
             capture(f'slow_{action}_{seconds}s_no_duplicate')
     command('open', base+'/_fixture/icons')
