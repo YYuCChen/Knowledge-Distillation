@@ -67,7 +67,8 @@
         "BUG-20260914-07"
       ],
       "components": [
-        "confirmation"
+        "confirmation",
+        "storage"
       ],
       "gate": "module",
       "level": "synthetic",
@@ -75,12 +76,16 @@
       "runner": {
         "adapter": "pytest",
         "paths": [
-          "tests/v1/test_confirmation_concurrency.py"
+          "tests/v1/test_confirmation_concurrency.py",
+          "tests/v1/test_confirmation_schema.py"
         ]
       },
       "fixture": "quality/fixtures.json",
       "assertions": [
-        "existing_registered_test_assertions"
+        "legacy pending fields retained",
+        "stable card identity and FIFO",
+        "migration atomic rollback",
+        "group decision concurrency and replay"
       ],
       "timeout": 300,
       "not_proven": [
@@ -96,6 +101,7 @@
         "BUG-20260914-03"
       ],
       "components": [
+        "confirmation",
         "storage"
       ],
       "gate": "module",
@@ -104,12 +110,23 @@
       "runner": {
         "adapter": "pytest",
         "paths": [
-          "tests/v1/test_store.py"
+          "tests/v1/test_store.py",
+          "tests/v1/test_confirmation_schema.py",
+          "tests/v1/test_source_versions.py",
+          "tests/v1/test_organization.py",
+          "tests/v1/test_submitted_sources.py",
+          "tests/v1/test_topics.py",
+          "tests/v1/test_xiaohongshu.py",
+          "tests/v1/test_youtube.py",
+          "tests/v1/test_media_lifecycle.py"
         ]
       },
       "fixture": "quality/fixtures.json",
       "assertions": [
-        "existing_registered_test_assertions"
+        "legacy pending fields retained",
+        "stable card identity and FIFO",
+        "migration atomic rollback",
+        "group decision concurrency and replay"
       ],
       "timeout": 300,
       "not_proven": [
@@ -1070,6 +1087,280 @@
         "migration",
         "real model",
         "installer journey"
+      ]
+    },
+    {
+      "id": "SC-BUILD-STATUS--build_job",
+      "requirements": [
+        "ENG-20260914-01"
+      ],
+      "components": [
+        "build"
+      ],
+      "always": true,
+      "enabled_by": "build_job",
+      "gate": "contract",
+      "level": "integration",
+      "platform": "host",
+      "runner": {
+        "adapter": "build_job",
+        "paths": [
+          "scripts/build_job.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "durable jobs succeeded",
+        "source identity",
+        "build artifact identity (local job)"
+      ],
+      "timeout": 120,
+      "not_proven": [
+        "native product journeys",
+        "publication",
+        "remote artifact content (dual status)"
+      ]
+    },
+    {
+      "id": "SC-BUILD-STATUS--dual_build",
+      "requirements": [
+        "ENG-20260914-01"
+      ],
+      "components": [
+        "build"
+      ],
+      "always": true,
+      "enabled_by": "build_config",
+      "gate": "contract",
+      "level": "integration",
+      "platform": "host",
+      "runner": {
+        "adapter": "dual_build",
+        "paths": [
+          "scripts/dual_build.py"
+        ]
+      },
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "durable jobs succeeded",
+        "source identity",
+        "build artifact identity (local job)"
+      ],
+      "timeout": 120,
+      "not_proven": [
+        "native product journeys",
+        "publication",
+        "remote artifact content (dual status)"
+      ]
+    },
+    {
+      "id": "SC-JSON-MODEL--macos-arm64",
+      "requirements": [
+        "BUG-20260914-04"
+      ],
+      "components": [
+        "model_json"
+      ],
+      "gate": "native",
+      "level": "model_real",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "requires dedicated real runner per frozen M matrix"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "no real runner/evidence yet"
+      ]
+    },
+    {
+      "id": "SC-JSON-MODEL--windows-x64",
+      "requirements": [
+        "BUG-20260914-04"
+      ],
+      "components": [
+        "model_json"
+      ],
+      "gate": "native",
+      "level": "model_real",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "requires dedicated real runner per frozen M matrix"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "no real runner/evidence yet"
+      ]
+    },
+    {
+      "id": "SC-GROUP-MODEL--macos-arm64",
+      "requirements": [
+        "BUG-20260914-07"
+      ],
+      "components": [
+        "confirmation"
+      ],
+      "gate": "native",
+      "level": "model_real",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "requires dedicated real runner per frozen M matrix"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "no real runner/evidence yet"
+      ]
+    },
+    {
+      "id": "SC-GROUP-MODEL--windows-x64",
+      "requirements": [
+        "BUG-20260914-07"
+      ],
+      "components": [
+        "confirmation"
+      ],
+      "gate": "native",
+      "level": "model_real",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "requires dedicated real runner per frozen M matrix"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "no real runner/evidence yet"
+      ]
+    },
+    {
+      "id": "SC-FEISHU-CLIENT--macos-arm64",
+      "requirements": [
+        "BUG-20260914-06"
+      ],
+      "components": [
+        "manual"
+      ],
+      "gate": "native",
+      "level": "visual",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "requires dedicated real runner per frozen M matrix"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "no real runner/evidence yet"
+      ]
+    },
+    {
+      "id": "SC-FEISHU-CLIENT--windows-x64",
+      "requirements": [
+        "BUG-20260914-06"
+      ],
+      "components": [
+        "manual"
+      ],
+      "gate": "native",
+      "level": "visual",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "requires dedicated real runner per frozen M matrix"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "no real runner/evidence yet"
+      ]
+    },
+    {
+      "id": "SC-READING-BROWSER--macos-arm64",
+      "requirements": [
+        "BUG-20260914-03"
+      ],
+      "components": [
+        "manual"
+      ],
+      "gate": "native",
+      "level": "visual",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "requires dedicated real runner per frozen M matrix"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "no real runner/evidence yet"
+      ]
+    },
+    {
+      "id": "SC-READING-BROWSER--windows-x64",
+      "requirements": [
+        "BUG-20260914-03"
+      ],
+      "components": [
+        "manual"
+      ],
+      "gate": "native",
+      "level": "visual",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "requires dedicated real runner per frozen M matrix"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "no real runner/evidence yet"
+      ]
+    },
+    {
+      "id": "SC-REMOTE-ASSETS--macos-arm64",
+      "requirements": [
+        "BUG-20260914-09"
+      ],
+      "components": [
+        "build"
+      ],
+      "gate": "release",
+      "level": "remote_readback",
+      "platform": "macos-arm64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "requires dedicated real runner per frozen M matrix"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "no real runner/evidence yet"
+      ]
+    },
+    {
+      "id": "SC-REMOTE-ASSETS--windows-x64",
+      "requirements": [
+        "BUG-20260914-09"
+      ],
+      "components": [
+        "build"
+      ],
+      "gate": "release",
+      "level": "remote_readback",
+      "platform": "windows-x64",
+      "runner": null,
+      "fixture": "quality/fixtures.json",
+      "assertions": [
+        "requires dedicated real runner per frozen M matrix"
+      ],
+      "timeout": 600,
+      "not_proven": [
+        "no real runner/evidence yet"
       ]
     }
   ]

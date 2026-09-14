@@ -173,7 +173,12 @@ def hashes_for(patterns, root=ROOT):
 
 def snapshot(scenario, impact, root=ROOT):
     inputs = {}
-    for component in scenario['components']:
+    components=set(scenario['components'])
+    while True:
+        expanded=components | {dependency for component in components for dependency in impact['components'][component].get('depends_on',[])}
+        if expanded==components:break
+        components=expanded
+    for component in sorted(components):
         definition = impact['components'][component]
         inputs[component] = hashes_for(definition['paths'], root)
     runner = scenario['runner']
@@ -210,21 +215,37 @@ def make_plan(base, head, release_input, output, root=ROOT):
                 found = True; affected.add(component); owners.add(spec['owner'])
         if not found: unmapped.append(path)
     changed = set(affected)
+    product_affected = {c for c,spec in impact['components'].items()
+                        if any(matches(p,spec['paths']) for p in paths
+                               if not p.startswith(('tests/','docs/','quality/','.github/'))
+                               and p != 'scripts/quality.py')}
     while True:
         expanded = affected | {c for c,spec in impact['components'].items() if set(spec.get('depends_on',[])) & affected}
         if expanded == affected: break
         affected = expanded
-    selected = [s for s in scenarios if set(s['components']) & affected or s.get('always')]
+    while True:
+        expanded = product_affected | {c for c,spec in impact['components'].items() if set(spec.get('depends_on',[])) & product_affected}
+        if expanded == product_affected: break
+        product_affected = expanded
     config = read(release_input) if release_input else {}
+    selected = [s for s in scenarios if (set(s['components']) & affected or s.get('always'))
+                and (not s.get('enabled_by') or config.get(s['enabled_by']))]
     forbidden = set(config) - {'version','product_version','artifacts','reuse_evidence','build_config','build_job','parameter_lock'}
     if forbidden: raise Gap('unsupported release-input keys: ' + ', '.join(sorted(forbidden)))
     output = protected(output)
     if contained(output, root): raise Gap('plan output must be outside checkout')
     output.mkdir(parents=True, exist_ok=False)
     gaps, snapshots = {}, {}
+    execution_inputs={}
+    for key in ('build_config','parameter_lock'):
+        if config.get(key): execution_inputs[key]=digest(Path(config[key]).resolve())
     for s in selected:
         gaps[s['id']] = scenario_gaps(s, root)
-        if not gaps[s['id']]: snapshots[s['id']] = snapshot(s, impact, root)
+        if not gaps[s['id']]:
+            snapshots[s['id']] = snapshot(s, impact, root)
+            if s['level'] not in ('source','synthetic'):
+                snapshots[s['id']]['execution_inputs']=execution_inputs
+
     plan = dict(schema_version=1, change_id=uuid.uuid4().hex, baseline_commit=base, head_commit=head,
                 source_root=str(root), requirement_ids=sorted({r for s in selected for r in s['requirements']}),
                 changed_paths=paths, owners=sorted(owners), contracts_changed=sorted(affected-changed),
@@ -233,11 +254,26 @@ def make_plan(base, head, release_input, output, root=ROOT):
                 invalidate_scenarios=[s['id'] for s in selected], reuse_evidence_ids=[], reuse_reasons={},
                 prohibited_scope=['formal application','formal data','Vault','recovery sources','publishing'],
                 new_defects=[i for i in incidents if i['status'] != 'closed'],
-                rebuild_components=sorted(c for c in affected if impact['components'][c].get('artifact')),
+                rebuild_components=sorted(c for c in product_affected if impact['components'][c].get('artifact')),
                 scenarios=selected, snapshots=snapshots, gaps=gaps, unmapped_paths=unmapped,
                 release_input=config, release_input_sha256=object_hash(config),
                 registry_hashes={p.relative_to(root).as_posix(): digest(p) for p in sorted((root/'quality').rglob('*.yaml'))},
                 created_at=now())
+    for reuse in config.get('reuse_evidence',[]):
+        old_path=Path(reuse['passport']); old_dir=Path(reuse['plan_dir']).resolve()
+        if not reuse.get('reason'): raise Gap('evidence reuse needs a compatibility reason')
+        old=read(old_path)
+        scenario=next((s for s in selected if s['id']==old.get('scenario_id')),None)
+        if not scenario: raise Gap('reused evidence not in current impact plan')
+        verify_passport(old,scenario,plan,old_dir)
+        for record in old['outputs']:
+            target=output/record['path']; target.parent.mkdir(parents=True,exist_ok=True)
+            if target.exists() and digest(target)!=record['sha256']: raise Blocked('reuse output collision')
+            if not target.exists(): target.write_bytes((old_dir/record['path']).read_bytes())
+        atomic(output/'evidence'/(scenario['id']+'.json'),old)
+        plan['reuse_evidence_ids'].append(old['evidence_id'])
+        plan['reuse_reasons'][old['evidence_id']]={'reason':reuse['reason'],'source_commit':old['source_commit'],
+            'validated':['component_inputs','runner','fixture','scenario','platform','python','artifact','outputs']}
     plan['plan_sha256'] = object_hash(plan)
     atomic(output / 'plan.json', plan)
     return plan
@@ -252,6 +288,12 @@ def load_plan(path):
         raise Blocked('source checkout changed; generate a fresh plan')
     for name, expected in plan['registry_hashes'].items():
         if digest(root/name) != expected: raise Blocked('registry changed: ' + name)
+    for key in ('build_config','parameter_lock'):
+        if plan['release_input'].get(key):
+            actual=digest(Path(plan['release_input'][key]).resolve())
+            for snap in plan['snapshots'].values():
+                if key in snap.get('execution_inputs',{}) and snap['execution_inputs'][key]!=actual:
+                    raise Blocked('execution configuration changed: '+key)
     return plan
 
 
@@ -266,13 +308,26 @@ def check_promotion(plan, gate):
         if severe: raise Blocked('open S0/S1: ' + ', '.join(severe))
 
 
+def tree_digest(folder):
+    folder=Path(folder)
+    if not folder.is_dir() or folder.is_symlink():raise Gap('missing or linked candidate build')
+    records={}
+    for path in sorted(folder.rglob('*')):
+        name=path.relative_to(folder).as_posix()
+        if path.is_symlink():records[name]={'link':os.readlink(path)}
+        elif path.is_file():records[name]={'sha256':digest(path),'mode':path.stat().st_mode & 0o777}
+    if not records:raise Gap('empty candidate build')
+    return object_hash(records)
+
+
 def artifact_identity(plan, scenario):
     if scenario['level'] not in ('native','visual','model_real','remote_readback'): return None
     entry = plan['release_input'].get('artifacts',{}).get(scenario['platform'])
-    if not entry or not all(k in entry for k in ('path','sha256','build')): raise Gap('missing candidate artifact identity')
+    if not entry or not all(k in entry for k in ('path','sha256','build','build_sha256')): raise Gap('missing candidate artifact identity')
     path = protected(entry['path'])
     if digest(path) != entry['sha256']: raise Blocked('artifact hash mismatch')
-    protected(entry['build'])
+    build=protected(entry['build'])
+    if tree_digest(build)!=entry['build_sha256']:raise Blocked('candidate build tree changed')
     return entry['sha256']
 
 
@@ -289,10 +344,16 @@ def command_for(scenario, plan, attempt):
                 'mac' if scenario['platform'].startswith('macos-') else 'windows',
                 '--build',str(protected(artifact['build'])),'--output',str(attempt/'verification'),
                 '--version',plan['release_input']['version'],'--commit',plan['head_commit']]
+    if adapter == 'build_job':
+        return [sys.executable,str(root/'scripts/build_job.py'),'status',str(protected(plan['release_input']['build_job']))]
+    if adapter == 'dual_build':
+        return [sys.executable,str(root/'scripts/dual_build.py'),'status','--config',str(Path(plan['release_input']['build_config']).resolve()),
+                '--version',plan['release_input']['version'],'--product-version',plan['release_input']['product_version'],
+                '--commit',plan['head_commit']]
     raise Gap('unimplemented runner adapter: ' + adapter)
 
 
-def validate_result(scenario, attempt, returncode):
+def validate_result(scenario, attempt, returncode, plan=None, logdir=None):
     if returncode: return 'failed', 'product_failure' if returncode == 1 else 'runner_failure'
     if scenario['runner']['adapter'] == 'pytest':
         suites = ET.parse(attempt/'junit.xml').getroot()
@@ -303,6 +364,18 @@ def validate_result(scenario, attempt, returncode):
     elif scenario['runner']['adapter'] == 'verify_candidate':
         result = read(attempt/'verification/result.json')
         if result.get('ok') is not True: return 'failed', 'candidate_verification'
+    elif scenario['runner']['adapter'] in ('build_job','dual_build'):
+        result=read(logdir/'stdout.log')
+        records=[result] if scenario['runner']['adapter']=='build_job' else [result['mac'],result['windows']]
+        if any(r.get('status')!='succeeded' for r in records): return 'not_run','build_not_complete'
+        if scenario['runner']['adapter']=='build_job':
+            job=protected(plan['release_input']['build_job']); request=read(job/'request.json')
+            if request.get('source_commit')!=plan['head_commit']: return 'failed','build_source_mismatch'
+            if not result.get('artifacts'): return 'not_run','missing_build_artifacts'
+            for item in result['artifacts']:
+                target=(job/item['path']).resolve()
+                if not contained(target,job) or digest(target)!=item['sha256']: return 'failed','build_artifact_mismatch'
+        elif result.get('commit')!=plan['head_commit']: return 'failed','build_source_mismatch'
     return 'passed', None
 
 
@@ -313,6 +386,8 @@ def verify_passport(passport, scenario, plan, plan_dir):
         raise Blocked('scenario/evidence level mismatch')
     expected_platform = host_platform() if scenario['platform']=='host' else scenario['platform']
     if passport.get('platform') != expected_platform: raise Blocked('platform mismatch')
+    if not passport.get('source_commit') or not passport.get('started_at') or not passport.get('finished_at'):
+        raise Blocked('missing evidence source/time identity')
     if passport.get('dirty') is not False: raise Blocked('dirty evidence')
     if passport.get('environment',{}).get('python') != read(Path(plan['source_root'])/'src/knowledge_distiller/v1/adapters/python-runtime.json')['version']:
         raise Blocked('runtime identity mismatch')
@@ -394,7 +469,7 @@ def run(plan, path, gate, disposable):
                     with (logdir/'stdout.log').open('wb') as stdout, (logdir/'stderr.log').open('wb') as stderr:
                         process = subprocess.Popen(command,cwd=root,env=env,stdout=stdout,stderr=stderr,start_new_session=os.name!='nt')
                         passport['exit_code']=process.wait(timeout=scenario['timeout'])
-                    passport['result'],passport['failure_kind']=validate_result(scenario,attempt,passport['exit_code'])
+                    passport['result'],passport['failure_kind']=validate_result(scenario,attempt,passport['exit_code'],plan,logdir)
                 except subprocess.TimeoutExpired:
                     passport.update(result='timeout',failure_kind='runner_timeout')
                 except KeyboardInterrupt:
@@ -417,6 +492,11 @@ def run(plan, path, gate, disposable):
                         if source.is_file(): (logdir/source.name).write_bytes(source.read_bytes())
                     for log in sorted(logdir.iterdir()):
                         passport['outputs'].append({'path':log.relative_to(path.parent).as_posix(),'sha256':digest(log)})
+                    try:
+                        if git('rev-parse','HEAD',root=root)!=plan['head_commit'] or git('status','--porcelain',root=root):
+                            passport.update(result='tool_error',failure_kind='source_changed_during_run',dirty=True)
+                    except subprocess.SubprocessError:
+                        passport.update(result='tool_error',failure_kind='source_identity_unavailable',dirty=True)
                     passport['finished_at']=now()
                     passport['passport_sha256']=object_hash(passport)
                     atomic(logdir/'passport.json',passport)
