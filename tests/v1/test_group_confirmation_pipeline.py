@@ -309,3 +309,20 @@ def test_first_card_rejects_stale_other_member_change(setup):
     with pytest.raises(ValueError,match='另一端更新'):
         service.resolve(item,'candidate','识神',token=pending['token'],concern_id=member['audio_name'],concern_revision=prior_revision)
     assert store.confirmation_view(item)['snapshot'].count('识神')==0
+
+
+@pytest.mark.parametrize('actor', ['local', 'feishu'])
+@pytest.mark.parametrize('with_revision', [False, True])
+def test_ordinary_card_preserves_actor_in_all_member_audits(setup, actor, with_revision):
+    from knowledge_distiller.v1.confirmation_revision import revision
+    store,item,service=setup
+    pending=store.confirmation_view(item);member=pending['concerns'][0]
+    request=dict(token=pending['token'],concern_id=member['audio_name'],actor=actor)
+    if with_revision:request['concern_revision']=revision(pending,member)
+    service.resolve(item,'candidate','识神',**request)
+    if with_revision:service.resolve(item,'candidate','识神',**request)
+    with connect(store.path) as db:
+        rows=db.execute('SELECT audit_json FROM group_decisions').fetchall()
+        assert len(rows)==1
+        audits=json.loads(rows[0][0])
+        assert len(audits)==8 and {entry['actor'] for entry in audits}=={actor}

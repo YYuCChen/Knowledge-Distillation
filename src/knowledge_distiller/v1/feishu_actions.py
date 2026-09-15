@@ -150,7 +150,7 @@ class FeishuActions:
             if not isinstance(submitted,str):
                 raise ValueError('请输入正确文字。')
             engine=self.distiller() if callable(self.distiller) else self.distiller
-            engine.resolve(item_id,value.get('action'),submitted,token=value.get('token',''),concern_id=value.get('concern_id',''), **({'concern_revision':value['concern_revision']} if value.get('concern_revision') else {}))
+            engine.resolve(item_id,value.get('action'),submitted,token=value.get('token',''),concern_id=value.get('concern_id',''),actor='feishu', **({'concern_revision':value['concern_revision']} if value.get('concern_revision') else {}))
             if self.wake:self.wake()
             return self._toast('success','已保存。')
         except ValueError as error:

@@ -29,7 +29,7 @@ def test_replayed_card_after_save_does_not_resolve_twice(inbox):
     actions=FeishuActions(inbox,None,engine)
     assert actions.handle(payload)['toast']['type']=='success'
     assert actions.handle(payload)['toast']['type']=='info'
-    engine.resolve.assert_called_once_with(item,'manual','核对文字',token=payload['event']['action']['value']['token'],concern_id='c1')
+    engine.resolve.assert_called_once_with(item,'manual','核对文字',token=payload['event']['action']['value']['token'],concern_id='c1',actor='feishu')
 
 
 def test_other_sender_card_or_item_cannot_act(inbox):

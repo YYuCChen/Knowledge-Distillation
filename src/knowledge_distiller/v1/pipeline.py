@@ -136,10 +136,10 @@ class Distiller:
             concern['candidate_explanations'] = {choice['text']: choice['meaning_zh'] for choice in choices}
         self.store.update_confirmation_suggestions(item_id, row['confirmation_json'], pending)
 
-    def resolve(self, item_id, action, value="", *, token="", concern_id="", concern_revision=""):
+    def resolve(self, item_id, action, value="", *, token="", concern_id="", concern_revision="", actor="local"):
         from .confirmation_revision import ConfirmationConflict, revision
         if not concern_revision:
-            return self._resolve_once(item_id, action, value, token=token, concern_id=concern_id)
+            return self._resolve_once(item_id, action, value, token=token, concern_id=concern_id, actor=actor)
         for _ in range(4):
             state = self.store.confirmation_decision(item_id, concern_revision, action, value)
             if state:
@@ -151,7 +151,7 @@ class Distiller:
                 raise ValueError('该疑点已在另一端更新，请查看当前状态；输入已保留。')
             try:
                 return self._resolve_once(item_id, action, value, token=pending['token'],
-                                          concern_id=concern_id, decision=(concern_revision, action, value))
+                                          concern_id=concern_id, decision=(concern_revision, action, value), actor=actor)
             except ConfirmationConflict:
                 continue
         raise ValueError('其他操作正在保存，请稍后重试；输入已保留。')
@@ -218,7 +218,7 @@ class Distiller:
         raise ConfirmationConflict('group_save_busy')
 
     def _resolve_once(
-        self, item_id: int, action: str, value: str = "", *, token: str = "", concern_id: str = "", decision=None
+        self, item_id: int, action: str, value: str = "", *, token: str = "", concern_id: str = "", decision=None, actor="local"
     ) -> DistillResult:
         row = self._item(item_id)
         pending = _pending_confirmation(row, token)
@@ -242,7 +242,7 @@ class Distiller:
                 request_id='legacy-' + digest([group['group_id'], group['group_revision'],
                     member['concern_uid'], action, value, decision]),
                 group_id=group['group_id'], group_revision=group['group_revision'],
-                selected_member_uids=list(group['member_uids']), _legacy_decision=decision)
+                selected_member_uids=list(group['member_uids']), actor=actor, _legacy_decision=decision)
         if action not in {"candidate", "manual", "unable"}:
             raise ValueError("unknown source confirmation action")
         if action == "unable":
