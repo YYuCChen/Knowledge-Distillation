@@ -505,6 +505,18 @@ def test_windows_audio_paths_are_replayed_without_accessing_original_drive(tmp_p
         'snapshots':{'engine':{'audio_inputs':identity}},'_portable_audio':{'engine':identity},
         '_original_audio_fixture':r'C:\isolated\fixtures'}
     assert q.validate_audio(folder,plan,scenario)==('passed',None)
+    for source in [r'\\?\C:\isolated\attempt\verification\calls\001\input.wav',
+                   r'\\?\C:\isolated\fixtures\short.wav']:
+        measured['source']=source;q.atomic(folder/'calls/001/input.json',measured)
+        assert q.validate_audio(folder,plan,scenario)==('passed',None)
+    measured['pcm_sha256']='0'*64;q.atomic(folder/'calls/001/input.json',measured)
+    assert q.validate_audio(folder,plan,scenario)==('failed','audio_call_input_mismatch')
+    measured['pcm_sha256']=q.hashlib.sha256(short).hexdigest()
+    for source in [r'C:\isolated\attempt\verification-other\calls\001\input.wav',
+                   r'D:\isolated\attempt\verification\calls\001\input.wav',
+                   r'C:\outside\short.wav', r'C:\isolated\fixtures\..\fixtures\short.wav']:
+        measured['source']=source;q.atomic(folder/'calls/001/input.json',measured)
+        assert q.validate_audio(folder,plan,scenario)==('failed','audio_call_source_outside_probe')
     measured['source']=r'C:\outside\input.wav';q.atomic(folder/'calls/001/input.json',measured)
     assert q.validate_audio(folder,plan,scenario)==('failed','audio_call_source_outside_probe')
 
@@ -644,3 +656,23 @@ def test_docling_export_rechecks_identity_and_portable_report_needs_no_model_tre
     with pytest.raises(q.Gap,match='missing explicit Docling'):q.export_evidence(directory/'plan.json',tmp_path/'bad-export')
     output=next(bundle.glob('logs/*/execution-docling.json'));output.write_text('{}')
     with pytest.raises(q.Blocked,match='portable file changed'):q.load_portable_plan(bundle/'plan.json',root)
+
+
+@pytest.mark.parametrize('normal,extended',[
+    (r'C:\isolated\audio.wav',r'\\?\C:\isolated\audio.wav'),
+    (r'\\server\share\audio.wav',r'\\?\UNC\server\share\audio.wav'),
+])
+def test_windows_audio_label_namespace_equivalence(normal,extended):
+    assert q.windows_audio_path_label(normal)==q.windows_audio_path_label(extended)
+    assert q.contained(q.windows_audio_path_label(extended),q.windows_audio_path_label(normal).parent)
+    assert q.contained(q.windows_audio_path_label(normal),q.windows_audio_path_label(extended).parent)
+
+
+@pytest.mark.parametrize('value',[
+    r'audio.wav',r'C:audio.wav',r'\audio.wav',r'C:\root\..\audio.wav',
+    r'\\?\C:\root\..\audio.wav',r'\\.\C:\root\audio.wav',
+    r'\\?\GLOBALROOT\Device\audio.wav',r'C:\root\audio.wav:stream',
+    r'\\?\UNC\server',r'\\server',r'C:\root\audio.wav.',r'C:\root\NUL',
+])
+def test_windows_audio_label_rejects_ambiguous_paths(value):
+    with pytest.raises(ValueError):q.windows_audio_path_label(value)

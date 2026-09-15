@@ -593,6 +593,37 @@ def measured_audio_identity(plan,scenario):
     return audio_identity(plan['release_input']['audio_input'],scenario)
 
 
+def windows_audio_path_label(value):
+    """Compare recorded Windows paths lexically; never open them on the collector."""
+    if not isinstance(value,str) or not value or any(ord(c)<32 for c in value):
+        raise ValueError('invalid Windows audio path label')
+    value=value.replace('/',chr(92))
+    extended=chr(92)*2+'?'+chr(92)
+    if value.startswith(extended):
+        value=value[len(extended):]
+        if value[:4].upper()=='UNC'+chr(92):
+            value=chr(92)*2+value[4:]
+        elif not (len(value)>=3 and value[0].isascii() and value[0].isalpha()
+                  and value[1:3]==':'+chr(92)):
+            raise ValueError('unsupported Windows namespace')
+    if value.startswith(chr(92)*2):
+        parts=value[2:].split(chr(92))
+        if len(parts)<2 or not parts[0] or not parts[1]:
+            raise ValueError('incomplete UNC path')
+    elif len(value)>=3 and value[0].isascii() and value[0].isalpha() and value[1:3]==':'+chr(92):
+        parts=value[3:].split(chr(92))
+    else:
+        raise ValueError('Windows audio path must be absolute')
+    reserved={'CON','PRN','AUX','NUL',*[f'COM{i}' for i in range(1,10)],*[f'LPT{i}' for i in range(1,10)]}
+    for part in parts:
+        if (part in ('.','..') or part.endswith((' ','.')) or any(c in part for c in ':<>"|?*')
+                or part.split('.')[0].upper() in reserved):
+            raise ValueError('ambiguous Windows audio path')
+    path=PureWindowsPath(value)
+    if not path.is_absolute():raise ValueError('Windows audio path must be absolute')
+    return path
+
+
 def validate_audio(folder,plan,scenario):
     config=plan['release_input']['audio_input']
     if measured_audio_identity(plan,scenario)!=plan['snapshots'][scenario['id']]['audio_inputs']:
@@ -626,11 +657,15 @@ def validate_audio(folder,plan,scenario):
             return 'failed','audio_engine_journey_failure'
         calls=sorted((folder/'calls').glob('*/input.json'))
         if not calls or len(calls)!=summary.get('actual_worker_calls'):return 'not_run','audio_calls_missing'
-        path_class=PureWindowsPath if scenario['platform'].startswith('windows-') else PurePosixPath
-        original=path_class(read(folder/'probe-binding.json')['output_root'])
-        original_fixture=path_class(plan.get('_original_audio_fixture',str(fixture)))
+        path_class=windows_audio_path_label if scenario['platform'].startswith('windows-') else PurePosixPath
+        try:
+            original=path_class(read(folder/'probe-binding.json')['output_root'])
+            original_fixture=path_class(plan.get('_original_audio_fixture',str(fixture)))
+        except ValueError:return 'failed','audio_call_source_outside_probe'
         for path in calls:
-            measured=read(path);source=path_class(measured['source'])
+            measured=read(path)
+            try:source=path_class(measured['source'])
+            except ValueError:return 'failed','audio_call_source_outside_probe'
             if contained(source,original): pcm_source=folder.joinpath(*source.relative_to(original).parts)
             elif source in (original_fixture/'standard.wav',original_fixture/'short.wav'):pcm_source=fixture/source.name
             else:return 'failed','audio_call_source_outside_probe'
