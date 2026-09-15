@@ -203,10 +203,6 @@
                     </div>
                   </article></div>
                   {% endif %}
-                {% if item.group is defined and item.confirmation.concerns and item.group.equivalence_basis.kind|default('') != 'single_member' %}
-                  {% set cards.index = cards.index + 1 %}
-                  {% include 'confirmation_group.html' %}
-                {% else %}
                 {% for concern in item.confirmation.concerns %}
                 {% set cards.index = cards.index + 1 %}
                 {% set key = item.id|string ~ '-' ~ (concern.concern_uid|default(concern.audio_name)) %}
@@ -242,9 +238,6 @@
                         {% else %}<span class="manual-hint">请回听填写</span>{% endif %}
                       </div>
                       <div id="actions-{{ key }}" class="confirmation-actions" {% if not error %}hidden{% endif %}>
-                        {% if concern.context %}
-                        <p class="full-context">{% if concern.context.omitted_before %}…{% endif %}{{ concern.context.before }}<mark>{{ concern.context.marked }}</mark>{{ concern.context.after }}{% if concern.context.omitted_after %}…{% endif %}</p>
-                        {% else %}<p>当前疑点定位不可用，请重新检查原文范围。</p>{% endif %}
                         {% set explanations = concern.candidate_explanations|default({}) %}
                         {% if item.confirmation.english_assistance and concern.candidates %}
                         <div class="candidate-actions" aria-label="疑点 {{ loop.index }} 候选选项">
@@ -268,7 +261,7 @@
                           <button type="submit" class="secondary-small" data-suggest-candidates>结合上下文补充候选</button>
                         </form>
                         {% endif %}
-                        <audio data-audio-identity="{{ key }}" data-audio-revision="{{ concern.audio_revision|default(concern.audio_name) }}" controls preload="metadata" aria-label="疑点 {{ loop.index }} 原音" src="{{ url_for('confirmation_audio', item_id=item.id, concern_id=concern.audio_name, revision=concern.audio_revision) }}"></audio>
+                        <audio data-audio-identity="{{ key }}" data-audio-revision="{{ concern.audio_revision|default(concern.audio_name) }}" controls preload="metadata" aria-label="疑点 {{ loop.index }} 原音" src="{{ url_for('confirmation_audio', item_id=item.id, concern_id=concern.audio_name) }}"></audio>
                         {% if concern.audio_recovery_required|default(false) %}
                         <form action="{{ url_for('recover_confirmation_audio', item_id=item.id) }}" method="post" data-recover-audio>
                           <input type="hidden" name="token" value="{{ item.confirmation.token }}">
@@ -277,13 +270,9 @@
                         </form>
                         {% endif %}
                         <span class="source-actions">
-                          <form action="{{ url_for('rerecognize_group', item_id=item.id) }}" method="post">
+                          <form action="{{ url_for('rerecognize', item_id=item.id) }}" method="post" data-rerecognize>
                             <input type="hidden" name="token" value="{{ item.confirmation.token }}">
-                            <input type="hidden" name="request_id" value="{{ item.group.group_revision }}-reference-{{ concern.concern_uid }}">
-                            <input type="hidden" name="group_id" value="{{ item.group.group_id }}">
-                            <input type="hidden" name="group_revision" value="{{ item.group.group_revision }}">
-                            <input type="hidden" name="selected_member_uids" value="{{ concern.concern_uid }}">
-                            <button class="text-action" type="submit">仅此处重新识别参考</button>
+                            <button class="text-action" type="submit">重新识别</button>
                           </form>
                           <a href="{{ item.canonical_url }}" target="_blank" rel="noreferrer"><img class="source-action-icon" src="{{ url_for('static', filename='icons/external-link.svg') }}" alt="">查看来源</a>
                         </span>
@@ -313,7 +302,6 @@
                 </div>
                 {% endif %}
                 {% endfor %}
-                {% endif %}
               {% else %}
                 {% set cards.index = cards.index + 1 %}
                 <div class="todo-card-shell" data-sync-key="task-{{ item.id }}-{{ item.group.group_id if item.group is defined else 'failure' }}"><article class="todo-card failure-card">

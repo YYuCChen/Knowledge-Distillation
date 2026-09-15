@@ -607,7 +607,7 @@ def _home_context(
         if group is None:
             continue
         members = set(group['member_uids'])
-        projected = {**pending, 'concerns': [c for c in pending.get('concerns', []) if c['concern_uid'] in members]}
+        projected = {**pending, 'concerns': [c for c in pending.get('concerns', []) if c['concern_uid'] in members][:1]}
         view = _item_view({**dict(row), 'confirmation_json': json.dumps(projected)}, vault_path, store.path.parent)
         view['group'] = group
         view['enqueue_seq'] = entry['enqueue_seq']

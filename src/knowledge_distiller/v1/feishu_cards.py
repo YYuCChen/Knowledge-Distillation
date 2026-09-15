@@ -43,19 +43,14 @@ def concern_context(snapshot,concern,*,shorten=True):
         # Older pending records may lack offsets. Never select an ambiguous match.
         if not concern['text'] or snapshot.count(concern['text'])!=1:return None
         start=snapshot.index(concern['text']);end=start+len(concern['text'])
-    from .confirmation_display import context_window
-    try:
-        view = context_window(snapshot, {**concern, 'start': start, 'end': end})
-    except ValueError:
-        return None
-    from .confirmation_display import _clusters
-    marked = view['marked']
-    clusters = _clusters(marked)
-    if shorten and len(clusters) > 120:
-        marked = marked[:clusters[59][1]] + '…' + marked[clusters[-60][0]:]
-    excerpt = ('…' if view['omitted_before'] else '') + view['before'] + '【' + marked + '】' + view['after'] + ('…' if view['omitted_after'] else '')
+    from .confirmation_display import local_choices
+    display=local_choices({**concern,'start':start,'end':end})
+    start,end=display['start'],display['end']
+    left=max(0,start-12);right=min(len(snapshot),end+12)
+    target=snapshot[start:end]
+    if shorten and len(target)>120:target=target[:60]+'…'+target[-60:]
+    excerpt=('…' if left else '')+snapshot[left:start]+'【'+target+'】'+snapshot[end:right]+('…' if right<len(snapshot) else '')
     return re.sub(r'\s+', ' ', excerpt).strip()
-
 
 
 def fit_card(card):
@@ -160,17 +155,12 @@ class FeishuCards:
         if latest:
             result=json.loads(latest['result']) if latest['result'] else None
             elements.append(text(result.get('toast',{}).get('content','操作已处理。') if result else '已接收操作，正在保存。'))
+        if title == '有内容待你确认':
+            return {'schema':'2.0','config':{'update_multi':True,'enable_forward':False},
+                    'header':{'title':{'tag':'plain_text','content':title}},'body':{'elements':elements}}
         from .feishu_status import project
         status=project(receipt,items,parts,actionable=actionable)
         title=status['label']
-        group_count=position_count=0
-        for row in items:
-            if row['state']!='waiting_user' or not row['confirmation_json']:continue
-            pending=self.inbox.store.confirmation_view(row['item_id'])
-            active={c['concern_uid'] for c in pending.get('concerns',[])}
-            position_count+=len(active)
-            group_count+=sum(bool(active.intersection(g['member_uids'])) for g in pending.get('groups',[]))
-        if position_count:elements.append(text(f'待确认组 {group_count} · 待确认位置 {position_count}'))
         elements.extend([text(status['summary']),text(status['count_text'])])
         return fit_card({'schema':'2.0','config':{'update_multi':True,'enable_forward':False},
                 'header':{'title':{'tag':'plain_text','content':title}},'body':{'elements':elements}})
@@ -226,10 +216,6 @@ class FeishuCards:
 
     def _pending(self,row,message_id):
         pending=self.inbox.store.confirmation_view(row['item_id'])
-        active=set(c['concern_uid'] for c in pending.get('concerns', []))
-        groups=[g for g in pending.get('groups', []) if active.intersection(g['member_uids'])]
-        if groups and len([u for u in groups[0]['member_uids'] if u in active])>1:
-            return self._group_pending(row,pending,groups[0],message_id)
         base={'kind':'source_confirmation','item_id':row['item_id'],'token':pending['token']}
         from .confirmation_display import english_assistance
         from .feishu_views import chunks,read,controls
@@ -252,7 +238,7 @@ class FeishuCards:
         current=view.get('edits',{}).get(str(page),pages[page])
         context=concern_context(pending['snapshot'],concern)
         elements=[text(context)] if context else [text('待核对：'+current)]
-        if len(pages)>1:elements.extend([text('完整疑点：'+current), *controls(base,page,len(pages))])
+        if len(pages)>1:elements.extend(controls(base,page,len(pages)))
         if pending.get('kind')=='image':
             member=next((m for m in self.inbox.store.media_members(row['material_id'])
                          if m['member_id']==concern['member_id']),None)

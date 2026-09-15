@@ -242,7 +242,7 @@ class Distiller:
                 request_id='legacy-' + digest([group['group_id'], group['group_revision'],
                     member['concern_uid'], action, value, decision]),
                 group_id=group['group_id'], group_revision=group['group_revision'],
-                selected_member_uids=[member['concern_uid']], _legacy_decision=decision)
+                selected_member_uids=list(group['member_uids']), _legacy_decision=decision)
         if action not in {"candidate", "manual", "unable"}:
             raise ValueError("unknown source confirmation action")
         if action == "unable":

@@ -180,20 +180,18 @@ def test_context_never_guesses_repeated_text_and_bounds_long_excerpt():
     original='前'*100+'疑'*10000+'后'*100
     result=concern_context(original,{'text':'疑'*10000,'start':100,'end':10100})
     assert len(result)<230
-    assert result.startswith('…'+'前'*48+'【')
-    assert result.endswith('】'+'后'*48+'…')
+    assert result.startswith('…'+'前'*12+'【')
+    assert result.endswith('】'+'后'*12+'…')
 
 
-def test_context_matches_shared_full_marked_window():
+def test_context_preserves_released_card_design():
+    # User decision 2026-09-15: preserve the released compact card verbatim.
     from knowledge_distiller.v1.feishu_cards import concern_context
-    from knowledge_distiller.v1.confirmation_display import context_window
     phrase='它涉及到君臣辅佐使的配合'
     snapshot='前'*80+phrase+'后'*80
     concern={'text':phrase,'start':80,'end':80+len(phrase),
              'candidates':[phrase,'它涉及到君臣佐使的配合']}
-    display=context_window(snapshot, concern)
-    assert concern_context(snapshot,concern)==(
-        '…'+display['before']+'【'+display['marked']+'】'+display['after']+'…')
+    assert concern_context(snapshot,concern)=='…前前前前前前它涉及到君臣【辅】佐使的配合后后后后后后后…'
 
 
 def test_review_fraction_tracks_same_material_across_clients_and_restart(inbox):
@@ -274,8 +272,9 @@ def test_group_card_32_member_capacity_and_visible_callback_scope(inbox):
     card=FeishuCards(inbox,engine,SimpleNamespace(audio=lambda p:'synthetic-key')).card('om_1')
     encoded=json.dumps(card,ensure_ascii=False).encode('utf-8')
     assert len(encoded)<30000
-    assert '同类疑点共 32 处' in encoded.decode()
-    assert '待确认组 1 · 待确认位置 32' in encoded.decode()
+    assert '同类疑点共' not in encoded.decode()
+    assert '待确认组' not in encoded.decode()
+    assert encoded.decode().count('synthetic-key') == 1
     def buttons(value):
         if isinstance(value,dict):
             if value.get('tag')=='button':yield value
@@ -283,9 +282,8 @@ def test_group_card_32_member_capacity_and_visible_callback_scope(inbox):
         elif isinstance(value,list):
             for child in value:yield from buttons(child)
     callbacks=[b['behaviors'][0]['value'] for b in buttons(card) if b.get('behaviors')]
-    batch=[c for c in callbacks if c.get('action') in {'candidate','keep','manual'}]
-    assert batch and all(c['selected_member_uids']==ids for c in batch)
-    assert next(c for c in callbacks if c.get('action')=='unable')['selected_member_uids']==[ids[0]]
+    assert callbacks and all(c['kind']=='source_confirmation' for c in callbacks)
+    assert all(c['concern_id']=='0' for c in callbacks)
 
 
 def test_long_optional_group_candidates_cannot_overflow_card_or_hide_scope():

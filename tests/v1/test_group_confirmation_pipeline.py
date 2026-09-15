@@ -234,28 +234,78 @@ def test_group_deferred_cannot_bypass_via_old_finish_or_worker_and_can_resume(se
     assert store.confirmation_view(item)['snapshot'].count('[听辨不清]')==7
 
 
-def test_legacy_single_entry_keeps_selection_and_group_audit_and_replay(setup):
+def test_first_card_entry_syncs_group_audit_and_replay(setup):
     from knowledge_distiller.v1.confirmation_revision import revision
     store,item,service=setup
     pending=store.confirmation_view(item);member=pending['concerns'][0]
     request=dict(token=pending['token'],concern_id=member['audio_name'],
                  concern_revision=revision(pending,member))
-    assert service.resolve(item,'candidate','识神',**request).state=='waiting_user'
-    assert service.resolve(item,'candidate','识神',**request).state=='waiting_user'
+    assert service.resolve(item,'candidate','识神',**request).state=='queued'
+    assert service.resolve(item,'candidate','识神',**request).state=='queued'
     after=store.confirmation_view(item)
-    assert len(after['concerns'])==7 and after['snapshot'].count('识神')==1
+    assert store.item_bundle(item)['snapshot'].count('识神')==8
     with connect(store.path) as db:
         rows=db.execute('SELECT audit_json FROM group_decisions').fetchall()
-        assert len(rows)==1 and len(json.loads(rows[0][0]))==1
+        assert len(rows)==1 and len(json.loads(rows[0][0]))==8
 
 
 def test_legacy_unable_on_new_group_cannot_escape_through_finish(setup):
     store,item,service=setup
-    for _ in range(8):
-        pending=store.confirmation_view(item)
-        service.resolve(item,'unable',token=pending['token'],concern_id=pending['concerns'][0]['audio_name'])
+    pending=store.confirmation_view(item)
+    service.resolve(item,'unable',token=pending['token'],concern_id=pending['concerns'][0]['audio_name'])
     pending=store.confirmation_view(item)
     with pytest.raises(ValueError,match='group_unresolved_members_require_review'):
         service.finish_transcript(item,token=pending['token'])
     assert store.item_bundle(item)['source_fact_id'] is None
     assert len(pending['deferred_concerns'])==8
+
+
+@pytest.mark.parametrize('action,value', [('candidate','识神'),('manual','自填'),('keep',''),('unable','')])
+def test_first_visible_card_submits_all_eight_members(setup, action, value):
+    """2026-09-15 user correction: one ordinary card, one decision for all."""
+    from html.parser import HTMLParser
+    from werkzeug.datastructures import MultiDict
+    from knowledge_distiller.v1.web import create_app
+    class Forms(HTMLParser):
+        def __init__(self):
+            super().__init__(); self.forms=[]; self.current=None; self.audio=0
+        def handle_starttag(self, tag, attrs):
+            attrs=dict(attrs)
+            if tag=='audio': self.audio+=1
+            if tag=='form':
+                self.current={'action':attrs.get('action',''),'fields':[]};self.forms.append(self.current)
+            if tag=='input' and self.current is not None and attrs.get('type')=='hidden':
+                self.current['fields'].append((attrs['name'],attrs.get('value','')))
+        def handle_endtag(self, tag):
+            if tag=='form': self.current=None
+    store,item,service=setup
+    client=create_app(store,service).test_client()
+    html=client.get('/').get_data(as_text=True);parsed=Forms();parsed.feed(html)
+    assert html.count('data-confirmation-card=')==1 and parsed.audio==1
+    assert '同类疑点共' not in html and 'type="checkbox"' not in html
+    form=next(f for f in parsed.forms if f['action']==f'/items/{item}/confirm')
+    payload=MultiDict(form['fields']);assert not payload.getlist('selected_member_uids')
+    payload['action']='candidate' if action=='keep' else action
+    payload['value']='食神' if action=='keep' else value
+    assert client.post(form['action'],data=payload).status_code==302
+    assert client.post(form['action'],data=payload).status_code==302
+    with connect(store.path) as db:
+        rows=db.execute('SELECT audit_json FROM group_decisions').fetchall()
+        assert len(rows)==1 and len(json.loads(rows[0][0]))==8
+    if action in {'candidate','manual'}:
+        assert store.item_bundle(item)['snapshot'].count(value)==8
+    elif action=='keep':assert store.item_bundle(item)['snapshot'].count('食神')==8
+    else:
+        assert len(store.confirmation_view(item)['deferred_concerns'])==8
+        assert store.item_bundle(item)['source_fact_id'] is None
+
+
+def test_first_card_rejects_stale_other_member_change(setup):
+    from knowledge_distiller.v1.confirmation_revision import revision
+    store,item,service=setup;pending=store.confirmation_view(item);member=pending['concerns'][0]
+    prior_revision=revision(pending,member)
+    pending['concerns'][-1]['candidates'].append('变化后的候选')
+    store.update_confirmation_suggestions(item,store.item_bundle(item)['confirmation_json'],pending)
+    with pytest.raises(ValueError,match='另一端更新'):
+        service.resolve(item,'candidate','识神',token=pending['token'],concern_id=member['audio_name'],concern_revision=prior_revision)
+    assert store.confirmation_view(item)['snapshot'].count('识神')==0

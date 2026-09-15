@@ -535,8 +535,9 @@ def test_group_page_discloses_scope_and_posts_explicit_selection(web):
         'groups': [{'group_id': 'group-test', 'member_uids': ['member-0', 'member-1'],
                     'equivalence_basis': {'kind': 'fixture'}}]})
     html = client.get('/').get_data(as_text=True)
-    assert '同类疑点共 2 处' in html
-    assert html.count('data-sync-key="group-') == 1
+    assert '同类疑点共' not in html
+    assert html.count('<audio ') == 1
+    assert html.count('data-confirmation-card=') == 1
     calls = []
     def resolve_group(*args, **kwargs):
         calls.append((args, kwargs))
