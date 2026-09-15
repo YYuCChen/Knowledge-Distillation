@@ -8,6 +8,7 @@ from typing import Mapping
 from uuid import uuid4
 
 from .database import connect, initialize
+from .confirmation_schema import sync as _sync_manual_cards
 from .domain import CapturedMaterial, Knowledge, SourceFact, knowledge_to_dict
 from .source_files import FILE_KINDS, copy_path, read_copy, retain_copy, open_copy, SourceCopyError
 
@@ -141,11 +142,12 @@ class Store:
             if pending:
                 fact_id=None
                 connection.execute("UPDATE distill_items SET state='waiting_user',phase='reviewing',confirmation_json=? WHERE item_id=?",
-                                   (_confirmation_json(pending),item_id))
+                                   (_confirmation_json(pending, connection, item_id),item_id))
             else:
                 fact_id = _establish_source_fact(connection, material_id, fact, lineage=parsed.lineage)
             connection.execute("UPDATE distill_items SET material_id = ? WHERE item_id = ?", (material_id, item_id))
             connection.execute("UPDATE submitted_sources SET content = NULL, input_metadata = '{}', retain_until = NULL WHERE item_id = ?", (item_id,))
+            _sync_manual_cards(connection, item_id)
             return fact_id
 
     def expire_submitted_sources(self) -> None:
@@ -291,12 +293,27 @@ class Store:
         self._set_item(item_id, state="working", phase=phase)
 
     def mark_waiting(self, item_id: int, confirmation: Mapping[str, object]) -> None:
-        self._set_item(
-            item_id,
-            state="waiting_user",
-            phase="reviewing",
-            confirmation_json=_confirmation_json(confirmation),
-        )
+        with connect(self.path) as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            changed = connection.execute("UPDATE distill_items SET state='waiting_user',phase='reviewing',error_code=NULL,confirmation_json=?,updated_at=? WHERE item_id=?",
+                (_confirmation_json(confirmation, connection, item_id), _now(), item_id)).rowcount
+            if changed != 1:
+                raise LookupError(f'distill item {item_id} does not exist')
+            _sync_manual_cards(connection, item_id)
+
+    def confirmation_view(self, item_id):
+        """Read v2 identities, including persisted schema-18 compatibility maps."""
+        from .confirmation_schema import view
+        with connect(self.path) as db:
+            row = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+            return view(db, row) if row is not None else None
+
+    def manual_cards(self, scope_kind='items', scope_id='independent', *, include_inactive=False):
+        with connect(self.path) as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM manual_cards WHERE scope_kind=? AND scope_id=? " +
+                ("" if include_inactive else "AND lifecycle='active' ") + "ORDER BY enqueue_seq",
+                (scope_kind, str(scope_id)))]
 
     def update_confirmation_suggestions(self, item_id: int, expected_json: str, pending: Mapping[str, object]) -> None:
         """Compare the pending revision before saving advisory options only."""
@@ -305,9 +322,10 @@ class Store:
             result = connection.execute(
                 """UPDATE distill_items SET confirmation_json = ?, updated_at = ?
                    WHERE item_id = ? AND state = 'waiting_user' AND confirmation_json = ?""",
-                (_confirmation_json(pending), _now(), item_id, expected_json))
+                (_confirmation_json(pending, connection, item_id), _now(), item_id, expected_json))
             if result.rowcount != 1:
                 raise ValueError('来源确认已更新，请刷新后再操作。')
+            _sync_manual_cards(connection, item_id)
 
     def resolve_confirmation(
         self,
@@ -319,10 +337,15 @@ class Store:
         lineage=None,
         unable: bool = False,
         decision=None,
+        group_decision=None,
     ) -> str:
         """Consume exactly one pending revision with its formal fact and queue state."""
         with connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if group_decision is not None:
+                prior = _group_decision(connection, item_id, group_decision)
+                if prior is not None:
+                    return prior
             row = connection.execute(
                 """SELECT i.*, sf.source_fact_id FROM distill_items AS i
                    LEFT JOIN source_facts AS sf ON sf.material_id = i.material_id
@@ -334,6 +357,18 @@ class Store:
             if row["state"] != "waiting_user" or row["confirmation_json"] != expected_json:
                 from .confirmation_revision import ConfirmationConflict
                 raise ConfirmationConflict("来源确认已更新，请查看该疑点当前状态。")
+            if group_decision is not None:
+                from .confirmation_schema import view
+                from .confirmation_revision import ConfirmationConflict
+                current = view(connection, row)
+                group = next((g for g in current['groups'] if g['group_id'] == group_decision['group_id']), None)
+                selection = group_decision['selected_member_uids']
+                if (group is None or group['group_revision'] != group_decision['group_revision']
+                        or not selection or len(set(selection)) != len(selection)
+                        or not set(selection) <= set(group['member_uids'])):
+                    raise ConfirmationConflict('group_revision_conflict')
+                if {a.get('concern_uid') for a in group_decision['audit']} != set(selection):
+                    raise ValueError('group_member_audit_required')
 
             # Another submission may already have established this material's fact.
             # Its old confirmation cannot replace that fact or keep the item blocked.
@@ -348,7 +383,7 @@ class Store:
             else:
                 state = "failed" if unable else "queued"
             pending_json = (
-                _confirmation_json(next_confirmation)
+                _confirmation_json(next_confirmation, connection, item_id)
                 if next_confirmation is not None else row["confirmation_json"] if unable else None
             )
             now = _now()
@@ -366,12 +401,25 @@ class Store:
                     item_id,
                 ),
             )
+            _sync_manual_cards(connection, item_id)
             if decision:
                 connection.execute('INSERT INTO confirmation_decisions VALUES (?,?,?,?,?)',
                                    (item_id, *decision, state))
+            if group_decision is not None:
+                from .confirmation_schema import digest
+                selection = digest(sorted(group_decision['selected_member_uids']))
+                payload = _group_payload(group_decision)
+                connection.execute('INSERT INTO group_decisions VALUES (?,?,?,?,?,?,?,?,?)',
+                    (item_id, group_decision['request_id'], group_decision['group_id'],
+                     group_decision['group_revision'], selection, digest(payload),
+                     _json({'state': state}), _json(group_decision['audit']), now))
             if state == "queued":
                 _wake_collection(connection, item_id)
             return state
+
+    def group_decision(self, item_id, request):
+        with connect(self.path) as db:
+            return _group_decision(db, item_id, request)
 
     def confirmation_decision(self, item_id, revision, action, value):
         with connect(self.path) as db:
@@ -397,6 +445,7 @@ class Store:
             ).rowcount
             if changed != 1:
                 raise ValueError('只能放弃已停止的独立条目；当前内容没有改变。')
+            _sync_manual_cards(connection, item_id)
 
     def return_to_confirmation(self, item_id: int) -> None:
         with connect(self.path) as connection:
@@ -408,6 +457,7 @@ class Store:
             ).rowcount
             if changed != 1:
                 raise ValueError("没有可继续的来源确认")
+            _sync_manual_cards(connection, item_id)
 
     def mark_succeeded(self, item_id: int) -> None:
         self._set_item(item_id, state="succeeded", phase="done", confirmation_json=None)
@@ -545,10 +595,12 @@ class Store:
                 _establish_source_fact(connection, row['material_id'], fact, lineage=lineage)
             if confirmation is not None:
                 connection.execute("UPDATE distill_items SET review_revision=review_revision+1,state='waiting_user',phase='reviewing',confirmation_json=?,updated_at=? WHERE item_id=?",
-                    (_confirmation_json(confirmation), _now(), item_id))
+                    (_confirmation_json(confirmation, connection, item_id), _now(), item_id))
             else:
                 connection.execute("UPDATE distill_items SET review_revision=review_revision+1,state=?,error_code=?,updated_at=? WHERE item_id=?",
                     ('failed' if failure else 'working', 'review_' + failure if failure else None, _now(), item_id))
+
+            _sync_manual_cards(connection, item_id)
 
     def record_video_transcript(self, material_id, chunks):
         with connect(self.path) as connection:
@@ -623,7 +675,8 @@ class Store:
                 has_fact = True
             connection.execute('''UPDATE distill_items SET material_id=?,state=?,phase='reviewing',
                 confirmation_json=?,error_code=NULL,updated_at=? WHERE item_id=?''',
-                (revision, 'queued' if has_fact else 'waiting_user', None if has_fact else _confirmation_json(pending), _now(), item_id))
+                (revision, 'queued' if has_fact else 'waiting_user', None if has_fact else _confirmation_json(pending, connection, item_id), _now(), item_id))
+            _sync_manual_cards(connection, item_id)
             return True
 
     def establish_knowledge(self, source_fact_id: int, knowledge: Knowledge) -> int:
@@ -859,6 +912,7 @@ class Store:
                 )
             if changed != 1:
                 raise LookupError(f"distill item {item_id} does not exist")
+            _sync_manual_cards(connection, item_id)
 
     def _enqueue_existing(self, item_id: int, *, expected_state: str, replacement=None) -> None:
         now = _now()
@@ -930,7 +984,28 @@ class Store:
                    WHERE item_id = ?""",
                 (now, now, item_id),
             )
+            _sync_manual_cards(connection, item_id)
             _wake_collection(connection, item_id)
+
+
+def _group_payload(request):
+    return {key: (sorted(request[key]) if key == 'selected_member_uids' else request[key])
+            for key in ('group_id', 'group_revision', 'selected_member_uids', 'action', 'value')}
+
+
+def _group_decision(db, item_id, request):
+    from .confirmation_schema import digest
+    row = db.execute('SELECT * FROM group_decisions WHERE item_id=? AND request_id=?',
+                     (item_id, request['request_id'])).fetchone()
+    if row is None:
+        row = db.execute('SELECT * FROM group_decisions WHERE item_id=? AND submitted_revision=? AND selection_digest=?',
+                         (item_id, request['group_revision'], digest(sorted(request['selected_member_uids'])))).fetchone()
+    if row is None:
+        return None
+    if row['payload_digest'] != digest(_group_payload(request)):
+        from .confirmation_revision import ConfirmationConflict
+        raise ConfirmationConflict('group_decision_payload_conflict')
+    return json.loads(row['result_json'])['state']
 
 
 def _establish_source_fact(
@@ -998,7 +1073,10 @@ def _establish_source_fact(
     return int(cursor.lastrowid)
 
 
-def _confirmation_json(confirmation: Mapping[str, object]) -> str:
+def _confirmation_json(confirmation: Mapping[str, object], connection=None, item_id=None) -> str:
+    if connection is not None:
+        from .confirmation_schema import prepare
+        confirmation = prepare(connection, item_id, confirmation)
     from .confirmation_display import concern_total
     return _json({**confirmation, "review_identity": confirmation.get("review_identity", confirmation.get("token", uuid4().hex)), "concern_total": concern_total(confirmation), "token": uuid4().hex})
 

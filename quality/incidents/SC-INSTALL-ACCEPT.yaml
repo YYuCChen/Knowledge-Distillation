@@ -1,0 +1,68 @@
+{
+  "id": "SC-INSTALL-ACCEPT",
+  "requirement_ids": [
+    "BUG-20260914-01"
+  ],
+  "symptom": "An interruption after durable accepted journal write could incorrectly restore the previous program/database because in-memory acceptance lagged the journal.",
+  "evidence_state": "specific_durable_acceptance_counterexample_fixed_on_both_hosts",
+  "severity": "S0",
+  "decision": "must_fix_now",
+  "affected_components": [
+    "installer"
+  ],
+  "corruption_or_privacy": "see frozen specification",
+  "core_path": true,
+  "propagation": [
+    "installer"
+  ],
+  "workaround": null,
+  "verification": [
+    "tests/v1/test_component_assembly.py",
+    "tests/v1/test_component_attempt.py",
+    "tests/v1/test_component_install.py",
+    "tests/v1/test_component_update_completion.py",
+    "tests/v1/test_install_accept_boundary.py"
+  ],
+  "owner": "D",
+  "target": "V1.3",
+  "status": "closed",
+  "original_evidence": "窗口5 §12.3 / 窗口6 §7",
+  "synthetic_counterexample": [
+    "tests/v1/test_component_assembly.py",
+    "tests/v1/test_component_attempt.py",
+    "tests/v1/test_component_install.py",
+    "tests/v1/test_component_update_completion.py",
+    "tests/v1/test_install_accept_boundary.py"
+  ],
+  "expected_assertions": [
+    "existing_registered_test_assertions"
+  ],
+  "scenario_ids": [
+    "SC-INSTALL-ACCEPT--synthetic",
+    "SC-INSTALL-ACCEPT--macos-arm64--native",
+    "SC-INSTALL-ACCEPT--windows-x64--native"
+  ],
+  "review_note": "Close the original synthetic transaction counterexample on the same evidence level that reproduced it: persistent accepted state now controls rollback, with actual SQLite/filesystem checks on Mac and Windows. Process/activation collaborators remain simulated in these module tests; this is not a frozen installer migration/rollback journey pass. W8 must independently challenge final packages and reopen on failure.",
+  "evidence_references": [
+    {
+      "scope": "local delivery index; not a reusable quality passport",
+      "locator": "V1.3开发-20260914/installer-evidence/模块交付.md",
+      "sha256": "0d75508ddd27b09eb800286c749659b961a32cc44b03ca0917ea5127516659e6"
+    },
+    {
+      "scope": "specific defect regression evidence; not a full native scenario passport",
+      "locator": "V1.3开发-20260914/installer-evidence/模块交付.md",
+      "sha256": "0d75508ddd27b09eb800286c749659b961a32cc44b03ca0917ea5127516659e6"
+    }
+  ],
+  "remaining_verification": [
+    "SC-INSTALL-ACCEPT--macos-arm64--native",
+    "SC-INSTALL-ACCEPT--windows-x64--native"
+  ],
+  "severity_basis": "Acceptance journal interruption can restore prior program after accepted; red counterexample and module repair recorded, final boundary not yet accepted.",
+  "closure_scope": "An interruption after durable accepted journal write could incorrectly restore the previous program/database because in-memory acceptance lagged the journal.",
+  "closure_limits": [
+    "frozen candidate pre-accept rollback and post-accept failure journey",
+    "three-version native migration and final helper fault injection"
+  ]
+}

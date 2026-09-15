@@ -1,3 +1,4 @@
+from knowledge_distiller.v1.database import SCHEMA_VERSION
 import json
 import sqlite3
 from dataclasses import replace
@@ -81,6 +82,8 @@ def as_v9(path):
         db.execute(sql)
         db.execute('INSERT INTO materials_v9 SELECT material_id,source_kind,source_key,submitted_url,canonical_url,metadata_json,created_at FROM materials')
         db.execute('DROP TABLE materials');db.execute('ALTER TABLE materials_v9 RENAME TO materials')
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
         db.execute('PRAGMA user_version=9');db.commit()
     finally:db.close()
 
@@ -101,7 +104,7 @@ def test_v9_upgrade_preserves_published_fact_and_media_references(tmp_path):
         assert db.execute('PRAGMA foreign_key_check').fetchall()==[]
         assert db.execute('SELECT material_id,content FROM source_media').fetchone()[:]==(material,b'\x01\x02\x03')
         assert db.execute('PRAGMA foreign_keys').fetchone()[0]==1
-        assert db.execute('PRAGMA user_version').fetchone()[0]==18
+        assert db.execute('PRAGMA user_version').fetchone()[0]== SCHEMA_VERSION
         assert db.execute('SELECT snapshot_key FROM materials').fetchone()[0]=='legacy'
     # A new capture can coexist; a legacy row isn't fabricated into a new hash.
     new=store.attach_material(store.create_item(URL),capture(tmp_path,'new.mp4','新描述'))

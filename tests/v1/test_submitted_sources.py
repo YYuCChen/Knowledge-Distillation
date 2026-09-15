@@ -174,7 +174,9 @@ def test_v3_migration_preserves_real_schema_fact_publication_and_immutability(tm
         db.execute("INSERT INTO materials VALUES (1, 'douyin', '123', 'url', 'url', '{}', 'now')")
         db.execute("INSERT INTO source_facts VALUES (1, 1, '正文', '[]', 'now')")
         db.execute("INSERT INTO knowledge_results VALUES (1, 1, '{}', 'old.md', '/exact/vault', 'now', 'now')")
-        db.execute('PRAGMA user_version = 3')
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
+        db.execute('PRAGMA user_version=3')
     Store(path).initialize()
     with connect(path) as db:
         assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
@@ -221,7 +223,9 @@ def test_v4_migration_preserves_queued_and_failure_source_bytes(tmp_path):
         db.execute("INSERT INTO distill_items (item_id, submitted_url, state, phase, queued_at, created_at, updated_at) VALUES (1, '直接文本', 'failed', 'reviewing', 'a', 'a', 'a')")
         db.execute("INSERT INTO submitted_sources VALUES (1, 'direct_text', 'exact-key', '直接文本', '{}', ?, '2099-01-01T00:00:00+00:00', 1)", ('正文\r\n'.encode(),))
         before = db.execute('SELECT * FROM submitted_sources').fetchall()
-        db.execute('PRAGMA user_version = 4')
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
+        db.execute('PRAGMA user_version=4')
     Store(path).initialize()
     with sqlite3.connect(path) as db:
         assert db.execute('SELECT * FROM submitted_sources').fetchall() == before

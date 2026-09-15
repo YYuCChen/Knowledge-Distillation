@@ -1,0 +1,46 @@
+{
+  "id": "SC-DESKTOP-EXIT",
+  "requirement_ids": [
+    "BUG-20260914-08"
+  ],
+  "symptom": "Confirmed browser exit uses floating-point grace backdating; a same-tick rounding boundary leaves exited pages registered.",
+  "evidence_state": "fixed_and_verified_on_macos_and_windows",
+  "severity": "S1",
+  "decision": "must_fix_now",
+  "affected_components": [
+    "desktop"
+  ],
+  "corruption_or_privacy": "Core desktop reopening state may retain a browser instance already confirmed exited.",
+  "core_path": true,
+  "propagation": [
+    "desktop",
+    "main"
+  ],
+  "workaround": null,
+  "verification": [
+    "tests/v1/test_desktop_pages.py"
+  ],
+  "owner": "C",
+  "target": "V1.3",
+  "status": "closed",
+  "original_evidence": "V1.3开发-20260914/audio-evidence/windows-0d9-desktop-failure.log",
+  "scenario_ids": [
+    "SC-DESKTOP-REOPEN--synthetic"
+  ],
+  "expected_assertions": [
+    "confirmed exited browser removes only its associated pages without dependence on wall-clock progress",
+    "unassociated manual pages survive",
+    "target acknowledgement cannot remain valid after removal"
+  ],
+  "closure_scope": "Confirmed exact browser instance is removed immediately without a fabricated elapsed-time calculation. Unassociated manual pages survive and removed target acknowledgement is invalidated.",
+  "closure_limits": [
+    "Final candidate native Chrome/Safari browser-exit and Dock matrix remains Window8"
+  ],
+  "evidence_references": [
+    {
+      "locator": "V1.3开发-20260914/build-evidence/browser-exit-windows-result.json",
+      "sha256": "dcefb8255927194ebee7e5201cf918c51675a076a475c412c0714a561c54bfbc",
+      "scope": "Actual Windows 24 assertions with Mac launcher deselected; Mac full 25 assertions also passed"
+    }
+  ]
+}

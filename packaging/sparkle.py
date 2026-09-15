@@ -1,4 +1,5 @@
 """Attach the pinned Sparkle runtime after PyInstaller's bundle assembly."""
+import runpy
 import hashlib
 from io import BytesIO
 import tarfile
@@ -61,11 +62,13 @@ def _attach_verified(app, sdk, config, project):
     (contents/'MacOS/update-cli').unlink(missing_ok=True)
     subprocess.run(['swiftc', '-parse-as-library', '-O', str(project/'packaging/update_verify.swift'),
                     '-o', str(contents/'MacOS/update-verify')], check=True)
+    installer_imports = runpy.run_path(str(project/'packaging/resources.py'))['installer_hiddenimports']('darwin')
     with tempfile.TemporaryDirectory(prefix='kd-installer-build-') as temp:
         work = Path(temp)
         with (work/'build.log').open('w') as log:
             subprocess.run([sys.executable, '-m', 'PyInstaller', '--noconfirm', '--onefile',
                 '--name', 'update-helper', '--paths', str(project/'src'),
+                *[value for module in installer_imports for value in ('--hidden-import', module)],
                 '--add-binary', str(sdk/'bin/BinaryDelta')+':tools',
                 '--add-data', str(project/'src/knowledge_distiller/v1/adapters/update-codec-notices.txt')+':knowledge_distiller/v1/adapters',
                 '--add-data', str(project/'src/knowledge_distiller/v1/adapters/docling-model-notices.txt')+':knowledge_distiller/v1/adapters',

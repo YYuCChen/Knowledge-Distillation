@@ -10,7 +10,8 @@ from uuid import uuid4
 
 import httpx
 from .component_assembly import ComponentAssembly
-from .component_install import install
+from .component_install import install, finalize_install, confirm_activation
+from .install_problem import problem_from
 from .component_release import MAX_MANIFEST
 from .updates import UpdateError, validate_install_paths
 
@@ -71,15 +72,33 @@ def run(plan_path):
         candidate, _ = assembler.assemble(release, selected,
             root / 'updates/component-attempts' / uuid4().hex, installed=target)
         request_exit(root, plan, platform)
-        install(candidate, target, root, platform=platform, version=release['version'],
+        outcome = install(candidate, target, root, platform=platform, version=release['version'],
                 target_identity=release['target_identity'])
+        from .installer_platform import create_shortcut
+        outcome = finalize_install(outcome, capability=assembler.capability_for(candidate),
+            shortcut=lambda:create_shortcut(target,root))
+        try:
+            from .local_records import write_record
+            write_record(root / 'updates/component-install-outcome.json', outcome)
+        except Exception as error:
+            print('安装已接受，收尾记录写入失败：' + str(error), file=sys.stderr)
+        if outcome['activation']['status'] != 'ready':
+            return 2
         if not plan.get('no_open'):
+            confirm_activation(root, outcome)
             state = json.loads((root / '.desktop-instance.json').read_text(encoding='utf-8'))
             webbrowser.open('http://127.0.0.1:' + str(state['port']) + '/')
         return 0
     except Exception as error:
         (root / 'updates').mkdir(parents=True, exist_ok=True)
-        (root / 'updates/install-error.txt').write_text(str(error), encoding='utf-8')
-        return 1
+        accepted = bool(locals().get('outcome',{}).get('accepted'))
+        problem = problem_from(error,stage='install' if 'candidate' in locals() else 'prepare',
+            role='candidate' if 'candidate' in locals() else 'manifest',accepted=accepted,
+            data_state='unknown' if (root/'updates/component-install-journal.json').exists() else 'unchanged')
+        try:
+            (root / 'updates/install-error.txt').write_text(str(problem), encoding='utf-8')
+        except OSError:
+            print(str(problem), file=sys.stderr)
+        return (0 if outcome['activation']['status'] == 'ready' else 2) if accepted else 1
     finally:
         (root / 'updates/shutdown-request').unlink(missing_ok=True)

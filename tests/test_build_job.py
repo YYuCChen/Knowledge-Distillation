@@ -256,3 +256,43 @@ def test_default_launch_denial_is_not_silently_changed_to_supervised(tmp_path, m
         assert launches[0]['creationflags'] & 0x01000000
     else:
         assert launches[0]['start_new_session']
+
+
+@pytest.mark.parametrize('entry', ['status', 'status_without_lock'])
+def test_status_reader_retries_transient_windows_sharing_error(tmp_path, monkeypatch, entry):
+    target = tmp_path / 'status.json'
+    target.write_text('{"status":"succeeded"}')
+    original = Path.read_text
+    calls = []
+    def read(path, *args, **kwargs):
+        calls.append(path)
+        if len(calls) == 1:
+            raise PermissionError(13, 'temporarily shared')
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(build_job.sys, 'platform', 'win32')
+    monkeypatch.setattr(Path, 'read_text', read)
+    assert getattr(build_job, entry)(tmp_path)['status'] == 'succeeded'
+    assert len(calls) == 2
+
+
+def test_status_reader_preserves_persistent_permission_error(tmp_path, monkeypatch):
+    target = tmp_path / 'status.json'
+    ticks = iter([0, 3])
+    monkeypatch.setattr(build_job.sys, 'platform', 'win32')
+    monkeypatch.setattr(build_job.time, 'monotonic', lambda: next(ticks))
+    def denied(*args, **kwargs):
+        raise PermissionError(13, 'persistent ACL denial')
+    monkeypatch.setattr(Path, 'read_text', denied)
+    with pytest.raises(PermissionError):
+        build_job.read_status_json(target)
+
+
+def test_status_reader_does_not_retry_corrupt_json(tmp_path, monkeypatch):
+    target = tmp_path / 'status.json'
+    target.write_text('{broken')
+    monkeypatch.setattr(build_job.sys, 'platform', 'win32')
+    def must_not_retry(*args):
+        raise AssertionError('corrupt JSON must surface immediately')
+    monkeypatch.setattr(build_job.time, 'sleep', must_not_retry)
+    with pytest.raises(json.JSONDecodeError):
+        build_job.read_status_json(target)

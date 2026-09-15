@@ -39,7 +39,7 @@ def test_install_acceptance_or_rollback_preserves_real_sqlite(tmp_path, failure)
     def acceptance(*args):
         if failure: raise UpdateError('injected startup failure')
     kwargs = dict(platform='windows-x86_64', version='2',
-        target_identity=identity(candidate, 'windows-x86_64'), launcher=launcher, acceptance=acceptance)
+        target_identity=identity(candidate, 'windows-x86_64'), launcher=launcher, acceptance=acceptance, activation=lambda *a:None)
     if failure:
         with pytest.raises(UpdateError, match='startup failure'):
             install(candidate, target, root, **kwargs)
@@ -123,7 +123,7 @@ def test_windows_transient_handles_are_waited_through_every_program_rename(tmp_p
     with pytest.raises(UpdateError, match='fixture startup refusal'):
         install(candidate, target, tmp_path / 'data', platform='windows-x86_64',
                 version='2', target_identity=identity(candidate, 'windows-x86_64'),
-                launcher=lambda *args:Process(), acceptance=reject)
+                launcher=lambda *args:Process(), acceptance=reject, activation=lambda *a:None)
     assert len(attempts) == 3 and all(count == 2 for count in attempts.values())
     assert pauses == [.2, .2, .2]
     assert identity(target, 'windows-x86_64') == original_identity
@@ -149,7 +149,7 @@ def test_windows_persistent_rename_failure_keeps_recoverable_journal(tmp_path, m
     with pytest.raises(PermissionError, match='fixture persistent handle'):
         install(candidate, target, root, platform='windows-x86_64', version='2',
                 target_identity=identity(candidate, 'windows-x86_64'),
-                launcher=lambda *args:Process(), acceptance=reject)
+                launcher=lambda *args:Process(), acceptance=reject, activation=lambda *a:None)
     assert 15 <= clock[0] < 16
     assert not target.exists()
     journal = root / 'updates/component-install-journal.json'

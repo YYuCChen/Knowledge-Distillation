@@ -3,8 +3,16 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="icon" href="data:,">
+    <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='icons/favicon-16-c73805f11011.png') }}">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='icons/favicon-32-4a2331223c4b.png') }}">
+    <link rel="icon" type="image/png" sizes="48x48" href="{{ url_for('static', filename='icons/favicon-48-2d3277517d8c.png') }}">
+    <link rel="icon" type="image/png" sizes="64x64" href="{{ url_for('static', filename='icons/favicon-64-0abe3e879be0.png') }}">
+    <link rel="icon" type="image/png" sizes="96x96" href="{{ url_for('static', filename='icons/favicon-96-9772f76bb743.png') }}">
     <title>{% block title %}知识蒸馏器{% endblock %}</title>
+    {% if desktop_token is defined %}
+    <script id="desktop-state" type="application/json">{{ desktop_token|tojson }}</script>
+    <script src="{{ url_for('static', filename='desktop.js') }}?protocol=2"></script>
+    {% endif %}
     <link rel="stylesheet" href="{{ url_for('static', filename='base.css') }}">
     {% block styles %}{% endblock %}
     <link rel="stylesheet" href="{{ url_for('static', filename='actions.css') }}">
@@ -16,10 +24,6 @@
     <p role="status" style="margin:16px 24px;padding:12px;border:1px solid currentColor;border-radius:8px">{{ document_component.message }}</p>
     {% endif %}
     {% block content %}{% endblock %}
-    {% if desktop_token is defined %}
-    <script id="desktop-state" type="application/json">{{ desktop_token|tojson }}</script>
-    <script src="{{ url_for('static', filename='desktop.js') }}" defer></script>
-    {% endif %}
     {% block scripts %}{% endblock %}
     {% if update is defined %}
     <script id="update-state" type="application/json">{{ update|tojson }}</script>

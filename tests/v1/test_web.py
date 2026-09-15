@@ -506,3 +506,52 @@ def test_image_evidence_failure_explains_unconfirmed_text_instead_of_retry_later
     html = client.get('/').text
     assert '生成的证据引用了尚未确认的图片文字或无效图片依据' in html
     assert '本次处理未完成，可以稍后重试。' not in html
+
+
+def test_manual_queue_uses_card_fifo_and_failure_tail(web):
+    client, store, _ = web
+    def pending(name):
+        return {'snapshot': '疑点', 'concerns': [{'start': 0, 'end': 2, 'text': '疑点',
+                'audio_name': name, 'candidates': ['疑点', '词语']}], 'review_required': False}
+    first = store.create_item('https://www.douyin.com/video/701')
+    second = store.create_item('https://www.douyin.com/video/702')
+    store.mark_waiting(first, pending('first'))
+    store.mark_waiting(second, pending('second'))
+    old = json.loads(store.item_bundle(first)['confirmation_json'])
+    store.mark_waiting(first, {**old, 'display_notice': 'updated later'})
+    response = client.get('/').get_data(as_text=True)
+    first_uid = store.confirmation_view(first)['concerns'][0]['concern_uid']
+    second_uid = store.confirmation_view(second)['concerns'][0]['concern_uid']
+    assert response.index('data-sync-key="member-'+str(first)+'-'+first_uid) < response.index('data-sync-key="member-'+str(second)+'-'+second_uid)
+    assert 'data-sync-key="todo" data-live-status' in response
+
+
+def test_group_page_discloses_scope_and_posts_explicit_selection(web):
+    client, store, distiller = web
+    item = store.create_item('https://www.douyin.com/video/703')
+    store.mark_waiting(item, {'snapshot': '词词', 'review_required': False,
+        'concerns': [{'start': n, 'end': n+1, 'text': '词', 'audio_name': str(n),
+                      'concern_uid': 'member-'+str(n), 'candidates': ['词', '字']} for n in range(2)],
+        'groups': [{'group_id': 'group-test', 'member_uids': ['member-0', 'member-1'],
+                    'equivalence_basis': {'kind': 'fixture'}}]})
+    html = client.get('/').get_data(as_text=True)
+    assert '同类疑点共' not in html
+    assert html.count('<audio ') == 1
+    assert html.count('data-confirmation-card=') == 1
+    calls = []
+    def resolve_group(*args, **kwargs):
+        calls.append((args, kwargs))
+        return DistillResult(item, 'waiting_user')
+    distiller.resolve_group = resolve_group
+    pending = store.confirmation_view(item)
+    response = client.post(f'/items/{item}/confirm-group', data={
+        'token': pending['token'], 'request_id': 'request', 'group_id': 'group-test',
+        'group_revision': pending['groups'][0]['group_revision'],
+        'selected_member_uids': ['member-1'], 'candidate_value': '字', 'value': 'unused draft'})
+    assert response.status_code == 302
+    assert calls[0][0] == (item, 'candidate', '字')
+    assert calls[0][1]['selected_member_uids'] == ['member-1']
+    assert calls[0][1]['actor'] == 'local'
+    context = client.get(f'/items/{item}/confirmation-context/member-0')
+    assert context.status_code == 200
+    assert '<mark>词</mark>' in context.get_data(as_text=True)

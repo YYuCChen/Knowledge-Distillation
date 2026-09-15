@@ -100,6 +100,15 @@ def make_requests(config, commit, version, product, mac_source, win_source):
         {'name':'verify','command':[win_py,'scripts/verify_candidate.py','--platform','windows','--build','{attempt}/build','--output','{attempt}/verification','--version',version,'--commit',commit]},
         {'name':'zip','command':[win_py,'scripts/package_windows.py','--app','{attempt}/build/KnowledgeDistiller','--output','{attempt}/delivery','--version',version,'--cache-root',config['windows_cache'],'--test-report','{attempt}/verification/support.md']}
     ],artifacts=['delivery/*.zip','verification/result.json','build/build-manifest.json'])
+    # Installer metadata is derived from the same immutable request as the app.
+    for request, python, tools, signing in [
+        (mac, mac_py, str(Path(config['sparkle_sdk'])/'bin'), ['--signing-config', config['signing_config']]),
+        (windows, win_py, config['windows_cache'].rstrip('/')+'/tools/hdiffpatch-5.1.3/windows64', [])]:
+        index = next(i for i, step in enumerate(request['steps']) if step['name'] == 'build') + 1
+        request['steps'].insert(index, {'name':'installer','command':[
+            python, 'scripts/build_component_installer.py', '--output', '{attempt}/installer',
+            '--tools', tools, '--version', version, '--product-version', product, *signing]})
+        request['artifacts'].append('installer/build-manifest.json')
     mac['host_lock']=str(Path(config['output_root'])/'host.lock')
     windows['host_lock']=config['windows_root'].rstrip('/')+'/host.lock'
     mac['steps'].append({'name':'archive-check','command':[mac_py,'scripts/verify_archive.py','{attempt}/KnowledgeDistiller-'+version+'-Mac-arm64.zip','--version',version,'--commit',commit]})

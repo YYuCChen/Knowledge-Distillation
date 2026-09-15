@@ -136,10 +136,10 @@ class Distiller:
             concern['candidate_explanations'] = {choice['text']: choice['meaning_zh'] for choice in choices}
         self.store.update_confirmation_suggestions(item_id, row['confirmation_json'], pending)
 
-    def resolve(self, item_id, action, value="", *, token="", concern_id="", concern_revision=""):
+    def resolve(self, item_id, action, value="", *, token="", concern_id="", concern_revision="", actor="local"):
         from .confirmation_revision import ConfirmationConflict, revision
         if not concern_revision:
-            return self._resolve_once(item_id, action, value, token=token, concern_id=concern_id)
+            return self._resolve_once(item_id, action, value, token=token, concern_id=concern_id, actor=actor)
         for _ in range(4):
             state = self.store.confirmation_decision(item_id, concern_revision, action, value)
             if state:
@@ -151,13 +151,74 @@ class Distiller:
                 raise ValueError('该疑点已在另一端更新，请查看当前状态；输入已保留。')
             try:
                 return self._resolve_once(item_id, action, value, token=pending['token'],
-                                          concern_id=concern_id, decision=(concern_revision, action, value))
+                                          concern_id=concern_id, decision=(concern_revision, action, value), actor=actor)
             except ConfirmationConflict:
                 continue
         raise ValueError('其他操作正在保存，请稍后重试；输入已保留。')
 
+    def resolve_group(self, item_id, action, value="", *, token, request_id,
+                      group_id, group_revision, selected_member_uids, actor="local", _legacy_decision=None):
+        """One explicit selection, one Store transaction, bounded unrelated CAS retries."""
+        from .confirmation_groups import plan_group
+        from .confirmation_revision import ConfirmationConflict
+        if (not isinstance(request_id, str) or not request_id or len(request_id)>128
+                or not isinstance(selected_member_uids, list) or not selected_member_uids
+                or any(not isinstance(u,str) for u in selected_member_uids)
+                or len(set(selected_member_uids)) != len(selected_member_uids)
+                or actor not in {'local', 'feishu'} or not isinstance(group_id,str)
+                or not isinstance(group_revision,str) or not isinstance(value,str)):
+            raise ValueError('group_request_invalid')
+        request = dict(request_id=request_id,group_id=group_id,group_revision=group_revision,
+                       selected_member_uids=selected_member_uids,action=action,value=value)
+        for attempt in range(4):
+            prior = self.store.group_decision(item_id, request)
+            if prior is not None:
+                return DistillResult(item_id, prior)
+            row = self._item(item_id)
+            # Authenticate the first request with its current displayed token.
+            # Only this already-authenticated call can rebase an unrelated CAS.
+            if not token or row['state'] != 'waiting_user' or row['confirmation_json'] is None:
+                raise ConfirmationConflict('group_revision_conflict')
+            if attempt == 0 and json.loads(row['confirmation_json']).get('token') != token:
+                raise ConfirmationConflict('group_token_stale')
+            pending = self.store.confirmation_view(item_id)
+            if pending is None:
+                continue  # A concurrent commit may now be available in the ledger.
+            plan = plan_group(pending, request, actor=actor)
+            if row['source_fact_id'] is not None:
+                raise ConfirmationConflict('source_fact_already_established')
+            # Preserve exact original replay anchors before any text mutation.
+            for member, audit in zip(plan.selected, plan.audit):
+                try:
+                    audio_range = self.transcript_location(item_id, token=pending['token'],
+                        start=member['start'], end=member['end'])
+                except ValueError:
+                    audio_range = None
+                if audio_range is not None:
+                    plan.pending['correction_locations'].append({'start':audit['result_span'][0],
+                        'end':audit['result_span'][1],'audio_range':audio_range})
+            committed = {**request, 'audit': list(plan.audit)}
+            try:
+                if plan.can_establish_fact:
+                    state = self.store.resolve_confirmation(item_id, row['confirmation_json'],
+                        fact=SourceFact(plan.pending['snapshot'], tuple(plan.pending['uncertainties']+plan.pending['resolved'])),
+                        lineage=plan.pending.get('lineage'), group_decision=committed, decision=_legacy_decision)
+                else:
+                    state = self.store.resolve_confirmation(item_id, row['confirmation_json'],
+                        next_confirmation=plan.pending, group_decision=committed, decision=_legacy_decision)
+            except ConfirmationConflict:
+                # Every retry reconstructs the complete plan and rechecks the
+                # whole group's semantic revision, including unselected members.
+                if attempt == 3:
+                    raise ConfirmationConflict('group_save_busy')
+                continue
+            if action != 'unable':
+                self._remove_confirmation_audio(item_id, list(plan.selected))
+            return DistillResult(item_id, state)
+        raise ConfirmationConflict('group_save_busy')
+
     def _resolve_once(
-        self, item_id: int, action: str, value: str = "", *, token: str = "", concern_id: str = "", decision=None
+        self, item_id: int, action: str, value: str = "", *, token: str = "", concern_id: str = "", decision=None, actor="local"
     ) -> DistillResult:
         row = self._item(item_id)
         pending = _pending_confirmation(row, token)
@@ -170,6 +231,18 @@ class Distiller:
         if index < 0 or index >= len(concerns):
             raise ValueError("疑点已更新，请刷新后再操作。")
         concern = concerns[index]
+        if pending.get('group_confirmation_contract'):
+            from .confirmation_schema import digest
+            view = self.store.confirmation_view(item_id)
+            member = next((m for m in view['concerns'] if m.get('audio_name') == concern.get('audio_name')), None)
+            group = next((g for g in view['groups'] if member and member['concern_uid'] in g['member_uids']), None)
+            if group is None:
+                raise ValueError('group_revision_conflict')
+            return self.resolve_group(item_id, action, value, token=token,
+                request_id='legacy-' + digest([group['group_id'], group['group_revision'],
+                    member['concern_uid'], action, value, decision]),
+                group_id=group['group_id'], group_revision=group['group_revision'],
+                selected_member_uids=list(group['member_uids']), actor=actor, _legacy_decision=decision)
         if action not in {"candidate", "manual", "unable"}:
             raise ValueError("unknown source confirmation action")
         if action == "unable":
@@ -284,6 +357,9 @@ class Distiller:
         pending = _pending_confirmation(row, token)
         if pending["concerns"]:
             raise ValueError("请先完成所有来源疑点确认。")
+        if pending.get('group_confirmation_contract') and (pending.get('deferred_concerns')
+                or any(u.get('status')=='unresolved' for u in pending.get('uncertainties',[]))):
+            raise ValueError('group_unresolved_members_require_review')
         if pending.get("deferred_concerns"):
             state = self.store.resolve_confirmation(item_id, row["confirmation_json"],
                 next_confirmation={**pending, "review_required": False})
@@ -292,6 +368,29 @@ class Distiller:
                 fact=SourceFact(pending["snapshot"], tuple(pending.get("uncertainties", []) + pending.get("resolved", []))),
                 lineage=pending.get("lineage"))
         return DistillResult(item_id, state)
+
+    def restore_group_deferred(self, item_id, *, token, selected_member_uids=None):
+        """Make unresolved group members actionable again without editing text."""
+        from copy import deepcopy
+        from .confirmation_revision import ConfirmationConflict
+        row=self._item(item_id)
+        _pending_confirmation(row,token)
+        pending=self.store.confirmation_view(item_id)
+        if pending is None or not pending.get('group_confirmation_contract'):
+            raise ValueError('group_deferred_recovery_not_available')
+        deferred=pending.get('deferred_concerns',[])
+        ids=[c['concern_uid'] for c in deferred]
+        selection=ids if selected_member_uids is None else selected_member_uids
+        if (not isinstance(selection,list) or not selection or any(not isinstance(u,str) for u in selection)
+                or len(set(selection))!=len(selection) or not set(selection)<=set(ids)):
+            raise ConfirmationConflict('group_member_not_actionable')
+        updated=deepcopy(pending)
+        current={c['concern_uid'] for c in updated['concerns']}
+        updated['concerns'].extend(deepcopy(c) for c in deferred if c['concern_uid'] in selection and c['concern_uid'] not in current)
+        updated['concerns'].sort(key=lambda c:c['start'])
+        updated['deferred_concerns']=[c for c in updated['deferred_concerns'] if c['concern_uid'] not in selection]
+        state=self.store.resolve_confirmation(item_id,row['confirmation_json'],next_confirmation=updated)
+        return DistillResult(item_id,state)
 
     def transcript_audio(self, item_id: int, *, token: str) -> Path:
         pending = _pending_confirmation(self._item(item_id), token)
@@ -404,6 +503,98 @@ class Distiller:
         # Missing local playback is a recovery state, never a full-audio task.
         return None
 
+    def rerecognize_group(self, item_id, *, token, request_id, group_id, group_revision,
+                          selected_member_uids, actor="local"):
+        """Re-recognize only explicitly selected local clips as advisory text.
+
+        This is not whole-material recognition and never replaces the snapshot.
+        All references are published together after the original group CAS.
+        """
+        from copy import deepcopy
+        import hashlib
+        import tempfile
+        from .confirmation_groups import plan_group
+        from .confirmation_schema import digest
+        from .confirmation_revision import ConfirmationConflict
+        if (not isinstance(request_id,str) or not request_id or len(request_id)>128
+                or not isinstance(selected_member_uids,list) or not selected_member_uids
+                or any(not isinstance(u,str) for u in selected_member_uids)
+                or len(set(selected_member_uids))!=len(selected_member_uids)
+                or actor not in {'local','feishu'} or not isinstance(group_id,str)
+                or not isinstance(group_revision,str)):
+            raise ValueError('group_request_invalid')
+        request=dict(request_id=request_id,group_id=group_id,group_revision=group_revision,
+                     selected_member_uids=selected_member_uids,action='rerecognize_reference',value='')
+        references=None
+        for attempt in range(4):
+            prior=self.store.group_decision(item_id,request)
+            if prior is not None:return DistillResult(item_id,prior)
+            row=self._item(item_id)
+            if row['state']!='waiting_user' or row['confirmation_json'] is None:
+                raise ConfirmationConflict('group_revision_conflict')
+            if attempt==0 and (not token or json.loads(row['confirmation_json']).get('token')!=token):
+                raise ConfirmationConflict('group_token_stale')
+            pending=self.store.confirmation_view(item_id)
+            if pending is None:continue
+            check=plan_group(pending,{**request,'action':'keep'},actor=actor)
+            if references is None:
+                references={}
+                if self.recognizer is None:raise ValueError('member_recognition_unavailable')
+                for member in check.selected:
+                    path=self.confirmation_audio(item_id,member['audio_name'])
+                    if path is None or member.get('audio_recovery_required') or path.is_symlink():
+                        raise ValueError('member_recognition_audio_unavailable')
+                    try:
+                        raw=path.read_bytes()
+                        with tempfile.TemporaryDirectory(prefix='member-recognition-',dir=self.runtime_root) as temporary:
+                            local=Path(temporary)/'clip.wav';local.write_bytes(raw)
+                            with wave.open(str(local),'rb') as stream:
+                                duration=stream.getnframes()/stream.getframerate()
+                                if (stream.getframerate()!=16000 or stream.getnchannels()!=1
+                                        or stream.getsampwidth()!=2 or not 0<duration<=60):
+                                    raise ValueError('member_recognition_audio_invalid')
+                            recognition=self.recognizer.recognize(StandardAudio(local,duration))
+                        recovery=recognition.recovery
+                        if (recognition.failure is not None or recovery is None or recovery.truncated
+                                or not recovery.completed_normally or not recovery.text.strip()):
+                            raise ValueError('member_recognition_incomplete')
+                        references[member['concern_uid']]={
+                            'kind':'local_clip_asr_reference','text':recovery.text,
+                            'source_version_id':member['source_version_id'],
+                            'audio_sha256':hashlib.sha256(raw).hexdigest(),'duration_seconds':duration,
+                            'engine':type(self.recognizer).__name__,'request_id':request_id,
+                            'notice':'局部原音重新识别参考，可能包含前后文；尚未替换来源或确认疑点。'}
+                    except (OSError,ValueError,EOFError,wave.Error) as error:
+                        raise ValueError('member_recognition_unavailable') from error
+            updated=deepcopy(pending)
+            updated['group_confirmation_contract']=1
+            selected=set(selected_member_uids)
+            for member in updated['concerns']:
+                if member['concern_uid'] in selected:
+                    member['recognition_reference']=references[member['concern_uid']]
+                    member['decision_basis']={'kind':'local_recognition_reference',
+                        'reference_hash':digest(references[member['concern_uid']])}
+            groups=[];superseded=[]
+            for group in updated['groups']:
+                remaining=[u for u in group['member_uids'] if u not in selected]
+                if remaining:groups.append({**group,'member_uids':remaining})
+                elif group['member_uids']:superseded.append(group['group_id'])
+                else:groups.append(group)
+            for member in check.selected:
+                uid=member['concern_uid']
+                groups.append({'group_id':digest(['recognition-reference',pending['review_round_id'],uid,request_id]),
+                    'member_uids':[uid],'equivalence_basis':{'kind':'single_member'},'formation_version':1})
+            updated['groups']=groups
+            updated['superseded_group_ids']=list(dict.fromkeys(pending.get('superseded_group_ids',[])+superseded))
+            audit=[{**a,'action':'rerecognize_reference','recognition_reference':references[a['concern_uid']]} for a in check.audit]
+            try:
+                state=self.store.resolve_confirmation(item_id,row['confirmation_json'],
+                    next_confirmation=updated,group_decision={**request,'audit':audit})
+                return DistillResult(item_id,state)
+            except ConfirmationConflict:
+                if attempt==3:raise ConfirmationConflict('group_save_busy')
+        raise ConfirmationConflict('group_save_busy')
+
     def rerecognize(self, item_id: int, *, token: str = "") -> DistillResult:
         row = self._item(item_id)
         pending = _pending_confirmation(row, token, allow_legacy=True)
@@ -438,6 +629,10 @@ class Distiller:
                 raise DistillError("source_confirmation_required")
             return
         pending = json.loads(row["confirmation_json"]) if row["confirmation_json"] else None
+        if pending and pending.get('group_confirmation_contract'):
+            if row['state'] != 'waiting_user':
+                self.store.mark_waiting(item_id,pending)
+            return  # Only explicit member decisions and final review can release this gate.
         if pending and not pending["concerns"] and pending.get("deferred_concerns"):
             self._finish_partial_source(item_id, row, pending)
             return
@@ -579,6 +774,7 @@ class Distiller:
                         dict.fromkeys((concern.text, *concern.candidate_readings))
                     ),
                     "audio_name": name,
+                    "member_id": "primary-audio",
                     "audio_recovery_required": bool(replay_note),
                 })
             )
@@ -596,9 +792,10 @@ class Distiller:
             self.store.commit_source_review(item_id, review_revision, review_identity, stage_result,
                 fact=SourceFact(review.candidate.text, uncertainties), lineage=lineage)
             return
-        self.store.commit_source_review(
-            item_id, review_revision, review_identity, stage_result, confirmation={
+        from .confirmation_groups import form_groups
+        confirmation = {
                 "snapshot": review.candidate.text, "concerns": blocking, "lineage": lineage,
+                "review_identity": review_identity,
                 "review_required": False,
                 "audio_alignment": "local_preview_10s_v3",
                 "uncertainties": list(uncertainties),
@@ -607,9 +804,14 @@ class Distiller:
                     "timeline_status": replay_recovery.timeline_status,
                     "duration_seconds": normalized.audio.duration_seconds},
             }
-        )
+        group_client = self.reviewer.binding.client if isinstance(self.reviewer, RecordedReviewer) else None
+        confirmation = form_groups(confirmation, item_id, group_client)
+        self.store.commit_source_review(item_id, review_revision, review_identity,
+                                        stage_result, confirmation=confirmation)
 
     def _finish_partial_source(self, item_id: int, row, pending: dict) -> None:
+        if pending.get('group_confirmation_contract'):
+            raise DistillError('group_unresolved_members_require_review')
         # Judge the remaining clear content before freezing an incomplete SourceFact.
         self.store.mark_working(item_id, "distilling")
         candidate = SourceFact(pending['snapshot'], tuple(pending['uncertainties']))

@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}
+<main class="page-width">
+  <h1>疑点完整上下文</h1>
+  <p style="white-space:pre-wrap;overflow-wrap:anywhere">{% if context.omitted_before %}…{% endif %}{{ context.before }}<mark>{{ context.marked }}</mark>{{ context.after }}{% if context.omitted_after %}…{% endif %}</p>
+  <a href="{{ url_for('home', item=item_id) }}">返回确认</a>
+</main>
+{% endblock %}

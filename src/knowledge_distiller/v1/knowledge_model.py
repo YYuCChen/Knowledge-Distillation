@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from knowledge_distiller.v1.model_json import parse_model_json
 import re
 from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
@@ -12,9 +13,10 @@ from .llm import AnthropicMessagesClient, LLMRequestError
 
 
 class KnowledgeModelError(RuntimeError):
-    def __init__(self, *args, rejection_reason: str | None = None):
+    def __init__(self, *args, rejection_reason: str | None = None, category: str | None = None):
         super().__init__(*args)
         self.rejection_reason = rejection_reason
+        self.category = category
 
 
 @dataclass(frozen=True)
@@ -39,33 +41,46 @@ class AnthropicKnowledgeModel:
         segments = source_segments(snapshot)
         from .knowledge_presentation import PresentationRecord, prepare
         record = PresentationRecord(self.checkpoint_root, {'snapshot': snapshot, 'uncertainties': list(uncertainties),
-            'system': SYSTEM_PROMPT, 'presentation_rule': 1,
+            'system': SYSTEM_PROMPT, 'presentation_rule': 1, 'max_tokens': 8192,
             'model': getattr(self.client, 'model', None), 'endpoint': getattr(self.client, 'base_url', None),
             'effort': getattr(self.client, 'reasoning_effort', getattr(self.client, 'effort', None)),
             'service_tier': getattr(self.client, 'service_tier', None)})
-        retained = record.pending()
-        if retained is not None:
-            try:
-                return prepare(snapshot, retained, segments, self.client, record)
-            except OSError as error:
-                raise KnowledgeModelError('knowledge_checkpoint_unavailable') from error
+        # Serialize same-source retries through the existing platform lock.
+        # A concurrent caller gets a retryable checkpoint error, never a second
+        # request whose late response could replace the first one's candidate.
+        from contextlib import nullcontext
+        from .file_lock import acquire
         try:
-            text = self.client.complete(
-                system=SYSTEM_PROMPT,
-                user=json.dumps(
-                    {
-                        "source_segments": [{"id": key, "text": snapshot[start:end]}
-                            for key, (start, end) in segments.items()],
-                        "uncertainties": list(uncertainties),
-                    },
-                    ensure_ascii=False,
-                ),
-                max_tokens=8192,
-            )
+            if record.root is not None:
+                record.root.mkdir(parents=True, exist_ok=True)
+                if record.root.is_symlink() or (record.root / '.derive.lock').is_symlink():
+                    raise OSError('knowledge_checkpoint_unsafe')
+            with acquire(record.root / '.derive.lock') if record.root else nullcontext():
+                text = record.pending()
+                if text is None:
+                    request_id = record.receipts.begin()
+                    text = self.client.complete(
+                        system=SYSTEM_PROMPT,
+                        user=json.dumps({
+                            "source_segments": [{"id": key, "text": snapshot[start:end]}
+                                for key, (start, end) in segments.items()],
+                            "uncertainties": list(uncertainties)}, ensure_ascii=False),
+                        max_tokens=8192)
+                    record.receipts.receive(request_id, text)
+                try:
+                    result = prepare(snapshot, text, segments, self.client, record)
+                except KnowledgeModelError as error:
+                    # Display-only failure retains the already-proven parent;
+                    # retry resumes only its requested fields.
+                    if error.args != ('knowledge_presentation_incomplete',):
+                        cause = error.__cause__
+                        category = error.category or getattr(cause, 'category', 'schema_invalid')
+                        record.receipts.mark(text, 'parse_failed' if hasattr(cause, 'category') else 'validation_failed', category=category)
+                    raise
+                record.receipts.mark(text, 'prepared')
+                return result
         except LLMRequestError as error:
             raise KnowledgeModelError(*error.args) from error
-        try:
-            return prepare(snapshot, text, segments, self.client, record)
         except OSError as error:
             raise KnowledgeModelError('knowledge_checkpoint_unavailable') from error
 
@@ -92,9 +107,9 @@ def source_segments(snapshot: str) -> dict[str, tuple[int, int]]:
 
 def parse_knowledge(snapshot: str, text: str, *, image_ids=frozenset(), segments=None) -> Knowledge:
     try:
-        payload = json.loads(text)
+        payload = parse_model_json(text).value
     except (TypeError, ValueError) as error:
-        raise KnowledgeModelError("knowledge_json_invalid") from error
+        raise KnowledgeModelError("knowledge_json_invalid", category=getattr(error, "category", "json_syntax_invalid")) from error
     if not isinstance(payload, Mapping):
         raise KnowledgeModelError("knowledge_json_invalid")
     qualified = payload.get("qualified")
@@ -111,7 +126,10 @@ def parse_knowledge(snapshot: str, text: str, *, image_ids=frozenset(), segments
     try:
         core = _points(payload["core_points"])
         other = _points(payload["other_points"])
-        evidence = _evidence(snapshot, payload["evidence"], image_ids=image_ids, segments=segments)
+        try:
+            evidence = _evidence(snapshot, payload["evidence"], image_ids=image_ids, segments=segments)
+        except (KeyError, TypeError, ValueError) as error:
+            raise KnowledgeModelError("knowledge_structure_invalid", category="evidence_invalid") from error
         knowledge = Knowledge(
             title=_text(display_line(payload["title"])),
             subtitle=_text(display_line(payload["subtitle"])),
@@ -122,7 +140,7 @@ def parse_knowledge(snapshot: str, text: str, *, image_ids=frozenset(), segments
         )
         validate_knowledge(snapshot, knowledge)
     except (KeyError, TypeError, ValueError) as error:
-        raise KnowledgeModelError("knowledge_structure_invalid") from error
+        raise KnowledgeModelError("knowledge_structure_invalid", category="schema_invalid") from error
     return knowledge
 
 

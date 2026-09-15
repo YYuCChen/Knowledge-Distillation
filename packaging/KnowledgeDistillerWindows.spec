@@ -27,7 +27,7 @@ binaries += [(str(tools / 'vc' / name), '.') for name in vc_names]
 # torchvision 0.29 uses _C_stable/image_stable, newer than the PyInstaller hook.
 binaries += collect_dynamic_libs('torchvision', search_patterns=['*.dll', '*.pyd'])
 hiddenimports = ['lark_oapi', 'lark_oapi.event.callback.model.p2_card_action_trigger',
-                 'knowledge_distiller.v1.feishu_socket', 'Crypto.Cipher.AES']
+                 'knowledge_distiller.v1.feishu_socket', 'Crypto.Cipher.AES'] + resources['installer_hiddenimports']('win32')
 for package in ('paddle', 'paddleocr', 'paddlex'):
     # Importing every Paddle training/JIT plugin during collection crashes its
     # Windows native runtime. Preserve its package tree without executing it.
@@ -71,7 +71,7 @@ u = Analysis([str(project / 'packaging/windows_update_entry.py')], pathex=[str(p
                     (str(codec),'tools'),
                     (str(project/'packaging/update_config.json'),'knowledge_distiller/v1/adapters'),
                     (str(project/'src/knowledge_distiller/v1/adapters/docling-models-manifest.json'),'knowledge_distiller/v1/adapters')],
-             hiddenimports=['cryptography.hazmat.primitives.asymmetric.ed25519','win32job'],
+             hiddenimports=['cryptography.hazmat.primitives.asymmetric.ed25519'] + resources['installer_hiddenimports']('win32'),
              excludes=['torch','paddle','docling','flask','tkinter','pytest'])
 upyz = PYZ(u.pure)
 uexe = EXE(upyz,u.scripts,u.binaries,u.datas, [('X utf8',None,'OPTION')],

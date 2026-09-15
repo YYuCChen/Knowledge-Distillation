@@ -16,7 +16,7 @@ while not (opencli/'dist/src/browser/page.js').is_file():
 resources = runpy.run_path(str(project / 'packaging/resources.py'))
 datas = resources['application_datas'](project) + resources['opencli_datas'](opencli)
 binaries = [(shutil.which(name),'bin') for name in ('node','ffmpeg','ffprobe')]
-hiddenimports = []
+hiddenimports = resources['installer_hiddenimports']('darwin')
 for package in ('config','core','storage','utils','auth','tos'):
     data, binary, hidden = collect_all(package)
     datas += data; binaries += binary; hiddenimports += hidden

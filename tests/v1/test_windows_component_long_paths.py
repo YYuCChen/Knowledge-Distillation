@@ -69,7 +69,7 @@ def test_deep_install_copy_cleanup_and_rollback(tmp_path, monkeypatch, reject):
     def acceptance(*args):
         if reject:raise UpdateError('fixture rejection')
     kwargs = dict(platform='windows-x86_64', version='2', target_identity=expected,
-                  launcher=lambda *args:Process(), acceptance=acceptance)
+                  launcher=lambda *args:Process(), acceptance=acceptance, activation=lambda *args:None)
     if reject:
         with pytest.raises(UpdateError, match='fixture rejection'):
             install(candidate, target, tmp_path / 'data', **kwargs)

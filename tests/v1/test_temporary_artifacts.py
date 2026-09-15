@@ -156,3 +156,48 @@ def test_completed_runtime_is_retained_for_shared_pending_owner(tmp_path):
     store.mark_succeeded(shared)
     cleaner.clean_item(item)
     assert not target.exists()
+
+
+def test_long_checkpoint_scope_retained_until_dismissal_then_cleaned(tmp_path):
+    store = Store(tmp_path / 'long-cleanup.sqlite3')
+    store.initialize()
+    item = store.create_item('https://example.invalid/synthetic')
+    root = tmp_path
+    while len(str(root)) < 310:
+        root = root / ('runtime-checkpoint-' + 'x' * 35)
+    cleaner = TemporaryArtifacts(store, root)
+    cleaner.prepare(item)
+    target = cleaner.root / 'items' / str(item)
+    raw = target / 'raw'
+    raw.write_text('synthetic retained source', encoding='utf-8')
+    material = store.attach_material(item, CapturedMaterial('fixture', '1', 'url', 'url', {}, raw, 1))
+    store.establish_source_fact(material, SourceFact('synthetic source fact'))
+    checkpoint = target / 'knowledge' / ('a' * 64)
+    checkpoint.mkdir(parents=True)
+    response = checkpoint / ('b' * 64 + '.json')
+    response.write_text('{"synthetic":true}', encoding='utf-8')
+    assert len(str(response)) > 440
+    store.mark_failed(item, 'distilling', 'knowledge_presentation_incomplete')
+    future = datetime.now(UTC) + timedelta(days=30)
+    cleaner.clean_item(item, now=future)
+    assert response.read_text(encoding='utf-8') == '{"synthetic":true}'
+    assert store.setting(f'temporary_cleanup_item_{item}') is None
+    store.dismiss_item(item)
+    cleaner.clean_item(item, now=future)
+    assert not target.exists()
+    assert store.item_bundle(item)['snapshot'] == 'synthetic source fact'
+    assert store.setting(f'temporary_cleanup_item_{item}') is None
+
+
+def test_lexical_cleanup_root_keeps_symlink_rejection(tmp_path, monkeypatch):
+    store, item, _, target = setup(tmp_path)
+    def forbidden_resolve(*args, **kwargs):
+        raise AssertionError('cleanup paths must not resolve away a link')
+    monkeypatch.setattr(Path, 'resolve', forbidden_resolve)
+    cleaner = TemporaryArtifacts(store, tmp_path / 'runtime')
+    original = type(cleaner.root).is_symlink
+    monkeypatch.setattr(type(cleaner.root), 'is_symlink',
+        lambda path: True if path == cleaner.root else original(path))
+    with pytest.raises(OSError, match='symbolic link'):
+        cleaner._directory(item)
+    assert (target / 'raw').read_text() == '临时敏感正文'

@@ -150,10 +150,11 @@ class ComponentDownloader:
                     progress(received, asset['size'])
                 output.flush()
                 os.fsync(output.fileno())
+        size_mismatch = part.stat().st_size != asset['size']
         if not self.valid(part, asset):
             part.unlink(missing_ok=True)
             metadata.unlink(missing_ok=True)
-            raise UpdateError('组件下载内容校验失败。')
+            raise UpdateError('组件下载大小不符。' if size_mismatch else '组件下载内容校验失败。')
         part.replace(target)
         metadata.unlink(missing_ok=True)
         return target

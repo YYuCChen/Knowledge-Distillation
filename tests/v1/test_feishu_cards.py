@@ -16,7 +16,7 @@ def test_card_choice_then_receipt_does_not_expose_knowledge(inbox):
     intake.process('om_1')
     projection=FeishuCards(inbox,None,None)
     card=projection.card('om_1')
-    assert card['header']['title']['content']=='请选择处理方式'
+    assert card['header']['title']['content']=='待你操作'
     assert {e['behaviors'][0]['value']['choice'] for e in card['body']['elements'] if e['tag']=='button'}=={'text','links'}
     intake.choose('om_1','text');intake.process('om_1')
     assert '说明' not in json.dumps(projection.card('om_1'),ensure_ascii=False)
@@ -27,11 +27,11 @@ def test_unqualified_content_explains_outcome_without_exposing_model_output(inbo
     item=inbox.store.create_item('https://www.douyin.com/video/1',receipt_key=(inbox.app_id,'om_1',0))
     inbox.store.mark_failed(item,'distilling','knowledge_not_qualified',rejection_reason='private model explanation')
     card=FeishuCards(inbox,None,None).card('om_1')
-    assert card['header']['title']['content']=='未生成知识'
+    assert card['header']['title']['content']=='未形成知识'
     assert '没有生成知识笔记' in json.dumps(card,ensure_ascii=False)
     assert 'private model explanation' not in json.dumps(card)
     inbox.store.mark_failed(item,'distilling','model_unavailable')
-    assert '未生成知识' != FeishuCards(inbox,None,None).card('om_1')['header']['title']['content']
+    assert '未形成知识' != FeishuCards(inbox,None,None).card('om_1')['header']['title']['content']
 
 
 def test_pending_audio_form_has_current_token_and_whole_text(inbox):
@@ -102,7 +102,7 @@ def test_whole_review_finish_uses_same_desktop_cas_path(inbox):
     inbox.store.mark_waiting(item,{'snapshot':'已经逐项核对的原文','concerns':[],'review_required':True})
     with connect(inbox.store.path) as db:db.execute("UPDATE feishu_receipts SET card_id='om_card'")
     card=FeishuCards(inbox,None,None).card('om_1')
-    value=card['body']['elements'][-1]['behaviors'][0]['value']
+    value=next(e for e in card['body']['elements'] if e.get('name')=='finish_transcript')['behaviors'][0]['value']
     engine=SimpleNamespace(finish_transcript=Mock(side_effect=lambda *a,**kw:inbox.store.resolve_confirmation(
         item,inbox.store.item_bundle(item)['confirmation_json'],next_confirmation={'snapshot':'核对完成','concerns':[]})))
     payload={'event':{'operator':{'open_id':'ou_owner'},'context':{'open_chat_id':'oc_private','open_message_id':'om_card'},'action':{'value':value}}}
@@ -179,22 +179,19 @@ def test_context_never_guesses_repeated_text_and_bounds_long_excerpt():
     assert concern_context('甲乙甲乙',{'text':'甲乙'}) is None
     original='前'*100+'疑'*10000+'后'*100
     result=concern_context(original,{'text':'疑'*10000,'start':100,'end':10100})
-    assert len(result)<150
+    assert len(result)<230
     assert result.startswith('…'+'前'*12+'【')
     assert result.endswith('】'+'后'*12+'…')
 
 
-def test_context_matches_local_web_twelve_characters_around_local_difference():
+def test_context_preserves_released_card_design():
+    # User decision 2026-09-15: preserve the released compact card verbatim.
     from knowledge_distiller.v1.feishu_cards import concern_context
-    from knowledge_distiller.v1.confirmation_display import local_choices
     phrase='它涉及到君臣辅佐使的配合'
-    snapshot='前'*30+phrase+'后'*30
-    concern={'text':phrase,'start':30,'end':30+len(phrase),
+    snapshot='前'*80+phrase+'后'*80
+    concern={'text':phrase,'start':80,'end':80+len(phrase),
              'candidates':[phrase,'它涉及到君臣佐使的配合']}
-    display=local_choices(concern)
-    assert concern_context(snapshot,concern)==(
-        '…'+snapshot[display['start']-12:display['start']]+'【'+display['text']+'】'+
-        snapshot[display['end']:display['end']+12]+'…')
+    assert concern_context(snapshot,concern)=='…前前前前前前它涉及到君臣【辅】佐使的配合后后后后后后后…'
 
 
 def test_review_fraction_tracks_same_material_across_clients_and_restart(inbox):
@@ -261,3 +258,54 @@ def test_pre_item_error_is_actionable_without_a_nonexistent_desktop_task(inbox):
     assert '该视频仍在直播' in rendered
     assert '重新投递' in rendered
     assert '有项目需要在电脑处理' not in rendered
+
+
+def test_group_card_32_member_capacity_and_visible_callback_scope(inbox):
+    inbox.receive(history_message(message()),history=True)
+    item=inbox.store.create_item('https://www.douyin.com/video/705',receipt_key=(inbox.app_id,'om_1',0))
+    ids=[f'{n:064x}' for n in range(32)]
+    inbox.store.mark_waiting(item,{'snapshot':'词'*32,'concerns':[
+        {'start':n,'end':n+1,'text':'词','audio_name':str(n),'concern_uid':uid,
+         'candidates':['词','字','表达','知识']} for n,uid in enumerate(ids)],
+        'groups':[{'group_id':'g'*64,'member_uids':ids,'equivalence_basis':{'kind':'fixture'}}]})
+    engine=SimpleNamespace(confirmation_audio=lambda *args:'/synthetic/audio.wav')
+    card=FeishuCards(inbox,engine,SimpleNamespace(audio=lambda p:'synthetic-key')).card('om_1')
+    encoded=json.dumps(card,ensure_ascii=False).encode('utf-8')
+    assert len(encoded)<30000
+    assert '同类疑点共' not in encoded.decode()
+    assert '待确认组' not in encoded.decode()
+    assert encoded.decode().count('synthetic-key') == 1
+    def buttons(value):
+        if isinstance(value,dict):
+            if value.get('tag')=='button':yield value
+            for child in value.values():yield from buttons(child)
+        elif isinstance(value,list):
+            for child in value:yield from buttons(child)
+    callbacks=[b['behaviors'][0]['value'] for b in buttons(card) if b.get('behaviors')]
+    assert callbacks and all(c['kind']=='source_confirmation' for c in callbacks)
+    assert all(c['concern_id']=='0' for c in callbacks)
+
+
+def test_long_optional_group_candidates_cannot_overflow_card_or_hide_scope():
+    from knowledge_distiller.v1.feishu_cards import fit_card,button,text
+    elements=[text('同类疑点共 32 处；作用于全部 32 处'),text('完整上下文 1 / 2 段：内容'),
+              button('下段上下文','context_1',{'action':'group_context_page','page':1})]
+    elements.extend(button('长候选','group_choice_'+str(n),{'value':'长'*10000}) for n in range(4))
+    card=fit_card({'body':{'elements':elements},'header':{'title':{'content':'待你操作'}}})
+    value=json.dumps(card,ensure_ascii=False)
+    assert len(value.encode())<30000
+    assert '作用于全部 32 处' in value
+    assert '下段上下文' in value
+    assert 'group_choice_' not in value
+
+
+def test_group_deferred_card_offers_restore_not_finish(inbox):
+    inbox.receive(history_message(message()),history=True)
+    item=inbox.store.create_item('https://www.douyin.com/video/706',receipt_key=(inbox.app_id,'om_1',0))
+    inbox.store.mark_waiting(item,{'snapshot':'词','concerns':[],
+        'deferred_concerns':[{'text':'词','start':0,'end':1,'audio_name':'deferred'}],
+        'review_required':True,'group_confirmation_contract':1})
+    card=FeishuCards(inbox,None,None).card('om_1')
+    value=json.dumps(card,ensure_ascii=False)
+    assert 'restore_deferred' in value
+    assert 'finish_transcript' not in value

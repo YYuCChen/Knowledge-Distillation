@@ -85,6 +85,8 @@ def test_upgrade_preserves_history_preview_does_not_write(tmp_path):
         db.execute("""CREATE TRIGGER source_media_no_update BEFORE UPDATE ON source_media
             WHEN EXISTS(SELECT 1 FROM source_facts WHERE material_id=OLD.material_id)
             BEGIN SELECT RAISE(ABORT,'SourceFact media is immutable'); END""")
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
         db.execute('PRAGMA user_version=15')
     before = store.path.read_bytes()
     report = preview(store.path)

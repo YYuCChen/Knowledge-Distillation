@@ -101,7 +101,7 @@ def test_missing_timeline_never_fabricates_an_audio_location(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("split", [False, True])
-def test_reviewed_fillers_use_bounded_preview_of_enclosing_chunks(tmp_path: Path, split: bool) -> None:
+def test_reviewed_long_target_retains_unavailable_recovery_path(tmp_path: Path, split: bool) -> None:
     audio, _, _, _ = inputs(tmp_path)
     raw = "前文咱干这行应该都这个这个给供应商是这个这个再找售后就不好找了后文"
     candidate = "前文咱干这行应该都……给供应商是……再找售后就不好找了后文"
@@ -110,9 +110,7 @@ def test_reviewed_fillers_use_bounded_preview_of_enclosing_chunks(tmp_path: Path
         chunks = (PrimaryChunk(raw[:16], 0, 10), PrimaryChunk(raw[16:], 10, 20))
     recovery = PrimaryRecovery(raw, "zh", chunks)
     concern = ReviewConcern(2, len(candidate) - 2, candidate[2:-2], "回听", True, ())
-    left, right = locate_concern_audio(audio, recovery, candidate, concern)
-    assert right - left == 10
-    assert 0 <= left < right <= 20
+    assert locate_concern_audio(audio, recovery, candidate, concern) is None
 
 
 def test_unanchored_review_rewrite_has_no_invented_audio_range(tmp_path: Path) -> None:
@@ -133,6 +131,10 @@ def test_cleaned_replacement_boundaries_use_original_enclosing_segment(tmp_path,
     start = candidate.index(reading)
     concern = ReviewConcern(start, start + len(reading), reading, '回听原词', True)
     located = locate_concern_audio(StandardAudio(path, 30), PrimaryRecovery(raw, 'zh', chunks), candidate, concern)
+    if reading == '腰板站直':
+        # The enclosing original target exceeds the ten-second preview.
+        assert located is None
+        return
     assert located is not None
     assert located[1] - located[0] == 10
     assert 5 <= (located[0] + located[1]) / 2 <= 25
@@ -144,7 +146,7 @@ def test_boundary_rounding_noise_does_not_hide_exact_concern(
     path = tmp_path / "standard.wav"
     path.write_bytes(b"standard audio")
     first = PrimaryChunk("前文", 0.0, 35.228750000000005, "zh")
-    second = PrimaryChunk("概率型的这种赌差后文", 35.22875, 50.0, "zh")
+    second = PrimaryChunk("概率型的这种赌差后文", 35.22875, 45.0, "zh")
     text = first.text + second.text
     start = text.index("概率型的这种赌差")
     concern = ReviewConcern(
@@ -166,13 +168,13 @@ def test_boundary_rounding_noise_does_not_hide_exact_concern(
     assert result is not None
 
 
-@pytest.mark.parametrize('start,end,duration', [(0, 1, 30), (12, 14, 30), (28, 30, 30), (1, 2, 4), (5, 28, 30)])
+@pytest.mark.parametrize('start,end,duration', [(0, 1, 30), (12, 14, 30), (28, 30, 30), (1, 2, 4)])
 def test_preview_stays_ten_seconds_even_when_asr_segment_is_long(start, end, duration):
     from knowledge_distiller.v1.confirmation import _preview_window
     left, right = _preview_window(start, end, duration)
     assert 0 <= left < right <= duration
     assert right - left == min(10, duration)
-    assert left <= (start + end) / 2 <= right
+    assert left <= start <= end <= right
 
 
 def test_english_preview_is_local_and_independent_of_word_length(tmp_path):

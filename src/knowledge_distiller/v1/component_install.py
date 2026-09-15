@@ -22,6 +22,36 @@ from .windows_platform import filesystem_path
 from .updates import UpdateError, validate_install_paths, version_key
 
 
+def _sync_journal(path):
+    with path.open('r+b') as stream:
+        os.fsync(stream.fileno())
+    if os.name != 'nt':
+        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(descriptor)
+        finally: os.close(descriptor)
+
+
+def _persist_journal(path, state):
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes
+        from uuid import uuid4
+        temporary = path.with_name('.component-journal-' + uuid4().hex)
+        try:
+            write_record(temporary, state)
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.MoveFileExW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+            kernel.MoveFileExW.restype = wintypes.BOOL
+            # Replace atomically and request write-through metadata before any
+            # paused application is allowed to perform new work.
+            if not kernel.MoveFileExW(str(filesystem_path(temporary)), str(filesystem_path(path)), 0x9):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally: temporary.unlink(missing_ok=True)
+    else:
+        write_record(path, state)
+    _sync_journal(path)
+
+
 def _rename_program(source, target, platform):
     if platform == 'windows-x86_64':
         # Process exit can precede release of Windows DLL/directory handles.
@@ -64,6 +94,84 @@ def accept_startup(process, root, version):
     raise UpdateError('新版本启动验收未通过。')
 
 
+def confirm_activation(root, state):
+    """Observe the accepted instance leaving paused startup, not merely HTTP 200."""
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        try:
+            instance = json.loads((root / '.desktop-instance.json').read_text(encoding='utf-8'))
+            if state.get('pid') is not None and instance['pid'] != state['pid']:
+                raise UpdateError('启动检查实例已变化。')
+            if type(instance['port']) is not int or not 0 < instance['port'] < 65536:
+                raise UpdateError('启动检查端口无效。')
+            status = httpx.get('http://127.0.0.1:' + str(instance['port']) + '/settings/updates/status', timeout=2).json()
+            if (status.get('version') == state.get('version') and status.get('phase') != 'installing'
+                    and status.get('document_component', {'state':'ready'}).get('state') == 'ready'):
+                return
+        except (OSError, ValueError, KeyError, httpx.HTTPError): pass
+        time.sleep(.2)
+    raise UpdateError('新程序已接受，尚未确认启动放行；请恢复安装。')
+
+
+def _outcome(state):
+    return {'accepted': True, 'target': state['target'], 'platform': state['platform'],
+            'target_identity': state['target_identity'], 'version': state.get('version'), 'pid': state.get('pid'),
+            'activation': {'status': 'pending'}, 'finalization': {'status': 'pending'},
+            'cleanup': {'status': 'pending', 'reason': 'no_process_capability'},
+            'shortcut': {'status': 'not_run'}, 'warnings': []}
+
+
+def _finish_accepted(state, root, activation=confirm_activation):
+    """Only called with proven durable accepted state; never restores data."""
+    result = _outcome(state)
+    target = Path(state['target'])
+    updates = root / 'updates'
+    try:
+        if identity(target, state['platform']) != state['target_identity']:
+            raise UpdateError('已接受程序的内容已变化，请通过安装器恢复。')
+        handshake = updates / 'component-startup-handshake'
+        temporary = handshake.with_suffix('.tmp')
+        with temporary.open('w', encoding='utf-8') as stream:
+            stream.write('accepted'); stream.flush(); os.fsync(stream.fileno())
+        temporary.replace(handshake)
+        activation(root, state)
+        result['activation'] = {'status': 'ready'}
+    except Exception as error:
+        result['warnings'].append('安装已接受，启动放行待处理：' + str(error))
+        return result
+    try:
+        previous = target.with_name(target.name + '.component-previous')
+        if previous.exists(): shutil.rmtree(filesystem_path(previous))
+        (updates / 'component-before-install.sqlite3').unlink(missing_ok=True)
+        (updates / 'component-install-journal.json').unlink()
+        result['finalization'] = {'status': 'complete'}
+    except Exception as error:
+        result['warnings'].append('安装已完成，部分事务收尾待处理：' + str(error))
+    return result
+
+
+def finalize_install(outcome, *, capability=None, shortcut=None):
+    """Independent ancillary actions; diagnostics never revoke acceptance."""
+    from .component_attempt import cleanup_attempt
+    if outcome.get('accepted') is not True:
+        return outcome
+    try:
+        if identity(Path(outcome['target']), outcome['platform']) != outcome['target_identity']:
+            raise UpdateError('已接受目标身份已变化，保留本次组装副本。')
+        outcome['cleanup'] = cleanup_attempt(capability, outcome)
+    except Exception as error:
+        outcome['cleanup'] = {'status': 'pending', 'reason': str(error)}
+    if outcome['cleanup']['status'] == 'pending':
+        outcome['warnings'].append('本次组装副本保留：' + outcome['cleanup'].get('reason', '待处理'))
+    if shortcut is not None and outcome['activation']['status'] == 'ready':
+        try: outcome['shortcut'] = shortcut()
+        except Exception as error:
+            outcome['shortcut'] = {'status': 'pending', 'reason': str(error)}
+        if outcome['shortcut']['status'] == 'pending':
+            outcome['warnings'].append('桌面入口待处理：' + outcome['shortcut'].get('reason', ''))
+    return outcome
+
+
 def require_recovered(root):
     journal = Path(root) / 'updates/component-install-journal.json'
     if journal.exists():
@@ -72,7 +180,7 @@ def require_recovered(root):
             raise UpdateError('组件安装被中断，请重新打开安装器完成恢复。知识数据尚未启动处理。')
 
 
-def recover(target, data_root):
+def recover(target, data_root, *, activation=confirm_activation):
     target, root = Path(target), Path(data_root)
     validate_install_paths(root, target)
     updates = root / 'updates'
@@ -85,11 +193,9 @@ def recover(target, data_root):
         stage = target.with_name(target.name + '.component-stage')
         backup = updates / 'component-before-install.sqlite3'
         if state['phase'] == 'accepted':
-            temporary = updates / 'component-startup-handshake.tmp'
-            temporary.write_text('accepted')
-            temporary.replace(updates / 'component-startup-handshake')
-            if previous.exists():
-                shutil.rmtree(filesystem_path(previous))
+            result = _finish_accepted(state, root, activation)
+            result['recovered'] = result['activation']['status'] == 'ready'
+            return result
         else:
             with acquire(root / '.instance.lock'):
                 swapped = previous.exists() or (not state['had_target']
@@ -124,7 +230,7 @@ def recover(target, data_root):
 
 
 def install(candidate, target, data_root, *, platform, version, target_identity,
-            launcher=launch, acceptance=accept_startup):
+            launcher=launch, acceptance=accept_startup, activation=confirm_activation, event=lambda *a, **k:None):
     candidate, target, root = Path(candidate), Path(target), Path(data_root)
     validate_install_paths(root, target)
     from .windows_platform import is_link_or_reparse
@@ -172,7 +278,8 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
         except BlockingIOError as error:
             raise UpdateError('请先正常退出知识蒸馏器，再继续安装；已下载内容会保留。') from error
         try:
-            write_record(journal, state)
+            event('install')
+            _persist_journal(journal, state)
             shutil.copytree(filesystem_path(candidate), filesystem_path(stage), symlinks=True)
             if identity(stage, platform) != target_identity:
                 raise UpdateError('同盘暂存程序校验失败。')
@@ -181,33 +288,45 @@ def install(candidate, target, data_root, *, platform, version, target_identity,
                     source.backup(destination)
                 os.chmod(backup, 0o600)
             state['phase'] = 'replacing'
-            write_record(journal, state)
+            _persist_journal(journal, state)
             if had_target:
                 _rename_program(target, previous, platform)
             swapped = True
             _rename_program(stage, target, platform)
             state['phase'] = 'startup'
-            write_record(journal, state)
+            _persist_journal(journal, state)
             handshake.unlink(missing_ok=True)
             instance.close()
+            event('startup')
             process = launcher(target, root, platform, handshake)
+            state['pid'] = getattr(process, 'pid', None)
             acceptance(process, root, version)
             # Journal acceptance precedes the visible handshake: after this
             # point recovery must never restore a database over possible work.
             state['phase'] = 'accepted'
-            write_record(journal, state)
+            _persist_journal(journal, state)
             accepted = True
-            temporary = handshake.with_suffix('.tmp')
-            temporary.write_text('accepted')
-            temporary.replace(handshake)
-            if previous.exists():
-                shutil.rmtree(filesystem_path(previous))
-            backup.unlink(missing_ok=True)
-            journal.unlink()
-            return {'version': version, 'target_identity': target_identity, 'accepted': True}
-        except BaseException:
+            return _finish_accepted(state, root, activation)
+        except Exception:
+            # write_record may have persisted accepted and then raised (fsync,
+            # injected I/O, etc.). Read the journal before choosing rollback.
+            if state['phase'] == 'accepted':
+                try:
+                    persisted = json.loads(journal.read_text(encoding='utf-8'))
+                    if (persisted.get('target') != state['target'] or
+                            persisted.get('target_identity') != target_identity):
+                        raise ValueError('journal identity mismatch')
+                except Exception as error:
+                    raise UpdateError('安装接受状态无法核实，已保留新程序和恢复材料；请恢复安装。') from error
+                if persisted.get('phase') == 'accepted':
+                    try: _sync_journal(journal)
+                    except OSError as error:
+                        result = _outcome(persisted)
+                        result['warnings'].append('接受记录持久性待确认，保留恢复材料：' + str(error))
+                        return result
+                    return _finish_accepted(persisted, root, activation)
             if accepted:
-                raise  # Leave journal for cleanup/handshake recovery, never rollback.
+                raise
             if process is not None and process.poll() is None:
                 process.terminate()
                 process.wait(timeout=60)

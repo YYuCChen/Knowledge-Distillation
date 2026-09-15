@@ -1,3 +1,4 @@
+from knowledge_distiller.v1.database import SCHEMA_VERSION
 import json
 import shutil
 import subprocess
@@ -172,13 +173,15 @@ def test_v7_upgrade_preserves_queue_and_connections(tmp_path):
         db.execute('DROP TABLE source_review_results')
         db.execute('ALTER TABLE distill_items DROP COLUMN review_revision')
         db.execute('ALTER TABLE distill_items DROP COLUMN platform_authority_json')
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
         db.execute('PRAGMA user_version=7')
     store.initialize()
     assert dict(store.connection('douyin'))==before
     row=store.item_bundle(item)
     assert row['state']=='queued' and row['platform_authority_json']=='{}'
     with connect(path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0]==18
+        assert db.execute('PRAGMA user_version').fetchone()[0]== SCHEMA_VERSION
         assert not db.execute('PRAGMA foreign_key_check').fetchall()
 
 

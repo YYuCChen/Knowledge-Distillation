@@ -1,0 +1,48 @@
+{
+  "id": "SC-QUALITY-AUDIO-PATH",
+  "requirement_ids": [
+    "ENG-20260914-01"
+  ],
+  "symptom": "Windows actual recovery calls use extended drive path labels; the collector falsely rejects equivalent normal and extended anchors as outside the measured probe.",
+  "evidence_state": "native_windows_same_file_pcm_and_validator_red_green_verified",
+  "severity": "S1",
+  "decision": "must_fix_now",
+  "affected_components": [
+    "quality"
+  ],
+  "corruption_or_privacy": "No product data changed; invalid containment classification blocks the quality gate. Device, traversal and outside paths must remain rejected.",
+  "core_path": true,
+  "propagation": [
+    "quality"
+  ],
+  "workaround": null,
+  "verification": [
+    "tests/test_quality.py"
+  ],
+  "owner": "quality",
+  "target": "V1.3",
+  "status": "closed",
+  "original_evidence": "V1.3开发-20260914/audio-evidence/windows-r5-engine-collector-failure.log",
+  "scenario_ids": [
+    "SC-QUALITY--synthetic",
+    "SC-AUDIO-PROBE--engine--windows-x64"
+  ],
+  "closure_scope": "Strict Windows evidence label normalization only. Actual Windows63tests and identical seven-call raw outputs produce old-validator failure/new-validator pass, while original failed passport bytes remain unchanged. This diagnoses the collector fix; final current-source official runs are separate and still required.",
+  "closure_limits": [
+    "No old failed passport is promoted or rewritten.",
+    "All collector-bound snapshots are invalidated and final applicable scenarios must run again; no artifact rebuild is required.",
+    "Actual model recognition differences and original-user audio not_reproduced remain separate."
+  ],
+  "evidence_references": [
+    {
+      "locator": "V1.3开发-20260914/audio-evidence/windows-quality-alias-preflight-result/junit.xml",
+      "sha256": "b0f6e4ddac2ffb06ec8e5fb15a5fe9dbe30b5ad0658298d1819e09f3e6ef9414",
+      "scope": "Actual Windows CPython3.11.16 quality collector positive/negative tests;63 passed."
+    },
+    {
+      "locator": "V1.3开发-20260914/audio-evidence/windows-quality-alias-preflight-result/read-only-validation.json",
+      "sha256": "32f512a04924c3e13d35e6b5b290a9d44e8a1ecf4aa35becf18971ea1186c150",
+      "scope": "Read-only old/new validator comparison against same measured r5 raw outputs; not a new passport or repeated model invocation."
+    }
+  ]
+}

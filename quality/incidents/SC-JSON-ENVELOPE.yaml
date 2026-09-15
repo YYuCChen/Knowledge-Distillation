@@ -1,0 +1,63 @@
+{
+  "id": "SC-JSON-ENVELOPE",
+  "requirement_ids": [
+    "BUG-20260914-04"
+  ],
+  "symptom": "SC-JSON-ENVELOPE frozen regression family",
+  "evidence_state": "module_evidence_recorded_candidate_not_run",
+  "severity": "unknown",
+  "decision": "investigate_only",
+  "affected_components": [
+    "model_json"
+  ],
+  "corruption_or_privacy": "see frozen specification",
+  "core_path": true,
+  "propagation": [
+    "model_json"
+  ],
+  "workaround": null,
+  "verification": [
+    "tests/v1/test_integrated_review_contract.py",
+    "tests/v1/test_json_entrypoints.py",
+    "tests/v1/test_knowledge_model.py",
+    "tests/v1/test_knowledge_presentation.py",
+    "tests/v1/test_model_json.py",
+    "tests/v1/test_ocr_review_policy.py",
+    "tests/v1/test_response_receipts.py",
+    "tests/v1/test_review_response_receipts.py"
+  ],
+  "owner": "A",
+  "target": "V1.3",
+  "status": "module_fixed_candidate_pending",
+  "original_evidence": "窗口5 §12.3 / 窗口6 §7",
+  "synthetic_counterexample": [
+    "tests/v1/test_integrated_review_contract.py",
+    "tests/v1/test_json_entrypoints.py",
+    "tests/v1/test_knowledge_model.py",
+    "tests/v1/test_knowledge_presentation.py",
+    "tests/v1/test_model_json.py",
+    "tests/v1/test_ocr_review_policy.py",
+    "tests/v1/test_response_receipts.py",
+    "tests/v1/test_review_response_receipts.py"
+  ],
+  "expected_assertions": [
+    "existing_registered_test_assertions"
+  ],
+  "scenario_ids": [
+    "SC-JSON-ENVELOPE--synthetic",
+    "SC-JSON-ENVELOPE--macos-arm64--native",
+    "SC-JSON-ENVELOPE--windows-x64--native"
+  ],
+  "review_note": "Registered regressions are execution requirements; this index does not promote old logs into current candidate passports.",
+  "evidence_references": [
+    {
+      "scope": "local delivery index; not a reusable quality passport",
+      "locator": "V1.3开发-20260914/json-evidence/manifest.json",
+      "sha256": "40d0767e96d5cb849a30cc2d2b8abe460ba0a2158c7d3af05e1efa10a85bf154"
+    }
+  ],
+  "remaining_verification": [
+    "SC-JSON-ENVELOPE--macos-arm64--native",
+    "SC-JSON-ENVELOPE--windows-x64--native"
+  ]
+}

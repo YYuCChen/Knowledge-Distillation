@@ -376,3 +376,14 @@ mark {
 .card-chevron:focus-visible img { outline: 1px solid var(--line); outline-offset: 3px; }
 
 .confirmation-head .candidate-count { align-self: flex-start; flex-shrink: 0; line-height: 20px; white-space: nowrap; }
+
+.full-context { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
+.group-confirmation-card { grid-template-columns: 32px minmax(0, 1fr); padding: 16px; }
+.group-confirmation-card label { display: block; margin: 8px 0; overflow-wrap: anywhere; }
+.group-confirmation-card audio { max-width: 100%; }
+.group-confirmation-card input[name="value"] { display: block; max-width: 100%; width: 100%; }
+.group-confirmation-card [data-sync-key^="member-"] { margin-block: 16px; }
+.group-confirmation-card .primary-small,
+.group-confirmation-card .secondary-small { width: auto; min-height: 28px; height: auto; white-space: normal; line-height: 1.4; overflow: visible; }
+.group-confirmation-card .candidate-actions { max-width: 100%; }
+[data-audio-switch] { width: auto; min-height: 28px; height: auto; white-space: normal; line-height: 1.4; overflow: visible; }

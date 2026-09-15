@@ -1,3 +1,4 @@
+from knowledge_distiller.v1.database import SCHEMA_VERSION
 import json
 import sqlite3
 from pathlib import Path
@@ -179,7 +180,7 @@ def test_v1_schema_migrates_existing_queue_order(tmp_path: Path) -> None:
         connection.execute(
             """CREATE TABLE distill_items (
                    item_id INTEGER PRIMARY KEY,
-                   created_at TEXT NOT NULL
+                   created_at TEXT NOT NULL, confirmation_json TEXT
                )"""
         )
         connection.execute(
@@ -188,7 +189,9 @@ def test_v1_schema_migrates_existing_queue_order(tmp_path: Path) -> None:
         connection.execute("CREATE TABLE source_facts (source_fact_id INTEGER PRIMARY KEY, material_id INTEGER)")
         connection.execute("CREATE TABLE source_connections (platform TEXT PRIMARY KEY)")
         connection.execute("CREATE TABLE materials " + SCHEMA.split("CREATE TABLE materials ", 1)[1].split(";", 1)[0])
-        connection.execute("PRAGMA user_version = 1")
+        connection.execute("DROP TABLE IF EXISTS group_decisions")
+        connection.execute("DROP TABLE IF EXISTS manual_cards")
+        connection.execute("PRAGMA user_version=1")
         connection.execute("CREATE TABLE knowledge_results (knowledge_result_id INTEGER PRIMARY KEY, source_fact_id INTEGER)")
 
     from knowledge_distiller.v1.database import initialize
@@ -199,7 +202,7 @@ def test_v1_schema_migrates_existing_queue_order(tmp_path: Path) -> None:
         queued_at = connection.execute(
             "SELECT queued_at FROM distill_items WHERE item_id = 1"
         ).fetchone()[0]
-    assert version == 18
+    assert version == SCHEMA_VERSION
     assert queued_at == "2026-09-05T01:02:03+00:00"
 
 
@@ -231,7 +234,7 @@ def test_v2_migration_does_not_infer_old_publication_destination(tmp_path: Path)
                 published_path TEXT
             );
             INSERT INTO knowledge_results VALUES (1, NULL, '知识蒸馏器/old.md');
-            CREATE TABLE distill_items (item_id INTEGER PRIMARY KEY);
+            CREATE TABLE distill_items (item_id INTEGER PRIMARY KEY, confirmation_json TEXT, created_at TEXT);
             CREATE TABLE source_facts (source_fact_id INTEGER PRIMARY KEY, material_id INTEGER);
             CREATE TABLE source_connections (platform TEXT PRIMARY KEY);
             PRAGMA user_version = 2;
@@ -241,7 +244,7 @@ def test_v2_migration_does_not_infer_old_publication_destination(tmp_path: Path)
     from knowledge_distiller.v1.database import initialize
     initialize(path)
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert connection.execute(
             "SELECT published_path, published_vault FROM knowledge_results"
         ).fetchone() == ("知识蒸馏器/old.md", None)
@@ -269,6 +272,8 @@ def test_v11_migration_preserves_item_and_does_not_invent_rejection_reason(tmp_p
         db.execute('ALTER TABLE distill_items DROP COLUMN rejection_reason')
         for table in ('media_lifecycle','feishu_parts','feishu_receipts','feishu_binding','collection_previews'):
             db.execute(f'DROP TABLE {table}')
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
         db.execute('PRAGMA user_version=11')
         before = dict(db.execute('SELECT * FROM distill_items').fetchone())
     store.initialize()
@@ -277,7 +282,7 @@ def test_v11_migration_preserves_item_and_does_not_invent_rejection_reason(tmp_p
         assert after.pop('rejection_reason') is None
         assert after == before
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 18
+        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
 
 
 def test_v12_dismiss_migration_preserves_existing_failure(tmp_path):
@@ -293,6 +298,8 @@ def test_v12_dismiss_migration_preserves_existing_failure(tmp_path):
         db.execute('ALTER TABLE distill_items DROP COLUMN dismissed_at')
         for table in ('media_lifecycle','feishu_parts','feishu_receipts','feishu_binding','collection_previews'):
             db.execute(f'DROP TABLE {table}')
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
         db.execute('PRAGMA user_version=12')
         before = dict(db.execute('SELECT * FROM distill_items').fetchone())
     store.initialize()
@@ -312,6 +319,8 @@ def test_v13_title_migration_preserves_user_state_and_source_fact(tmp_path):
         db.execute('ALTER TABLE distill_items DROP COLUMN submitted_title')
         for table in ('media_lifecycle','feishu_parts','feishu_receipts','feishu_binding','collection_previews'):
             db.execute(f'DROP TABLE {table}')
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
         db.execute('PRAGMA user_version=13')
         before = dict(db.execute('SELECT * FROM distill_items').fetchone())
     store.initialize()
@@ -367,11 +376,13 @@ def test_previous_release_schema_16_upgrades_and_keeps_facts(store,tmp_path):
     with connect(store.path) as db:
         db.execute('DROP TABLE confirmation_decisions')
         db.execute('DROP TABLE feishu_action_queue')
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
         db.execute('PRAGMA user_version=16')
     store.initialize()
     with connect(store.path) as db:
         # Schema 18 adds complete review results; migration must retain facts.
-        assert db.execute('PRAGMA user_version').fetchone()[0]==18
+        assert db.execute('PRAGMA user_version').fetchone()[0]== SCHEMA_VERSION
         assert db.execute('SELECT snapshot FROM source_facts WHERE source_fact_id=?',(fact,)).fetchone()[0]=='升级必须保留的真实来源。'
         assert db.execute('PRAGMA foreign_key_check').fetchone() is None
         assert db.execute('SELECT count(*) FROM confirmation_decisions').fetchone()[0]==0
@@ -424,13 +435,15 @@ def test_schema_17_adds_review_state_without_inventing_completion(store, tmp_pat
         db.execute('DROP TRIGGER distill_review_revision')
         db.execute('DROP TABLE source_review_results')
         db.execute('ALTER TABLE distill_items DROP COLUMN review_revision')
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
         db.execute('PRAGMA user_version=17')
     store.initialize()
     after = dict(store.item_bundle(item))
     assert after.pop('review_revision') == 0
     assert after == before
     with connect(store.path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 18
+        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         assert db.execute('SELECT count(*) FROM source_review_results').fetchone()[0] == 0
         assert not db.execute('PRAGMA foreign_key_check').fetchall()
 

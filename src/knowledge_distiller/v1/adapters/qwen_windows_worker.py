@@ -1,5 +1,6 @@
 """Optional Windows worker: fixed CPU inference with real EOS qualification."""
 import contextlib
+import array
 import json
 import os
 from pathlib import Path
@@ -50,6 +51,49 @@ def decode_source(processor, generated):
                 postprocessing_changed_text=parsed['transcription'] != text)
 
 
+
+def source_ranges(pcm, rate):
+    """Prefer sustained pauses without dropping or overlapping source frames.
+
+    A fixed twenty-second cut can bisect speech despite a successful EOS.
+    Short plosive closures are not pauses. Without a qualifying pause we keep
+    the bounded original cut; energy is not a certificate of word accuracy.
+    """
+    samples = array.array('h', pcm)
+    if sys.byteorder != 'little':
+        samples.byteswap()
+    count = len(samples)
+    if count <= 20 * rate:
+        return [(0, count)] if count else []
+    window = max(1, rate // 50)
+    energies = [sum(x*x for x in samples[i:i+window]) / len(samples[i:i+window])
+                for i in range(0, count, window)]
+    threshold = max(energies) * 0.0001
+    pauses, begin = [], None
+    for index, energy in enumerate([*energies, float('inf')]):
+        if energy <= threshold:
+            if begin is None:
+                begin = index
+        elif begin is not None:
+            if (index - begin) * window >= 0.06 * rate:
+                pauses.append(min(count, (begin + index) * window // 2))
+            begin = None
+    ranges, start, next_pause = [], 0, 0
+    while start < count:
+        end = min(count, start + 20 * rate)
+        if end < count:
+            latest = None
+            while next_pause < len(pauses) and pauses[next_pause] <= end:
+                if pauses[next_pause] >= start + 5 * rate:
+                    latest = pauses[next_pause]
+                next_pause += 1
+            if latest is not None:
+                end = latest
+        ranges.append((start, end))
+        start = end
+    return ranges
+
+
 def main():
     import runpy
     runpy.run_path(str(Path(__file__).with_name("python_policy.py")))["check_current"]()
@@ -70,12 +114,14 @@ def main():
         if audio.getnchannels() != 1 or audio.getsampwidth() != 2 or audio.getframerate() != 16000:
             raise ValueError('expected_normalized_pcm16_mono_16k')
         total = audio.getnframes()
-        for start in range(0, total, 20 * 16000):
-            end = min(total, start + 20 * 16000)
+        pcm = audio.readframes(total)
+        if len(pcm) != total * 2:
+            raise ValueError('source_pcm_truncated')
+        for start, end in source_ranges(pcm, 16000):
             piece = Path(temporary) / 'chunk.wav'
             with wave.open(str(piece), 'wb') as out:
                 out.setparams(audio.getparams())
-                out.writeframes(audio.readframes(end - start))
+                out.writeframes(pcm[start * 2:end * 2])
             inputs = processor.apply_transcription_request(audio=str(piece)).to('cpu', torch.float32)
             with torch.inference_mode():
                 ids = engine.generate(**inputs, max_new_tokens=1024, do_sample=False)

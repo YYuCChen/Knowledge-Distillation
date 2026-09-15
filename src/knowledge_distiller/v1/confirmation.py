@@ -140,7 +140,7 @@ def locate_concern_audio(
     # the edited text do not identify an occurrence in the original audio.
     aligned = _aligned_chunk_range(audio, recovery, candidate_text, concern, blocks)
     if aligned is not None:
-        return aligned
+        return _preview_window(*aligned, audio.duration_seconds)
     matches: list[tuple[object, int, str]] = []
     for chunk in recovery.chunks:
         for reading in (concern.text, *concern.candidate_readings):
@@ -196,13 +196,10 @@ def _aligned_chunk_range(audio, recovery, candidate_text, concern, blocks=None):
     if recovery.timeline_status == 'recovered_windows':
         # The independent recognizer supplies text for a real bounded window,
         # not word timestamps. Include that entire window; never interpolate.
-        if last.end_seconds - first.start_seconds > 10:
-            return None
-        return _preview_window(first.start_seconds, last.end_seconds, audio.duration_seconds)
-    return _preview_window(
+        return first.start_seconds, last.end_seconds
+    return (
         _estimate_time(first, start - first_offset),
         _estimate_time(last, end - last_offset),
-        audio.duration_seconds,
     )
 
 
@@ -216,10 +213,18 @@ def _estimate_time(chunk, offset: int) -> float:
     return chunk.start_seconds + (chunk.end_seconds - chunk.start_seconds) * position / len(units)
 
 
-def _preview_window(start: float, end: float, duration: float) -> tuple[float, float]:
+def _preview_window(start: float, end: float, duration: float) -> tuple[float, float] | None:
     # Text context length never controls playback length. Keep a ten-second
     # listening window around the concern, shifting at the source boundaries.
+    if not all(math.isfinite(value) for value in (start, end, duration)):
+        return None
+    if not 0 <= start < end <= duration:
+        return None
     length = min(10.0, duration)
+    # A short preview must contain the complete located target. A longer
+    # target remains unavailable so callers retain the recovery path.
+    if end - start > length:
+        return None
     left = max(0.0, min((start + end) / 2 - length / 2, duration - length))
     return left, left + length
 

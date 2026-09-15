@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import time
 
+from .install_problem import problem_from
+from .component_attempt import create_attempt, bind_candidate
 from .component_release import parse_release, plan_release
 from .component_download import ComponentDownloader
 from .docling_component import DoclingComponent, DoclingComponentError
@@ -17,6 +19,7 @@ from .windows_platform import filesystem_path
 class ComponentAssembly:
     def __init__(self, components_root, cache_root, *, platform, public_key, binary_delta=None,
                  windows_tools=None, downloader=None):
+        self.attempts = {}
         self.components_root = Path(components_root)
         self.platform = platform
         self.public_key = public_key
@@ -25,6 +28,10 @@ class ComponentAssembly:
         self.downloader = downloader or ComponentDownloader(cache_root)
 
     def prepare(self, envelope, *, installed=None, current='0'):
+        try: return self._prepare(envelope, installed=installed, current=current)
+        except Exception as error: raise problem_from(error,stage='prepare',role='manifest') from error
+
+    def _prepare(self, envelope, *, installed=None, current='0'):
         release = parse_release(envelope, self.public_key, platform=self.platform, current=current)
         model = DoclingComponent(self.components_root)
         model_id = None
@@ -49,14 +56,20 @@ class ComponentAssembly:
         return release, plan_release(release, verified_current_identity=current_id,
             verified_model_identity=model_id, verified_cached_assets=cached)
 
-    def assemble(self, release, plan, work_root, *, installed=None, cancelled=lambda: False,
-                 progress=lambda received, total: None):
+    def assemble(self, release, plan, work_root, **kwargs):
+        try: return self._assemble(release,plan,work_root,**kwargs)
+        except Exception as error: raise problem_from(error,stage='verify',role='candidate') from error
+
+    def _assemble(self, release, plan, work_root, *, installed=None, cancelled=lambda: False,
+                 progress=lambda received, total: None, event=lambda *a, **k:None):
         """Never stops or replaces an installed application; produces a checked candidate."""
         started = time.monotonic()
         root = Path(work_root)
-        root.mkdir(parents=True, exist_ok=True)
-        if root.is_symlink():
-            raise UpdateError('安装暂存目录无效。')
+        excluded = [self.components_root, self.downloader.root]
+        if installed is not None: excluded.append(installed)
+        capability = create_attempt(root, excluded=excluded)
+        self.attempts[str(root)] = capability
+        event('prepare', attempt_id=capability.attempt_id)
         candidate = root / ('candidate.app' if self.platform == 'macos-arm64' else 'candidate')
         if candidate.exists():
             raise UpdateError('安装暂存目录已存在，请先恢复上次安装。')
@@ -64,7 +77,13 @@ class ComponentAssembly:
         for asset in plan.assets:
             if cancelled():
                 raise InterruptedError('component_assembly_cancelled')
-            assets[asset['sha256']] = self.downloader.fetch(asset, cancelled=cancelled, progress=progress)
+            from urllib.parse import urlsplit
+            event('prepare', asset=urlsplit(asset['url']).path.rsplit('/',1)[-1], bytes_done=0, bytes_total=asset['size'])
+            role = 'base' if asset['sha256'] == release['base']['sha256'] else 'docling' if asset['sha256'] == release['docling']['sha256'] else 'delta'
+            try:
+                assets[asset['sha256']] = self.downloader.fetch(asset, cancelled=cancelled, progress=progress)
+            except Exception as error:
+                raise problem_from(error,stage='prepare',role=role,asset=asset) from error
         model = DoclingComponent(self.components_root)
         if release['docling']['sha256'] in assets:
             model.import_archive(assets[release['docling']['sha256']])
@@ -100,6 +119,7 @@ class ComponentAssembly:
                 subprocess.run([str(self.binary_delta), 'apply', str(baseline), str(candidate),
                                 str(assets[delta['sha256']])], check=True, timeout=900,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        event('verify', bytes_done=0, bytes_total=0, asset='')
         if identity(candidate, self.platform) != release['target_identity']:
             raise UpdateError('最终程序内容校验失败，当前应用未改变。')
         if self.platform == 'macos-arm64':
@@ -110,5 +130,9 @@ class ComponentAssembly:
             version = json.loads((candidate / '_internal/windows-version.json').read_text(encoding='utf-8'))['version']
         if version != release['version']:
             raise UpdateError('最终程序版本不符。')
+        bind_candidate(capability, candidate, release['target_identity'])
         return candidate, {'seconds': time.monotonic() - started, 'download_bytes': plan.download_bytes,
                            'target_identity': release['target_identity']}
+
+    def capability_for(self, candidate):
+        return self.attempts.get(str(Path(candidate).parent))

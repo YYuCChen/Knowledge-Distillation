@@ -1,5 +1,6 @@
 """Collection synthesis with claim-to-item-to-original-evidence lineage."""
 import json
+from knowledge_distiller.v1.model_json import parse_model_json
 
 from knowledge_distiller.content_reading import INDEPENDENT_READING, SOURCE_VOICE
 
@@ -21,7 +22,7 @@ knowledge_result_id必须是提供的整数，point_id必须是相应知识中�
 def call_combined(client, basis):
     response = client.complete(system=PROMPT + INDEPENDENT_READING + SOURCE_VOICE, user=json.dumps({'items': basis}, ensure_ascii=False), max_tokens=8192)
     try:
-        return json.loads(response)
+        return parse_model_json(response).value
     except (ValueError, TypeError) as error:
         raise CollectionError('collection_combined_invalid') from error
 

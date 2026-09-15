@@ -7,6 +7,8 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
+import queue
+import secrets
 from pathlib import Path
 import signal
 import subprocess
@@ -64,6 +66,59 @@ def reveal_browser(url, workspace, native_url, running_applications, activation_
                 application.activateWithOptions_(activation_options)
                 return application.bundleIdentifier()
     return None
+
+
+class NativeReopener:
+    """Keep Cocoa calls on the owner loop and all condition waits off that loop."""
+    def __init__(self, pages, open_page, activate, completed):
+        self.pages, self.open_page, self.activate, self.completed = pages, open_page, activate, completed
+        self.calls = queue.Queue()
+        self.results = queue.Queue()
+        self.running = False
+        self.closed = False
+
+    def _native(self, callback, argument):
+        done, result = threading.Event(), []
+        self.calls.put((callback, argument, done, result))
+        while not done.wait(0.1):
+            if self.closed:
+                raise RuntimeError('desktop closing')
+        if isinstance(result[0], BaseException):
+            raise result[0]
+        return result[0]
+
+    def request(self, explicit_request=None):
+        # Called by the Cocoa main loop, including the queued second launcher.
+        if self.running or self.closed:
+            return False
+        self.running = True
+        def run():
+            try:
+                outcome = self.pages.reopen(
+                    lambda nonce: self._native(self.open_page, nonce),
+                    lambda page: self._native(self.activate, page),
+                    explicit_request=explicit_request)
+                self.results.put(outcome)
+            except Exception:
+                logging.exception('Desktop reopen failed')
+                from .desktop_pages import ReopenOutcome
+                self.results.put(ReopenOutcome('failed', secrets.token_urlsafe(18), reason='native_callback_failed'))
+        threading.Thread(target=run, daemon=True, name='desktop-reopen').start()
+        return True
+
+    def poll(self):
+        while not self.calls.empty():
+            callback, argument, done, result = self.calls.get_nowait()
+            try:
+                result.append(callback(argument))
+            except Exception as error:
+                result.append(error)
+            finally:
+                done.set()
+        while not self.results.empty():
+            outcome = self.results.get_nowait()
+            self.running = False
+            self.completed(outcome)
 
 
 def request_reopen(port, token):
@@ -170,12 +225,11 @@ def main(argv=None):
             raise RuntimeError('浏览器未能打开应用页面')
 
     def reveal(url, bundle_id=None):
-        return app.extensions['desktop_pages'].reopen(
-            lambda: open_url(url),
-            lambda: reveal_browser(url, workspace, NSURL.URLWithString_,
-                workspace.runningApplications,
-                NSApplicationActivateIgnoringOtherApps | NSApplicationActivateAllWindows,
-                bundle_id or browser_bundle_id))
+        # The worker never owns Cocoa objects; tick_ marshals its callbacks.
+        if recovery_alert is not None:
+            native.activateIgnoringOtherApps_(True)
+            return False
+        return reopener.request()
 
 
     try:
@@ -295,12 +349,94 @@ def main(argv=None):
         nonlocal stopped
         if stopped:return
         stopped = True
+        reopener.closed = True
         server.shutdown();server.server_close()
         app.config['KNOWLEDGE_DISTILLER_CLOSE_FEISHU']()
         app.config['KNOWLEDGE_DISTILLER_WORKER'].stop()
         app.config['KNOWLEDGE_DISTILLER_CLOSE_BROWSERS']()
         state_path.unlink(missing_ok=True)
         lock.close();output.flush()
+
+    recovery_alert = None
+    recovery_outcome = None
+
+    def completed(outcome):
+        nonlocal recovery_alert, recovery_outcome
+        logging.info('desktop outcome request=%s status=%s target=%s epoch=%s generation=%s received=%s visible=%s focused=%s reason=%s',
+            outcome.request_id, outcome.status, outcome.target, outcome.connection_epoch,
+            outcome.generation, outcome.received, outcome.visible, outcome.focused, outcome.reason)
+        needs_recovery = outcome.status in {'unknown', 'failed'} or (
+            outcome.status == 'online' and outcome.reason != 'opened_handshake')
+        if not needs_recovery or recovery_alert is not None:
+            return
+        native.activateIgnoringOtherApps_(True)
+        recovery_alert = NSAlert.alloc().init()
+        recovery_alert.setMessageText_('未能显示已有页面' if outcome.status != 'failed' else '暂未打开产品页面')
+        recovery_alert.setInformativeText_('旧页面可能仍保留。你可以重试显示，或另开产品页面；另开可能保留两个页面，原有输入不会被替换。')
+        recovery_alert.addButtonWithTitle_('重试显示')
+        recovery_alert.addButtonWithTitle_('另开产品页面')
+        recovery_alert.addButtonWithTitle_('取消')
+        recovery_outcome = outcome
+        for button, selector in zip(recovery_alert.buttons(),
+                                    ('retryDisplay:', 'openAnotherPage:', 'cancelRecovery:')):
+            button.setTarget_(delegate)
+            button.setAction_(selector)
+        recovery_alert.layout()
+        recovery_alert.window().makeKeyAndOrderFront_(None)
+        # This is a nonmodal native window. The application timer and normal
+        # event loop keep running while it is visible; no runModal/network wait.
+
+    def finish_recovery(action):
+        nonlocal recovery_alert, recovery_outcome
+        if recovery_alert is None:
+            return
+        outcome = recovery_outcome
+        recovery_alert.window().orderOut_(None)
+        recovery_alert = recovery_outcome = None
+        if action == 'retry':
+            reopener.request()
+        elif action == 'new':
+            reopener.request(explicit_request=outcome.request_id)
+
+    def activate_page(page):
+        # The family is only an app-owned UA hint, never PID/ownership evidence.
+        family = {'chrome': 'com.google.Chrome', 'safari': 'com.apple.Safari',
+                  'edge': 'com.microsoft.edgemac', 'firefox': 'org.mozilla.firefox'}
+        return reveal_browser(url, workspace, NSURL.URLWithString_, workspace.runningApplications,
+            NSApplicationActivateIgnoringOtherApps | NSApplicationActivateAllWindows,
+            family.get(page.browser_hint) or browser_bundle_id)
+
+    from urllib.parse import urlencode
+    launch_bundles, browser_instances = {}, {}
+
+    def open_product(nonce):
+        logging.info('desktop open request time=%s request=%s', time.monotonic(), nonce)
+        open_url(url + '?' + urlencode({'_desktop_launch': nonce}))
+        if browser_bundle_id:
+            launch_bundles[nonce] = browser_bundle_id
+
+    def observe_owned_browsers():
+        pages = app.extensions['desktop_pages']
+        # Associate only launches sent by this app, and retain the exact native
+        # instance object; UA family and a changed default are not exit proof.
+        for nonce, bundle_id in list(launch_bundles.items()):
+            matches = [browser for browser in workspace.runningApplications()
+                       if browser.bundleIdentifier() == bundle_id and not browser.isTerminated()]
+            if len(matches) != 1:
+                # Multiple instances/profiles cannot be resolved by bundle ID.
+                continue
+            browser = matches[0]
+            identity = f'{bundle_id}:{browser.processIdentifier()}:{browser.launchDate()}'
+            pages.associate_launch(nonce, identity)
+            browser_instances[identity] = browser
+            del launch_bundles[nonce]
+        for identity, browser in list(browser_instances.items()):
+            if browser.isTerminated():
+                pages.browser_exited(identity)
+                del browser_instances[identity]
+
+    reopener = NativeReopener(app.extensions['desktop_pages'], open_product,
+                             activate_page, completed)
 
     class Delegate(NSObject):
         def applicationDidFinishLaunching_(self, notification):
@@ -312,6 +448,8 @@ def main(argv=None):
         def applicationSupportsSecureRestorableState_(self,application):return True
         def applicationWillTerminate_(self,notification):stop()
         def tick_(self,timer):
+            reopener.poll()
+            observe_owned_browsers()
             if restart_request and time.monotonic() >= restart_request[0][1]:
                 restart_request.clear()
                 relaunch_after_exit()
@@ -330,9 +468,13 @@ def main(argv=None):
                         reveal(url)
                     if updates.info['feed_url'] and updates.info['public_key']:
                         updates.start('check', automatic=True)
+        def retryDisplay_(self,sender):finish_recovery('retry')
+        def openAnotherPage_(self,sender):finish_recovery('new')
+        def cancelRecovery_(self,sender):finish_recovery('cancel')
         def openHome_(self,sender):reveal(url)
         def openSettings_(self,sender):open_url(url+'settings')
         def applicationShouldHandleReopen_hasVisibleWindows_(self,application,visible):
+            logging.info('desktop Dock callback time=%s', time.monotonic())
             if not args.no_open:reveal(url)
             return False
 

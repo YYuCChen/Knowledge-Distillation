@@ -115,3 +115,117 @@ def test_pipeline_retry_retains_item_candidate_and_cleans_after_commit(tmp_path)
     assert store.item_bundle(item)['error_code'] == 'vault_not_configured'
     assert len(second.calls) == 1
     assert not checkpoint.exists()
+
+
+@pytest.mark.parametrize('newline', ['\n', '\r\n'])
+def test_fenced_parent_and_field_recovery_preserve_evidence_and_reuse_prepared(tmp_path, newline):
+    value = payload()
+    value['subtitle'] = value['title']
+    class Fenced(Client):
+        def complete(self, **kwargs):
+            return '```json' + newline + super().complete(**kwargs) + newline + '```'
+    client = Fenced([value, {'subtitle': '损耗的来源与边界。'}])
+    model = AnthropicKnowledgeModel(client, tmp_path)
+    result = model.derive(SOURCE)
+    assert result.core_points[0].argument == value['core_points'][0]['argument']
+    assert result.evidence[0].text == SOURCE
+    assert model.derive(SOURCE) == result
+    assert len(client.calls) == 2
+    states = [json.loads(p.read_text())['state'] for p in tmp_path.glob('*/responses/pending.json')]
+    assert states == ['prepared']
+
+
+def test_interrupted_presentation_save_resumes_received_field_without_new_request(tmp_path, monkeypatch):
+    from knowledge_distiller.v1.knowledge_presentation import PresentationRecord
+    value = payload()
+    value['subtitle'] = value['title']
+    client = Client([value, {'subtitle': '损耗的来源与边界。'}])
+    complete = PresentationRecord.complete
+    def fail(*args, **kwargs):
+        raise OSError('injected result save interruption')
+    monkeypatch.setattr(PresentationRecord, 'complete', fail)
+    with pytest.raises(KnowledgeModelError, match='knowledge_checkpoint_unavailable'):
+        AnthropicKnowledgeModel(client, tmp_path).derive(SOURCE)
+    monkeypatch.setattr(PresentationRecord, 'complete', complete)
+    result = AnthropicKnowledgeModel(client, tmp_path).derive(SOURCE)
+    assert result.evidence[0].text == SOURCE
+    assert len(client.calls) == 2
+
+
+def test_source_or_model_change_starts_new_request_and_preserves_prior_records(tmp_path):
+    client = Client([payload(), payload()])
+    AnthropicKnowledgeModel(client, tmp_path).derive(SOURCE)
+    client.model = 'different-fixture-model'
+    AnthropicKnowledgeModel(client, tmp_path).derive(SOURCE)
+    assert len(client.calls) == 2
+    assert len(list(tmp_path.glob('*/responses/pending.json'))) == 2
+
+
+def test_two_simultaneous_derivations_cannot_replace_each_others_response(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    started, release = Event(), Event()
+    class Slow(Client):
+        def complete(self, **kwargs):
+            started.set()
+            assert release.wait(5)
+            return super().complete(**kwargs)
+    client = Slow([payload()])
+    model = AnthropicKnowledgeModel(client, tmp_path)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(model.derive, SOURCE)
+        assert started.wait(5)
+        try:
+            with pytest.raises(KnowledgeModelError, match='knowledge_checkpoint_unavailable'):
+                model.derive(SOURCE)
+        finally:
+            release.set()
+        result = first.result(5)
+    assert model.derive(SOURCE) == result
+    assert len(client.calls) == 1
+
+
+def test_long_checkpoint_paths_preserve_field_response_across_restart(tmp_path, monkeypatch):
+    """A real >MAX_PATH destination, not a shortened temporary filename/root."""
+    from knowledge_distiller.v1.knowledge_presentation import PresentationRecord
+    from knowledge_distiller.v1.windows_platform import filesystem_path
+    root = tmp_path
+    while len(str(root)) < 310:
+        root = root / ('checkpoint-' + 'x' * 40)
+    value = payload()
+    value['subtitle'] = value['title']
+    client = Client([value, {'subtitle': '损耗的来源与边界。'}])
+    original = PresentationRecord.complete
+    def interrupted(*args, **kwargs):
+        raise OSError('injected final checkpoint interruption')
+    monkeypatch.setattr(PresentationRecord, 'complete', interrupted)
+    with pytest.raises(KnowledgeModelError, match='knowledge_checkpoint_unavailable'):
+        AnthropicKnowledgeModel(client, root).derive(SOURCE)
+    monkeypatch.setattr(PresentationRecord, 'complete', original)
+    result = AnthropicKnowledgeModel(client, root).derive(SOURCE)
+    assert result.evidence[0].text == SOURCE
+    assert len(client.calls) == 2
+    retained = list(filesystem_path(root).glob('*/*.json'))
+    assert any(len(path.stem) == 64 and len(str(path)) > 400 for path in retained)
+    assert all(isinstance(json.loads(path.read_text(encoding='utf-8')), dict) for path in retained)
+    assert list(filesystem_path(root).glob('*/presentation-result.json'))
+    assert not list(filesystem_path(root).rglob('*.tmp'))
+    # The next instance resumes the same physical records, not a new shortened namespace.
+    assert AnthropicKnowledgeModel(client, root).derive(SOURCE) == result
+    assert len(client.calls) == 2
+
+
+def test_checkpoint_path_conversion_does_not_resolve_away_symlink_check(tmp_path, monkeypatch):
+    from pathlib import Path
+    from knowledge_distiller.v1.knowledge_presentation import PresentationRecord
+    def forbidden_resolve(*args, **kwargs):
+        raise AssertionError('record paths must remain lexical')
+    monkeypatch.setattr(Path, 'resolve', forbidden_resolve)
+    record = PresentationRecord(tmp_path, {'snapshot': SOURCE})
+    record.root.mkdir(parents=True)
+    original = type(record.root).is_symlink
+    monkeypatch.setattr(type(record.root), 'is_symlink',
+        lambda path: True if path == record.root else original(path))
+    with pytest.raises(OSError, match='knowledge_checkpoint_unsafe'):
+        record.retain('{}')
+    assert not list(record.root.glob('*.json'))

@@ -1,3 +1,4 @@
+from knowledge_distiller.v1.database import SCHEMA_VERSION
 import copy
 import hashlib
 import json
@@ -279,6 +280,8 @@ def test_v8_migration_preserves_existing_facts_and_connections(tmp_path,image):
             db.execute('DROP TABLE '+table)
         db.execute('DROP TABLE source_media')
         db.execute('ALTER TABLE source_connections DROP COLUMN browser_context')
+        db.execute("DROP TABLE IF EXISTS group_decisions")
+        db.execute("DROP TABLE IF EXISTS manual_cards")
         db.execute('PRAGMA user_version=8')
     store.initialize()
     assert store.item_bundle(item)['snapshot']=='原有来源正文'
@@ -286,7 +289,7 @@ def test_v8_migration_preserves_existing_facts_and_connections(tmp_path,image):
     assert store.connection('douyin')['account_label']=='原连接'
     assert store.connection('douyin')['browser_context'] is None
     with connect(path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0]==18
+        assert db.execute('PRAGMA user_version').fetchone()[0]== SCHEMA_VERSION
         assert db.execute('PRAGMA foreign_key_check').fetchall()==[]
 
 

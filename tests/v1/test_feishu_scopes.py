@@ -27,7 +27,9 @@ def scope_receipt(setup):
 
 def scope_command(inbox,collections):
     card=FeishuCards(inbox,None,None,collections).card('om_1')
-    return card['body']['elements'][-1]['behaviors'][0]['value']
+    return next(b['value'] for element in card['body']['elements']
+                for b in element.get('behaviors', [])
+                if b.get('value', {}).get('kind') == 'scope')
 
 
 def test_scope_command_survives_restart_and_maps_member_confirmation(setup):
@@ -47,7 +49,7 @@ def test_scope_command_survives_restart_and_maps_member_confirmation(setup):
     item=items(inbox,'om_1')[0]['item_id']
     inbox.store.mark_waiting(item,{'snapshot':'已核对原文','concerns':[],'review_required':True})
     card=FeishuCards(inbox,None,None,restored).card('om_1')
-    assert card['header']['title']['content']=='有内容待你确认'
+    assert card['header']['title']['content']=='待你操作'
 
 
 def test_changed_scope_requires_new_confirmation_and_updates_both_entrypoints(setup):
