@@ -198,6 +198,7 @@
         "tests/test_topic_web.py",
         "tests/test_web.py",
         "tests/v1/browser/manual*",
+        "tests/v1/browser/completed_card_browser.py",
         "tests/v1/test_feishu_actions.py",
         "tests/v1/test_feishu_api.py",
         "tests/v1/test_feishu_cards.py",

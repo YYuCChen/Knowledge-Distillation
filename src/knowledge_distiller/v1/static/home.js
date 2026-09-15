@@ -27,6 +27,33 @@ function nodeKey(node) {
   return null;
 }
 
+function retainsLocalWork(node) {
+  return node.nodeType === Node.ELEMENT_NODE &&
+    (node.hasAttribute('data-stale-confirmation') || node.querySelector('[data-stale-confirmation]'));
+}
+
+function preserveCompletedCards(current, next, submittedCard) {
+  for (const card of current.querySelectorAll('.todo-card-shell[data-sync-key^="member-"]')) {
+    if (card.dataset.syncKey === submittedCard ||
+        next.querySelector(`[data-sync-key="${CSS.escape(card.dataset.syncKey)}"]`)) continue;
+    const hasDraft = Array.from(card.querySelectorAll('.manual-confirmation [name="value"]')).some(input => input.value);
+    const playing = Array.from(card.querySelectorAll('audio')).some(audio => !audio.paused && !audio.ended);
+    if (!hasDraft && !playing && !card.hasAttribute('data-stale-confirmation')) continue;
+    card.dataset.staleConfirmation = 'true';
+    card.title = '已在另一端处理，草稿可复制。';
+    for (const input of card.querySelectorAll('input:not([type="hidden"]), textarea')) input.readOnly = true;
+    for (const button of card.querySelectorAll('button:not([data-card-toggle])')) button.disabled = true;
+  }
+  const todo = current.querySelector('[data-sync-key="todo"]');
+  if (todo && retainsLocalWork(todo) && !next.querySelector('[data-sync-key="todo"]')) {
+    for (const card of todo.querySelectorAll('.todo-card-shell:not([data-stale-confirmation])')) card.remove();
+    const heading = todo.querySelector('h2');
+    if (heading) heading.textContent = '已处理';
+    const summary = todo.querySelector('.summary-text');
+    if (summary) summary.textContent = '已在另一端处理，草稿可复制。';
+  }
+}
+
 function reconcile(current, next) {
   if (current.nodeType !== next.nodeType || current.nodeName !== next.nodeName) {
     current.replaceWith(next.cloneNode(true)); return;
@@ -70,7 +97,7 @@ function reconcile(current, next) {
   const keyed = new Map(old.map(node => [nodeKey(node), node]).filter(([key]) => key));
   const incomingKeys = new Set(Array.from(next.childNodes).map(nodeKey).filter(Boolean));
   for (const node of old) {
-    if (nodeKey(node) && !incomingKeys.has(nodeKey(node)) && !node.hasAttribute?.('data-audio-switch')) node.remove();
+    if (nodeKey(node) && !incomingKeys.has(nodeKey(node)) && !node.hasAttribute?.('data-audio-switch') && !retainsLocalWork(node)) node.remove();
   }
   const used = new Set();
   const serverNode = node => { while (node?.hasAttribute?.('data-audio-switch')) node = node.nextSibling; return node; };
@@ -88,10 +115,10 @@ function reconcile(current, next) {
     }
     cursor = serverNode(match.nextSibling);
   }
-  for (const node of old) if (!used.has(node) && node.parentNode === current && !node.hasAttribute?.('data-audio-switch')) node.remove();
+  for (const node of old) if (!used.has(node) && node.parentNode === current && !node.hasAttribute?.('data-audio-switch') && !retainsLocalWork(node)) node.remove();
 }
 
-function applyPage(html, submittedForm) {
+function applyPage(html, submittedForm, submittedCard) {
   const page = new DOMParser().parseFromString(html, 'text/html');
   const current = document.querySelector('#home-results');
   const next = page.querySelector('#home-results');
@@ -116,6 +143,7 @@ function applyPage(html, submittedForm) {
     if (form.elements.value?.value) drafts.set(form.id, form.elements.value.value);
   }
   lastServerHTML = next.innerHTML;
+  preserveCompletedCards(current, next, submittedCard);
   reconcile(current, next);
   if (submittedForm) {
     drafts.delete(submittedForm);
@@ -209,6 +237,7 @@ document.addEventListener('submit', async event => {
   }
   if (!form.closest('#home-results')) return;
   event.preventDefault();
+  if (form.closest('[data-stale-confirmation]')) return;
   if (updating) return;
   if ((form.matches('.manual-confirmation') || (form.matches('[data-group-confirmation]') && event.submitter?.value === 'manual')) && !form.elements.value.value.trim()) {
     const input = form.elements.value;
@@ -237,13 +266,14 @@ document.addEventListener('submit', async event => {
     const html = await response.text();
     if (response.status >= 500) throw new Error(response.headers.get('Content-Type')?.startsWith('text/plain') ? html : '处理暂时失败，已保留输入，请稍后再试。');
     if (!response.ok && !html.includes('id="home-results"')) throw new Error(html);
-    applyPage(html, response.ok ? form.id : null);
+    applyPage(html, response.ok ? form.id : null,
+      response.ok ? form.closest('.todo-card-shell')?.dataset.syncKey : null);
   } catch (error) {
     await window.kdDialog(error.message);
   } finally {
     updating = false;
     if (button) {
-      button.disabled = false;
+      button.disabled = Boolean(button.closest('[data-stale-confirmation]'));
       if (suggesting || recovering) button.textContent = buttonLabel;
     }
   }
