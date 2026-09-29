@@ -20,5 +20,12 @@
 | 知识怎样走向实际应用 | [研究报告与证据](research/2026-09-11-knowledge-to-tools/report.md) |
 | 项目资料怎样筛查、公开和留存 | [资料治理](engineering/project-memory.md) |
 | 为什么分开管理 | [治理决策](decisions/0001-project-authority.md) |
+| **二期现在按什么做（现行依据）** | [决策0004 三方对齐](decisions/0004-phase2-alignment.md) |
+| 应用与知识库之间的接口 | [raw 接口规格](engineering/raw-interface.md) |
+| wiki 侧的完整设计 | [个人知识系统方案](product/phase2-knowledge-system.md)、[vault-kit](../vault-kit/README.md) |
+| 飞书随手记的需求 | [飞书随手记需求说明](roadmap/handoff-feishu-capture.md) |
+| 二期的历史讨论与被部分取代的决策 | [二期讨论进展](roadmap/phase2-discussion.md)、[决策0002](decisions/0002-phase2-knowledge-backbone.md)、[决策0003](decisions/0003-material-foundation.md) |
+
+所有任务先遵守 [AGENTS.md 最高工作原则](../AGENTS.md)：框架对、可用、面向未来即推进；可逆的放手迭代，不可逆的论证清楚。
 
 尚未实现的构想仍有价值；发布包存在不证明所有源码构建路径完整；文档日期不能独立决定其中的意图是否作废。维护时必须保留这些区别。
