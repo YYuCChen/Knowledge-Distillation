@@ -21,14 +21,15 @@ ELIGIBLE = f"""m.source_kind IN {PLATFORMS}
     AND EXISTS (SELECT 1 FROM source_facts sf WHERE sf.material_id=m.material_id)"""
 
 
-def migrate(db):
-    db.execute("""CREATE TABLE media_lifecycle (
-        singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-        legacy_material_id INTEGER NOT NULL,
-        released_bytes INTEGER NOT NULL DEFAULT 0,
-        compacted_bytes INTEGER NOT NULL DEFAULT 0)""")
-    db.execute('INSERT INTO media_lifecycle(singleton,legacy_material_id) SELECT 1,COALESCE(MAX(material_id),0) FROM materials')
-    db.execute('DROP TRIGGER source_media_no_update')
+# raw/ keeps the material's images (schema 20). Bytes are released only after
+# the material's raw file and its attachments were written to the vault, so a
+# vault that is unavailable for a while never loses an image before backfill.
+RAW_WRITTEN = """EXISTS (SELECT 1 FROM raw_records r WHERE r.subject_kind='material'
+        AND r.subject_id=m.material_id AND r.written_at IS NOT NULL)"""
+RELEASABLE = f"{ELIGIBLE} AND {RAW_WRITTEN}"
+
+
+def _release_trigger(db, eligible):
     # Keep the old delete/insert guards. A frozen identity can only lose content,
     # and only once all owners have finished or explicitly dismissed their task.
     db.execute(f"""CREATE TRIGGER source_media_no_update BEFORE UPDATE ON source_media
@@ -37,8 +38,25 @@ def migrate(db):
             AND NEW.position=OLD.position AND NEW.mime_type=OLD.mime_type
             AND NEW.sha256=OLD.sha256 AND length(OLD.content)>0
             AND typeof(NEW.content)='blob' AND length(NEW.content)=0
-            AND EXISTS (SELECT 1 FROM materials m WHERE m.material_id=OLD.material_id AND {ELIGIBLE}))
+            AND EXISTS (SELECT 1 FROM materials m WHERE m.material_id=OLD.material_id AND {eligible}))
         BEGIN SELECT RAISE(ABORT,'SourceFact media is immutable'); END""")
+
+
+def migrate(db):
+    db.execute("""CREATE TABLE media_lifecycle (
+        singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+        legacy_material_id INTEGER NOT NULL,
+        released_bytes INTEGER NOT NULL DEFAULT 0,
+        compacted_bytes INTEGER NOT NULL DEFAULT 0)""")
+    db.execute('INSERT INTO media_lifecycle(singleton,legacy_material_id) SELECT 1,COALESCE(MAX(material_id),0) FROM materials')
+    db.execute('DROP TRIGGER source_media_no_update')
+    _release_trigger(db, ELIGIBLE)
+
+
+def require_raw(db):
+    """Schema 20: the release guard also waits for the written raw file."""
+    db.execute('DROP TRIGGER source_media_no_update')
+    _release_trigger(db, RELEASABLE)
 
 
 def preview(path):
@@ -64,7 +82,7 @@ def release_completed(path):
         rows = db.execute(f"""SELECT m.material_id,SUM(length(sm.content)) AS bytes
             FROM materials m JOIN source_media sm USING(material_id)
             WHERE m.material_id>(SELECT legacy_material_id FROM media_lifecycle WHERE singleton=1)
-            AND {ELIGIBLE} AND length(sm.content)>0 GROUP BY m.material_id""").fetchall()
+            AND {RELEASABLE} AND length(sm.content)>0 GROUP BY m.material_id""").fetchall()
         released = sum(row['bytes'] for row in rows)
         for row in rows:
             db.execute("UPDATE source_media SET content=X'' WHERE material_id=? AND length(content)>0", (row['material_id'],))

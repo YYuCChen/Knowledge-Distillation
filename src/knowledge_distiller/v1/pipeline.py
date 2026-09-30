@@ -869,6 +869,7 @@ class Distiller:
         row = self._item(item_id)
         if row["source_fact_id"] is None:
             return DistillResult(item_id, "waiting_user")
+        self._write_raw(row)
         if row["knowledge_result_id"] is None:
             if self.store.prepare_image_review(item_id):
                 row = self._item(item_id)
@@ -896,6 +897,21 @@ class Distiller:
             raise DistillError("obsidian_target_conflict")
         self.store.mark_succeeded(item_id)
         return DistillResult(item_id, "succeeded")
+
+    def _write_raw(self, row) -> None:
+        """The finished material goes to raw/ (raw-interface §5.1) before any
+        distillation, so a knowledge failure never keeps it out. A raw failure
+        is recorded for backfill and never blocks the V1 note."""
+        try:
+            from .raw import RawLedger
+            ledger = RawLedger(self.store)
+            record = ledger.ensure_material(int(row['material_id']))
+            if record is not None and record['written_at'] is None:
+                ledger.write(record, self.vault)
+        except Exception as error:
+            import logging
+            logging.getLogger(__name__).warning('raw deferred for material %s (%s)',
+                                                row['material_id'], type(error).__name__)
 
     def _knowledge_for_item(self, item_id):
         scope = getattr(self.knowledge_model, 'for_item', None)

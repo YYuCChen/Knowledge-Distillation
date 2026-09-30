@@ -77,8 +77,21 @@ def create_application(
         return configured_organization(store, settings_service.llm_client())
 
     from .temporary_artifacts import TemporaryArtifacts
+    artifacts = TemporaryArtifacts(store, selected_paths.runtime)
+
+    def maintenance():
+        # Backfill raw/ first: a material's media is released only after its raw
+        # file was written (media_lifecycle.RELEASABLE).
+        from .raw import RawLedger
+        try:
+            RawLedger(store).write_pending()
+        except Exception as error:
+            import logging
+            logging.getLogger(__name__).warning('raw backfill deferred (%s)', type(error).__name__)
+        artifacts.sweep()
+
     worker = SingleWorker(store, build_distiller, organization=build_organization,
-                          maintenance=TemporaryArtifacts(store, selected_paths.runtime).sweep)
+                          maintenance=maintenance)
     app = create_app(
         store,
         build_distiller,

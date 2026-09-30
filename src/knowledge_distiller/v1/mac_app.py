@@ -157,7 +157,19 @@ def main(argv=None):
     parser.add_argument('--check-ocr-image', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--check-pdf', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--check-epub', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--migrate-raw', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--vault', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--dry-run', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--report', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.migrate_raw:
+        # One-time, explicit export of existing source facts to raw/外部/.
+        from .raw_migration import main as migrate_raw
+        if args.vault is None:
+            parser.error('--migrate-raw 需要 --vault')
+        raise SystemExit(migrate_raw(['--data-dir', str(args.data_dir), '--vault', str(args.vault)]
+                                     + (['--dry-run'] if args.dry_run else [])
+                                     + (['--report', str(args.report)] if args.report else [])))
     if args.check_runtime:
         from .runtime_probe import check
         raise SystemExit(check(args.check_runtime,args.check_audio,ocr_image=args.check_ocr_image,
