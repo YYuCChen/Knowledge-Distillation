@@ -70,6 +70,7 @@ class SettingsService:
         xpost=None,
         zhihu=None,
         weibo=None,
+        jev_probe=None,
     ):
         from .platform_sessions import PlatformOwnedSession
         def owned(platform):
@@ -94,6 +95,7 @@ class SettingsService:
         self.qwen_component = qwen_component or QwenComponent(store.path.parent / "components" / "qwen")
         self.qwen_probe = qwen_probe or (lambda: self.qwen_component.supported and self.qwen_component.ready())
         self.slot_id = slot_id or (lambda: uuid4().hex)
+        self.jev_probe = jev_probe or _probe_jev
         self._labelled_accounts: set[str] = set()
         self._health: dict[str, tuple[str | None, float, str]] = {}
 
@@ -265,6 +267,7 @@ class SettingsService:
                 "region": values.get("seed_draft_region", ""),
                 "bucket": values.get("seed_draft_bucket", ""),
             },
+            "jev": {"state": self.jev_state()},
             "source_files": {"path": str(self.store.path.parent.resolve() / "source-files")},
             "vault": {
                 **vault_access,
@@ -571,6 +574,40 @@ class SettingsService:
             self.store.set_setting("llm_state", "unavailable")
             return ""
 
+    # ── Jev (TypeSafe): closed-choice work goes to Jev whenever a key is saved
+    # (user decision 2026-09-30); without one each task keeps its original scheme.
+    def jev_state(self) -> str:
+        from .jev import SECRET_ACCOUNT
+        if self.local_secrets.status(SECRET_ACCOUNT) not in {'pending_validation', 'validated'}:
+            return 'unconfigured'
+        return 'unavailable' if self.store.setting('jev_state') == 'unavailable' else 'configured'
+
+    def jev_client(self):
+        """A Jev client when a key is saved, else None. Its failures are reported, never hidden."""
+        if self.jev_state() == 'unconfigured':
+            return None
+        from .jev import JevClient, SECRET_ACCOUNT
+        return JevClient(self.local_secrets(SECRET_ACCOUNT).load, on_unauthorized=self.mark_jev_unavailable)
+
+    def save_jev_key(self, secret: str) -> None:
+        """Check the key with one small question before saving it; the key is never echoed."""
+        from .jev import JevError, SECRET_ACCOUNT
+        secret = secret.strip()
+        if not secret or '\n' in secret or '\r' in secret:
+            raise SettingsError('jev_key_invalid')
+        try:
+            self.jev_probe(secret)
+        except JevError as error:
+            raise SettingsError('jev_key_invalid' if str(error) == 'jev_unauthorized' else 'jev_unreachable') from error
+        try:
+            self.local_secrets(SECRET_ACCOUNT).save_validated(secret)
+        except KeychainError as error:
+            raise SettingsError('model_credentials_save_failed') from error
+        self.store.set_setting('jev_state', 'configured')
+
+    def mark_jev_unavailable(self) -> None:
+        self.store.set_setting('jev_state', 'unavailable')
+
     def mark_llm_unavailable(self) -> None:
         if self.store.setting("llm_model"):
             self.store.set_setting("llm_state", "unavailable")
@@ -578,6 +615,12 @@ class SettingsService:
     def mark_asr_unavailable(self, reason: str = "") -> None:
         if self.store.setting("asr_model"):
             self.store.set_settings({"asr_state": "unavailable", "asr_failure_reason": reason if reason in ASR_FAILURE_TEXT else ""})
+
+
+def _probe_jev(secret):
+    from .jev import JevClient
+    JevClient(lambda: secret, retries=0).choose(
+        '连接测试', instructions='这是一次连接测试，请选择 a。', options={'a': '是', 'b': '否'})
 
 
 class AuthorizedDouyinSession:

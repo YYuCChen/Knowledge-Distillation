@@ -14,7 +14,8 @@ import yaml
 
 from knowledge_distiller.faithful_review import FaithfulReview, FaithfulReviewCandidate, ReviewConcern
 from knowledge_distiller.primary import AudioNormalization, PrimaryRecognition, PrimaryRecovery, StandardAudio
-from knowledge_distiller.v1.captures import Captures, CLOUD_SETTING
+from knowledge_distiller.v1.captures import Captures
+from knowledge_distiller.v1.jev import JevChoice, JevError
 from knowledge_distiller.v1.database import connect
 from knowledge_distiller.v1.feishu_inbox import FeishuInbox, history_message
 from knowledge_distiller.v1.feishu_intake import FeishuIntake
@@ -38,12 +39,26 @@ def world(tmp_path):
                     '-ar', '16000', '-ac', '1', str(audio)], check=True)
     api = SimpleNamespace(downloads=[], download_message_file=lambda message_id, key: (
         api.downloads.append(message_id) or audio.read_bytes()))
-    client = SimpleNamespace(model='judge-model', calls=[], answer={'identity': 'my_thought', 'confidence': 0.95})
-    client.complete = lambda **kwargs: (client.calls.append(kwargs) or json.dumps(client.answer))
-    intake = FeishuIntake(inbox, SimpleNamespace(submit=link_submit(store), collections=None),
-                          api=api, client_factory=lambda: client)
-    return SimpleNamespace(store=store, vault=vault, inbox=inbox, intake=intake, api=api, client=client,
-                           captures=Captures(store, client_factory=lambda: client, api=api), tmp=tmp_path)
+    jev = FakeJev()
+    factory = lambda: jev if jev.configured else None  # SettingsService.jev_client: None without a key.
+    intake = FeishuIntake(inbox, SimpleNamespace(submit=link_submit(store), collections=None), api=api, jev=factory)
+    return SimpleNamespace(store=store, vault=vault, inbox=inbox, intake=intake, api=api, jev=jev, jev_factory=factory,
+                           captures=Captures(store, jev=factory, api=api), tmp=tmp_path)
+
+
+class FakeJev:
+    """Stands in for JevClient.choose; synthetic answers only."""
+
+    def __init__(self):
+        self.configured, self.calls, self.answer, self.error = False, [], ('my_thought', 0.95), None
+
+    def choose(self, state, *, instructions, options):
+        self.calls.append((state, options))
+        if self.error:
+            raise JevError(self.error)
+        choice, probability = self.answer
+        rest = {name: round((1 - probability) / (len(options) - 1), 4) for name in options if name != choice}
+        return JevChoice(choice, probability, {choice: probability, **rest}, probability, 'jev-1.13.0')
 
 
 def link_submit(store):
@@ -77,14 +92,14 @@ def capture_of(world, mid):
 
 # ───────────────────────── Scenarios ─────────────────────────
 
-def test_plain_text_thought_with_cloud_judgment_goes_to_self(world):
-    world.store.set_setting(CLOUD_SETTING, 'on')
+def test_plain_text_thought_judged_by_jev_goes_to_self(world):
+    world.jev.configured = True
     assert send(world, 'om_t1', text='我觉得很多成功学其实也是事后解释，不对，应该说是先有结果再找理由。') == 'accepted'
     self_files = raw_files(world, '自述')
     assert len(self_files) == 1 and raw_files(world, '外部') == []
     env = envelope(self_files[0])
     assert (env['身份'], env['作者'], env['渠道']) == ('本人', '本人', '飞书文字')
-    assert env['身份判定'] == {'结果': '本人', '依据': '模型·judge-model', '置信度': 0.95, '用户改判': '无'}
+    assert env['身份判定'] == {'结果': '本人', '依据': 'Jev·jev-1.13.0', '置信度': 0.95, '用户改判': '无'}
     # 原话不做整理稿: the exact words, including the self-correction.
     assert '我觉得很多成功学其实也是事后解释，不对，应该说是先有结果再找理由。\n\n^source-1' in self_files[0].read_text(encoding='utf-8')
     assert env['编号'] == capture_of(world, 'om_t1')['raw_id']
@@ -95,8 +110,8 @@ def test_plain_text_thought_with_cloud_judgment_goes_to_self(world):
 
 
 def test_undecided_short_text_waits_for_the_desk_and_is_never_assumed_mine(world):
-    world.store.set_setting(CLOUD_SETTING, 'on')
-    world.client.answer = {'identity': 'my_thought', 'confidence': 0.7}  # Not sure enough.
+    world.jev.configured = True
+    world.jev.answer = ('my_thought', 0.7)  # Not sure enough.
     send(world, 'om_s1', text='明天再说')
     capture = capture_of(world, 'om_s1')
     assert world.captures.identity(capture['capture_id'])['result'] == 'pending'
@@ -109,17 +124,32 @@ def test_undecided_short_text_waits_for_the_desk_and_is_never_assumed_mine(world
     env = envelope(raw_files(world, '自述')[0])
     assert env['身份判定']['依据'] == '用户' and env['身份判定']['用户改判'] == '有'
     events = world.captures.events(capture['capture_id'])
-    assert [(e['result'], e['basis']) for e in events] == [('pending', '规则未决'), ('my_thought', '用户')]
+    assert [(e['result'], e['basis']) for e in events] == [('pending', 'Jev·jev-1.13.0·把握不足·my_thought'),
+                                                           ('my_thought', '用户')]
+    assert events[0]['confidence'] == 0.7
     assert '身份待定' not in client.get('/').get_data(as_text=True)
 
 
-def test_cloud_switch_off_uses_rules_only(world):
-    assert world.store.setting(CLOUD_SETTING) is None  # Off unless the user enables it.
+def test_without_jev_only_rules_decide_and_nothing_leaves_the_machine(world):
+    assert world.jev.configured is False  # No key saved: the original scheme.
     send(world, 'om_o1', text='这个想法值得记一下')
     capture = capture_of(world, 'om_o1')
     event = world.captures.identity(capture['capture_id'])
-    assert event['result'] == 'pending' and event['basis'] == '规则未决·云端判断关闭'
-    assert world.client.calls == []  # Nothing private was sent to a model.
+    assert event['result'] == 'pending' and event['basis'] == '规则未决·未配置 Jev'
+    assert world.jev.calls == []  # Nothing private was sent to a model.
+
+
+def test_jev_failure_is_reported_on_the_desk_and_logged(world, caplog):
+    world.jev.configured, world.jev.error = True, 'jev_busy'
+    with caplog.at_level('ERROR'):
+        send(world, 'om_e1', text='要不要换个方向')
+    capture = capture_of(world, 'om_e1')
+    assert world.captures.identity(capture['capture_id'])['basis'] == 'Jev 失败·jev_busy'
+    assert any('Jev judgment failed (jev_busy)' in record.getMessage() for record in caplog.records)
+    from knowledge_distiller.v1.web import create_app
+    home = create_app(world.store, object()).test_client().get('/').get_data(as_text=True)
+    assert 'Jev 服务繁忙，这条没能自动判断。' in home and 'capture-error' in home
+    assert raw_files(world, '自述') == []  # An error never becomes a guess.
 
 
 def test_large_pasted_third_party_text_never_enters_the_personal_layer(world):
@@ -189,42 +219,27 @@ def voice_service(world, concerns=()):
     return service, reviewer
 
 
-def test_voice_thought_with_a_concern_keeps_the_asr_original_and_releases_audio_after(world):
-    world.store.set_setting(CLOUD_SETTING, 'on')
+def test_voice_note_is_not_reviewed_and_keeps_the_asr_original(world):
+    # User decision 2026-09-30: their own voice notes are not sent to the LLM for review.
+    world.jev.configured = True
     concern = ReviewConcern(4, 6, '十身', '可能是"十神"', True, ('十神',))
     assert send(world, 'om_v1', voice=True, at=10) == 'accepted'
     capture = capture_of(world, 'om_v1')
     assert world.captures.identity(capture['capture_id'])['basis'] == '规则·语音默认本人'
+    assert world.jev.calls == []  # Rules decide voice; nothing is asked.
     assert Path(capture['audio_path']).is_file() and world.api.downloads == ['om_v1']
     service, reviewer = voice_service(world, (concern,))
-    item = capture['item_id']
-    assert service.run(item).state == 'waiting_user'
-    transcript = world.captures.transcript(capture['capture_id'])
-    assert transcript['text'] == '呃我觉得十身这个说法不太对' and transcript['engine']
-    assert raw_files(world, '自述') == []  # Concerns first; raw only for finished captures.
-    assert Path(capture_of(world, 'om_v1')['audio_path']).is_file()  # Kept for listening back.
-    from .test_pipeline import confirmation_token
-    assert service.resolve(item, 'candidate', '十神', token=confirmation_token(world.store, item)).state == 'queued'
-    assert service.run(item).state == 'succeeded'
-    text = raw_files(world, '自述')[0].read_text(encoding='utf-8')
-    env = envelope(raw_files(world, '自述')[0])
-    assert env['渠道'] == '飞书语音' and env['身份'] == '本人'
-    assert env['订正'] == [{'片段': 'source-1', '原识别': '十身', '订正为': '十神', '方式': '用户核对'}]
-    assert '呃我觉得十神这个说法不太对\n\n^source-1' in text  # Fillers kept, correction applied.
-    assert world.captures.transcript(capture['capture_id'])['text'] == '呃我觉得十身这个说法不太对'
-    released = capture_of(world, 'om_v1')
-    assert released['audio_released_at'] and not Path(released['audio_path']).exists()
-    assert world.store.item_bundle(item)['knowledge_result_id'] is None  # Own words, not a V1 note.
-
-
-def test_voice_with_cloud_off_skips_model_review(world):
-    send(world, 'om_v2', voice=True)
-    capture = capture_of(world, 'om_v2')
-    service, reviewer = voice_service(world, (ReviewConcern(0, 1, '呃', '语气词', True),))
     assert service.run(capture['item_id']).state == 'succeeded'
     assert reviewer.calls == 0
+    transcript = world.captures.transcript(capture['capture_id'])
+    assert transcript['text'] == '呃我觉得十身这个说法不太对' and transcript['engine']
+    text = raw_files(world, '自述')[0].read_text(encoding='utf-8')
     env = envelope(raw_files(world, '自述')[0])
-    assert '订正' not in env and env['取得方式']['识别']
+    assert env['渠道'] == '飞书语音' and env['身份'] == '本人' and '订正' not in env and env['取得方式']['识别']
+    assert '呃我觉得十身这个说法不太对\n\n^source-1' in text  # The words as recognized, fillers kept.
+    released = capture_of(world, 'om_v1')
+    assert released['audio_released_at'] and not Path(released['audio_path']).exists()
+    assert world.store.item_bundle(capture['item_id'])['knowledge_result_id'] is None  # Own words, not a V1 note.
 
 
 def test_link_then_annotation_records_adjacency_and_target(world):
@@ -257,7 +272,7 @@ def finish_link(world, item_id):
 
 
 def test_three_fragments_in_two_minutes_stay_separate_and_unchanged(world):
-    world.store.set_setting(CLOUD_SETTING, 'on')
+    world.jev.configured = True
     for index, (mid, text) in enumerate([('om_f1', '先写一个开头'), ('om_f2', '然后是中间的想法'),
                                          ('om_f3', '最后补一句结论')]):
         send(world, mid, text=text, at=index * 50)
@@ -273,22 +288,22 @@ def test_three_fragments_in_two_minutes_stay_separate_and_unchanged(world):
 
 
 def test_redelivery_and_restart_never_duplicate(world):
-    world.store.set_setting(CLOUD_SETTING, 'on')
+    world.jev.configured = True
     send(world, 'om_r1', text='只记一次的想法')
     send(world, 'om_r1', text='只记一次的想法')  # History replay of the same message id.
-    restarted = Captures(Store(world.store.path), client_factory=lambda: world.client)
+    restarted = Captures(Store(world.store.path), jev=world.jev_factory)
     assert restarted.write_ready() == {}
     assert world.intake.process('om_r1') == 'accepted'
     with connect(world.store.path) as db:
         assert db.execute('SELECT count(*) FROM captures').fetchone()[0] == 1
         assert db.execute('SELECT count(*) FROM raw_records').fetchone()[0] == 1
-    assert len(raw_files(world, '自述')) == 1 and len(world.client.calls) == 1
+    assert len(raw_files(world, '自述')) == 1 and len(world.jev.calls) == 1
 
 
 # ───────────────────────── Irreversible guarantees ─────────────────────────
 
 def test_capture_records_are_immutable(world):
-    world.store.set_setting(CLOUD_SETTING, 'on')
+    world.jev.configured = True
     send(world, 'om_i0', text='https://www.douyin.com/video/101')
     send(world, 'om_i1', text='不可改的原话', at=10)  # Rows exist, so each guard is exercised.
     with connect(world.store.path) as db:
@@ -300,7 +315,7 @@ def test_capture_records_are_immutable(world):
 
 
 def test_changing_a_written_decision_supersedes_and_keeps_the_old_file(world):
-    world.store.set_setting(CLOUD_SETTING, 'on')
+    world.jev.configured = True
     send(world, 'om_l2', text='https://www.douyin.com/video/101', at=0)
     finish_link(world, world.store.recent_items()[0]['item_id'])
     send(world, 'om_c1', text='这条先存着以后看', at=30)
@@ -331,19 +346,6 @@ def test_window_is_configurable(world):
     send(world, 'om_w2', text='两分钟后的想法', at=120)
     with connect(world.store.path) as db:
         assert db.execute("SELECT count(*) FROM delivery_adjacency WHERE message_id='om_w2'").fetchone()[0] == 0
-
-
-def test_settings_toggle_controls_the_cloud_judge(world):
-    from knowledge_distiller.v1.settings import SettingsService
-    from knowledge_distiller.v1.web import create_app
-    client = create_app(world.store, object(), SettingsService(world.store, qwen_probe=lambda: True)).test_client()
-    page = client.get('/settings?open=paths').get_data(as_text=True)
-    assert '随手记云端判断' in page and '已关闭' in page and '启用此判断' in page
-    assert client.post('/settings/capture-judgment', data={'action': 'enable'}).status_code == 302
-    assert world.store.setting(CLOUD_SETTING) == 'on'
-    assert '关闭此判断' in client.get('/settings?open=paths').get_data(as_text=True)
-    client.post('/settings/capture-judgment', data={'action': 'disable'})
-    assert world.store.setting(CLOUD_SETTING) == 'off'
 
 
 def test_browser_desk_decision_writes_the_note_and_clears_the_card(world):

@@ -332,9 +332,17 @@ mark {
   min-width: 0;
 }
 
+/* Type roles from the design master: Knowledge/Title for the decision point,
+   Confirmation/Fragment for the original words, UI/Error, UI/Meta. */
 .capture-content > .capture-point {
-  font: 400 10px/15px "Noto Sans SC", sans-serif;
-  color: #4d4c48;
+  font: 600 14px/20px "Noto Serif SC", serif;
+  letter-spacing: 1.4px;
+  color: var(--text);
+}
+
+.capture-content > .capture-error {
+  font: 400 11px/16.5px "Noto Sans SC", sans-serif;
+  color: #a83224;
 }
 
 .capture-content > .capture-text {

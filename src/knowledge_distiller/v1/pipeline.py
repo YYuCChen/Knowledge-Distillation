@@ -759,16 +759,16 @@ class Distiller:
         review_revision = self._item(item_id)['review_revision']
         if kind == 'feishu_voice':
             # The ASR original is part of the immutable capture record (4.1).
-            from .captures import Captures, CLOUD_SETTING, asr_identity
+            from .captures import Captures, asr_identity
             engine, model, version = asr_identity(self.store)
             captures = Captures(self.store)
             voice = captures.for_item(item_id)
             if voice is not None:
                 captures.record_transcript(voice['capture_id'], recognition.recovery,
                                            engine=engine, model=model, version=version)
-        if kind == 'feishu_voice' and self.store.setting(CLOUD_SETTING) != 'on':
-            # Private words are sent to a cloud model only when the user enabled it;
-            # without review there are no model-flagged concerns to check.
+        if kind == 'feishu_voice':
+            # The user checks their own voice notes before sending; they are not
+            # sent to the LLM for review (user decision 2026-09-30).
             from knowledge_distiller.faithful_review import FaithfulReview, FaithfulReviewCandidate
             review = FaithfulReview.succeeded(FaithfulReviewCandidate(recognition.recovery.text, ()))
         else:

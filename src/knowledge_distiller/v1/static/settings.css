@@ -169,7 +169,8 @@
   margin: 0;
 }
 
-.model-setting > summary {
+.model-setting > summary,
+.jev-setting > summary {
   cursor: pointer;
   list-style: none;
 }
@@ -269,8 +270,13 @@
 #llm-form .codex-connect { grid-column: 1; justify-self: start; }
 #llm-save, #asr-save, .asr-key-form button { grid-column: 2; }
 .asr-key-form .model-secret { grid-column: 1; }
+/* Jev: the key and its save button on one line (user design 2026-09-30). */
+.jev-form { grid-template-columns: minmax(0, 1fr) max-content; }
+.jev-form .model-secret { grid-column: 1; }
+.jev-form button { grid-column: 2; }
 @media (max-width: 720px) {
-  #llm-form .codex-connect, #llm-save, #asr-save, .asr-key-form button { grid-column: 1; }
+  #llm-form .codex-connect, #llm-save, #asr-save, .asr-key-form button, .jev-form .model-secret, .jev-form button { grid-column: 1; }
+  .jev-form { grid-template-columns: 1fr; }
 }
 
 #llm-form[data-provider="codex"] .model-provider { grid-column: 1; grid-row: 1; }
@@ -300,11 +306,10 @@
 .feishu-fields input { width: 100%; min-width: 0; box-sizing: border-box; }
 .feishu-fields a { display: inline-block; margin-top: 0; }
 
-.reading-style-configuration > .setting-row, .capture-judgment-configuration > .setting-row { border-bottom: 0; }
+.reading-style-configuration > .setting-row { border-bottom: 0; }
 .reading-style-configuration > summary { cursor: pointer; list-style: none; }
 .reading-style-configuration > summary::-webkit-details-marker { display: none; }
-.feishu-configuration .secondary-button, .reading-style-configuration .secondary-button,
-.capture-judgment-configuration .secondary-button { justify-self: end; width: max-content; }
+.feishu-configuration .secondary-button, .reading-style-configuration .secondary-button { justify-self: end; width: max-content; }
 .feishu-fields label { font-size: 11px; color: var(--ink); }
 .feishu-fields input { height: 24px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--card); color: var(--ink); font-size: 11px; }
 .feishu-fields input::placeholder { color: #737b83; }

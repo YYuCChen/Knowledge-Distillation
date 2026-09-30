@@ -9,10 +9,10 @@ from .intake import needs_content_choice, links_in, platform_for_url
 
 
 class FeishuIntake:
-    def __init__(self, inbox, links, *, wake=None, api=None, client_factory=None):
+    def __init__(self, inbox, links, *, wake=None, api=None, jev=None):
         self.inbox, self.links, self.wake = inbox, links, wake
         self.api = api
-        self.client_factory = client_factory
+        self.jev = jev
 
     def choose(self,message_id,content_kind):
         if content_kind not in {'links','text'}:
@@ -44,7 +44,7 @@ class FeishuIntake:
         if row['state'] not in {'received','waiting_input'}:
             return row['state']
         from .captures import Captures
-        captures = Captures(self.inbox.store, client_factory=self.client_factory, api=self.api)
+        captures = Captures(self.inbox.store, jev=self.jev, api=self.api)
         capture = captures.for_message(self.inbox.app_id, message_id)
         if capture is not None:
             return self._capture(key, captures, capture)

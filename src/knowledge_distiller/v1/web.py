@@ -668,14 +668,27 @@ def _home_context(
     }
 
 
+JEV_ERRORS = {
+    'jev_unauthorized': 'Jev 没有接受 API Key，请在设置中更换密钥。',
+    'jev_busy': 'Jev 服务繁忙，这条没能自动判断。',
+    'jev_request_failed': '连不上 Jev，这条没能自动判断。',
+    'jev_response_invalid': 'Jev 返回的结果不完整，这条没能自动判断。',
+    'jev_request_invalid': 'Jev 不接受这次请求，这条没能自动判断。',
+    'jev_secret_unavailable': '读取不到 Jev API Key，这条没能自动判断。',
+}
+
+
 def _pending_captures(store):
     """Quick notes whose identity only the user can decide (never assumed to be theirs)."""
-    from .captures import Captures
+    from .captures import Captures, JEV_FAILED
     captures = Captures(store)
     views = []
     for capture in captures.pending():
         received = datetime.fromtimestamp(capture['received_ms'] / 1000, UTC).astimezone()
-        views.append({'id': capture['capture_id'], 'text': capture['text'] or '',
+        basis = (captures.identity(capture['capture_id']) or {}).get('basis') or ''
+        # A Jev failure is an error to report and fix, shown as such (user decision 2026-09-30).
+        error = JEV_ERRORS.get(basis[len(JEV_FAILED):], 'Jev 判断出错，这条没能自动判断。') if basis.startswith(JEV_FAILED) else None
+        views.append({'id': capture['capture_id'], 'text': capture['text'] or '', 'error': error,
                       'received': f'{received.month} 月 {received.day} 日  {received:%H:%M}',
                       'annotation': captures.recent_delivery(capture) is not None})
     return views

@@ -41,6 +41,7 @@ class JevClient:
     retries: int = 2
     post: Callable | None = None  # httpx.post-compatible; injected in tests
     sleep: Callable[[float], None] = time.sleep
+    on_unauthorized: Callable[[], None] = lambda: None
 
     def choose(self, state, *, instructions: str, options: dict) -> JevChoice:
         """One choice question; ``options`` maps each option name to its description."""
@@ -84,6 +85,7 @@ class JevClient:
                 self.sleep(2 ** attempt)
                 continue
             if status in {401, 403}:
+                self.on_unauthorized()
                 raise JevError('jev_unauthorized')
             if status == 422:
                 raise JevError('jev_request_invalid')

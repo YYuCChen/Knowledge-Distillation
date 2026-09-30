@@ -75,8 +75,9 @@ MESSAGES = {
     "youtube_login_required": "请先在当前 Chrome 会话登录 YouTube，再次连接。",
     "source_files_opened": "",
     "source_files_open_failed": "未能打开原文件副本目录，请检查应用数据目录。",
-    "capture_cloud_enabled": "随手记云端判断已启用：规则判不了的随手记会发给当前模型判断身份。",
-    "capture_cloud_disabled": "随手记云端判断已关闭：只用规则，判不了的随手记进待处理。",
+    "jev_saved": "Jev 已启用：随手记身份判断和整理时的历史召回改由 Jev 完成。",
+    "jev_key_invalid": "Jev 没有接受这个 API Key，请检查后重新保存。",
+    "jev_unreachable": "暂时连不上 Jev，API Key 未保存，请稍后再试。",
     "douyin_browser_missing": "未找到 Google Chrome，请先安装后连接抖音。",
     "douyin_browser_unavailable": "抖音专用浏览器未能启动，请重新连接。",
     "douyin_connected": "抖音连接已更新。",
@@ -149,7 +150,6 @@ def settings_blueprint(service: SettingsService) -> Blueprint:
             windows_runtime=sys.platform == "win32",
             settings=view,
             reading_style_state=state(view.get('vault',{}).get('path')),
-            capture_cloud=(getattr(service, 'store', None) and service.store.setting('capture_cloud_judgment')) or 'off',
             feishu=current_app.extensions['feishu'].status() if 'feishu' in current_app.extensions else None,
             return_to=_return_to(request.args.get("return_to", "")),
             message=MESSAGES.get(message_key),
@@ -176,7 +176,7 @@ def settings_blueprint(service: SettingsService) -> Blueprint:
                 "qwen_install_started",
                 "vault_saved",
                 "reading_style_installed", "reading_style_disabled",
-                "capture_cloud_enabled", "capture_cloud_disabled",
+                "jev_saved",
                 "feishu_configuration_saved",
                 "feishu_receipt_renewed",
                 "feishu_pairing_started",
@@ -187,12 +187,13 @@ def settings_blueprint(service: SettingsService) -> Blueprint:
             draft_llm=request.args.get("llm", ""),
         )
 
-    @blueprint.post('/settings/capture-judgment')
-    def capture_judgment():
-        # Quick notes are the user's most private words: the cloud judge runs only when enabled.
-        enabled = request.form.get('action') == 'enable'
-        service.store.set_settings({'capture_cloud_judgment': 'on' if enabled else 'off'})
-        return _back('capture_cloud_enabled' if enabled else 'capture_cloud_disabled', 'paths')
+    @blueprint.post('/settings/jev')
+    def save_jev():
+        try:
+            service.save_jev_key(request.form.get('api_key', ''))
+        except SettingsError as error:
+            return _back(str(error), 'models')
+        return _back('jev_saved', 'models')
 
     @blueprint.post('/settings/feishu')
     def configure_feishu():

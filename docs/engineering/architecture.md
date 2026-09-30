@@ -16,6 +16,8 @@
 | OCR与选装ASR | `v1/ocr.py`、`v1/vision_ocr.py`、`v1/qwen_component.py`及适配器 |
 | 更新 | `v1/updates.py`、`v1/update_web.py`及打包辅助模块 |
 | raw/ 写入与存量迁移 | `v1/raw.py`、`v1/raw_migration.py`（[raw 接口规格](raw-interface.md)） |
+| 飞书随手记 | `v1/captures.py`、`v1/capture_schema.py`（[需求第 7 节](../roadmap/handoff-feishu-capture.md#7-实现与验收第-2-阶段2026-09-29)） |
+| Jev 封闭判断（随手记身份、历史召回） | `v1/jev.py`、`v1/jev_recall.py`（[Jev 说明](jev.md)） |
 
 入口导入v1.app；V1仍复用根包的primary等模块。不能因代码在v1之外或看起来年代较早就删除。
 

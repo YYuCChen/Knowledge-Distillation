@@ -74,7 +74,7 @@ def create_application(
 
     def build_organization():
         from .organization import configured_organization
-        return configured_organization(store, settings_service.llm_client())
+        return configured_organization(store, settings_service.llm_client(), jev=settings_service.jev_client())
 
     from .temporary_artifacts import TemporaryArtifacts
     artifacts = TemporaryArtifacts(store, selected_paths.runtime)
@@ -87,7 +87,7 @@ def create_application(
         from .captures import Captures
         import logging
         for step in (lambda: RawLedger(store).write_pending(),
-                     lambda: Captures(store, client_factory=settings_service.llm_client).write_ready()):
+                     lambda: Captures(store, jev=settings_service.jev_client).write_ready()):
             try:
                 step()
             except Exception as error:
@@ -116,7 +116,7 @@ def create_application(
     install_desktop_pages(app)
     from .feishu_service import FeishuService
     feishu=FeishuService(store,app.extensions['link_intake'],build_distiller,selected_paths.runtime,wake=worker.wake,
-                         client_factory=settings_service.llm_client)
+                         jev=settings_service.jev_client)
     app.extensions['feishu']=feishu
     app.extensions['qwen_component']=settings_service.qwen_component
     app.config['KNOWLEDGE_DISTILLER_CLOSE_FEISHU']=feishu.stop

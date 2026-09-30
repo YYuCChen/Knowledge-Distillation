@@ -185,7 +185,8 @@
               <div class="todo-card-shell" data-sync-key="capture-{{ capture.id }}"><article class="todo-card failure-card capture-card">
                 <span class="todo-index">{{ cards.index }}</span>
                 <div class="todo-content capture-content">
-                  <span class="capture-point">身份待定：请选择这条消息是谁的话。</span>
+                  <span class="capture-point">身份待定：这条消息是谁的话？</span>
+                  {% if capture.error %}<span class="capture-error" role="alert">{{ capture.error }}</span>{% endif %}
                   <p class="capture-text">{{ capture.text }}</p>
                   <span class="capture-meta">飞书随手记 · {{ capture.received }}</span>
                 </div>

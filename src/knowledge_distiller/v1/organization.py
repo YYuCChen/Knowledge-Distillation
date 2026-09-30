@@ -122,7 +122,8 @@ class GrowthRuntime:
         return GrowthRuntimeResult(text, 'end_turn')
 
 
-def configured_organization(store, client):
+def configured_organization(store, client, jev=None):
+    """``jev``: a JevClient when a key is saved; recall then runs on Jev (v1/jev_recall.py)."""
     from knowledge_distiller.growth_modeling import HistoricalRecallAdapter, RelationInsightAdapter
     from .topic_model import TopicModel
     from .llm import OpenAIResponsesClient
@@ -135,8 +136,10 @@ def configured_organization(store, client):
     from .structured_calls import StructuredCalls
     calls = StructuredCalls(client, store.path.parent / "runtime" / "organization" if store else None)
     runtime = GrowthRuntime(client, calls)
+    from .jev_recall import JevRecallRuntime
+    recall = HistoricalRecallAdapter(JevRecallRuntime(jev) if jev is not None else runtime)
     return build_organization(store, topic_indexer=TopicModel(client, calls),
-        recall_planner=HistoricalRecallAdapter(runtime), relation_insight_planner=RelationInsightAdapter(runtime), diagnostics=calls)
+        recall_planner=recall, relation_insight_planner=RelationInsightAdapter(runtime), diagnostics=calls)
 
 
 class PresentationPlanner:

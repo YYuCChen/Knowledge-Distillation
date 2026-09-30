@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 IDENTITIES = {'my_thought': '本人', 'annotation': '本人附言', 'third_party': '第三方'}
 SETTLE_HOURS = 24
 DEFAULT_WINDOW_MINUTES = 30
-CLOUD_SETTING = 'capture_cloud_judgment'
 WINDOW_SETTING = 'capture_adjacency_minutes'
+JEV_FAILED = 'Jev 失败·'  # Basis prefix of a pending event after a Jev error.
 
 _ANNOTATION = re.compile(r'(这篇|这个视频|这条|这期|这段|这本|这集|这个链接|上面|刚才那|刚发的|重点看|前半|后半|'
                          r'第.{1,3}(段|分钟|部分|章)|注意看|值得看|可以看看|先存着|回头看)')
@@ -93,37 +93,6 @@ def rule_judgment(capture, *, recent_delivery):
     return None
 
 
-class CloudIdentityJudge:
-    """Replaceable judge on the configured model; used only when the user enabled it."""
-
-    PROMPT = ('判断一条用户发给自己私聊机器人的消息属于哪一类：my_thought（用户自己的想法、感受、计划）、'
-              'third_party（转发或粘贴的他人内容）、annotation（对刚投递的材料的附言，例如"这篇重点看后半段"）、'
-              'unknown（无法判断）。只返回 JSON：{"identity": 类别, "confidence": 0 到 1 的数}。'
-              '不要改写或评价消息，拿不准就返回 unknown。')
-
-    def __init__(self, client):
-        self.client = client
-
-    def judge(self, text, *, recent_delivery):
-        from .model_json import parse_model_json
-        answer = self.client.complete(system=self.PROMPT, user=json.dumps(
-            {'message': text, 'just_after_a_delivery': recent_delivery is not None}, ensure_ascii=False), max_tokens=200)
-        value = parse_model_json(answer).value
-        identity, confidence = value.get('identity'), value.get('confidence')
-        if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
-            return None
-        confidence = float(confidence)
-        basis = '模型·' + (getattr(self.client, 'model', '') or '未记录')
-        # Undecided never becomes "mine"; the bar for my_thought is the highest.
-        if identity == 'my_thought' and confidence >= 0.9:
-            return 'my_thought', basis, confidence, None
-        if identity == 'third_party' and confidence >= 0.8:
-            return 'third_party', basis, confidence, None
-        if identity == 'annotation' and confidence >= 0.8 and recent_delivery is not None:
-            return 'annotation', basis, confidence, recent_delivery
-        return None
-
-
 class JevIdentityJudge:
     """The same decision as a closed choice on TypeSafe Jev (v1/jev.py).
 
@@ -142,13 +111,15 @@ class JevIdentityJudge:
 
     def __init__(self, client):
         self.client = client
+        self.last = None
 
     def judge(self, text, *, recent_delivery):
         options = dict(self.OPTIONS)
         if recent_delivery is None:
             options.pop('annotation')
-        answer = self.client.choose({'message': text, 'just_after_a_delivery': recent_delivery is not None},
-                                    instructions=self.INSTRUCTIONS, options=options)
+        answer = self.last = self.client.choose(
+            {'message': text, 'just_after_a_delivery': recent_delivery is not None},
+            instructions=self.INSTRUCTIONS, options=options)
         basis = 'Jev·' + answer.model
         if answer.choice == 'my_thought' and answer.probability >= 0.9:
             return 'my_thought', basis, answer.probability, None
@@ -160,9 +131,9 @@ class JevIdentityJudge:
 
 
 class Captures:
-    def __init__(self, store, *, client_factory=None, api=None, audio_root: Path | None = None):
+    def __init__(self, store, *, jev=None, api=None, audio_root: Path | None = None):
         self.store = store
-        self.client_factory = client_factory
+        self.jev = jev  # () -> JevClient | None (SettingsService.jev_client)
         self.api = api
         self.audio_root = audio_root or store.path.parent / 'runtime' / 'captures'
 
@@ -210,9 +181,6 @@ class Captures:
                 ORDER BY a.gap_seconds LIMIT 1''', (capture['app_id'], capture['message_id'])).fetchone()
         return row['earlier_message_id'] if row else None
 
-    def cloud_enabled(self):
-        return self.store.setting(CLOUD_SETTING) == 'on' and self.client_factory is not None
-
     # ── decisions ──
     def _event(self, capture_id, result, basis, confidence=None, target=None):
         with connect(self.store.path) as db:
@@ -221,18 +189,32 @@ class Captures:
                        (capture_id, result, basis, confidence, target, datetime.now(UTC).isoformat()))
 
     def judge(self, capture):
-        """Rules, then the cloud judge if enabled; otherwise the desk decides."""
+        """Rules first; then Jev when a key is saved (user decision 2026-09-30).
+
+        Without Jev the desk decides whatever the rules cannot. A Jev failure is
+        an error to fix: it is logged and shown on the desk card, never replaced
+        by a guess or another model.
+        """
         if self.identity(capture['capture_id']) is not None:
             return self.identity(capture['capture_id'])
         target = self.recent_delivery(capture)
         decided = rule_judgment(capture, recent_delivery=target)
-        if decided is None and self.cloud_enabled():
+        client = self.jev() if decided is None and self.jev is not None else None
+        if decided is None and client is not None:
+            from .jev import JevError
+            judge = JevIdentityJudge(client)
             try:
-                decided = CloudIdentityJudge(self.client_factory()).judge(capture['text'], recent_delivery=target)
-            except Exception as error:
-                logger.warning('capture %s cloud judgment unavailable (%s)', capture['capture_id'], type(error).__name__)
+                decided = judge.judge(capture['text'], recent_delivery=target)
+            except JevError as error:
+                logger.error('capture %s Jev judgment failed (%s)', capture['capture_id'], error)
+                self._event(capture['capture_id'], 'pending', JEV_FAILED + str(error))
+                return self.identity(capture['capture_id'])
+            if decided is None:
+                self._event(capture['capture_id'], 'pending', f'Jev·{judge.last.model}·把握不足·{judge.last.choice}',
+                            judge.last.probability)
+                return self.identity(capture['capture_id'])
         if decided is None:
-            self._event(capture['capture_id'], 'pending', '规则未决' + ('' if self.cloud_enabled() else '·云端判断关闭'))
+            self._event(capture['capture_id'], 'pending', '规则未决·未配置 Jev')
         else:
             self._event(capture['capture_id'], decided[0], decided[1], decided[2], decided[3])
         return self.identity(capture['capture_id'])

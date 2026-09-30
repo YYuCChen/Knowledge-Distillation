@@ -182,6 +182,23 @@
         {% include 'qwen_setup.html' %}
         <div id="doubao-credentials">{% include 'doubao_onboarding.html' %}</div>
       </details>
+
+      {% set jev = settings.jev|default({'state': 'unconfigured'}) %}
+      <details class="jev-setting" {% if open_group == 'models' and request.args.get('message', '').startswith('jev_') %}open{% endif %}>
+        <summary class="setting-row model-row">
+          <span class="state-dot {{ jev.state }}" aria-hidden="true"></span>
+          <strong>Jev</strong>
+          <span>TypeSafe</span>
+          <span class="model-name">jev-latest</span>
+          <span class="status-text">{{ {'configured': '已配置', 'unavailable': '不可用', 'unconfigured': '未配置'}[jev.state] }}</span>
+          <span class="row-actions"><span class="secondary-button">{{ '配置模型' if jev.state == 'unconfigured' else '更换密钥' }}</span></span>
+        </summary>
+        <form class="model-form jev-form" action="{{ url_for('settings.save_jev') }}" method="post">
+          <input type="hidden" name="return_to" value="{{ return_to }}">
+          <label class="model-secret">API Key<input type="password" name="api_key" autocomplete="new-password" placeholder="不会回显已保存的密钥" required></label>
+          <button class="outline-button">保存并启用</button>
+        </form>
+      </details>
     </details>
 
     <details id="path-settings" class="setting-group" {% if open_group == 'paths' %}open{% endif %}>
@@ -243,16 +260,6 @@
           <strong title="为导出的笔记应用字体与段落排版">Obsidian排版</strong>
           <span class="vault-path" role="status"{% if request.args.get('message', '').startswith('reading_style_') and message_error %} title="{{ message }}"{% endif %}>{{ '更改未完成' if request.args.get('message', '').startswith('reading_style_') and message_error else {'enabled':'已启用', 'disabled':'已关闭', 'unavailable':'无法读取状态', 'update_available':'可更新'}.get(reading_style_state, '未启用') }}</span>
           <span class="row-actions"><button class="secondary-button">{{ '关闭此排版' if reading_style_state == 'enabled' else '更新此排版' if reading_style_state == 'update_available' else '启用此排版' }}</button></span>
-        </form>
-      </div>
-      <div class="capture-judgment-configuration">
-        <form class="setting-row vault-row" action="{{ url_for('settings.capture_judgment') }}" method="post">
-          <input type="hidden" name="return_to" value="{{ return_to }}">
-          <input type="hidden" name="action" value="{{ 'disable' if capture_cloud == 'on' else 'enable' }}">
-          <span class="state-dot {{ 'configured' if capture_cloud == 'on' else 'unconfigured' }}" aria-hidden="true"></span>
-          <strong title="判断飞书随手记是你的想法、转来的内容还是附言。关闭时只用规则，判不了的进待处理，不会自动归为你的想法。">随手记云端判断</strong>
-          <span class="vault-path" role="status">{{ '已启用' if capture_cloud == 'on' else '已关闭' }}</span>
-          <span class="row-actions"><button class="secondary-button">{{ '关闭此判断' if capture_cloud == 'on' else '启用此判断' }}</button></span>
         </form>
       </div>
       <details class="feishu-configuration" {% if open_group == 'paths' and (request.args.get('message', '').startswith('feishu_') or request.args.get('setup') == 'feishu') %}open{% endif %}>

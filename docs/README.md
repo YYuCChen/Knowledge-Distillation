@@ -26,6 +26,7 @@
 | 应用与知识库之间的接口 | [raw 接口规格](engineering/raw-interface.md) |
 | wiki 侧的完整设计 | [个人知识系统方案](product/phase2-knowledge-system.md)、[vault-kit](../vault-kit/README.md) |
 | 飞书随手记的需求 | [飞书随手记需求说明](roadmap/handoff-feishu-capture.md) |
+| 哪些判断交给 Jev、没配置或出错时怎样 | [Jev 说明](engineering/jev.md) |
 | 二期的历史讨论与被部分取代的决策 | [二期讨论进展](roadmap/phase2-discussion.md)、[决策0002](decisions/0002-phase2-knowledge-backbone.md)、[决策0003](decisions/0003-material-foundation.md) |
 
 所有任务先遵守 [AGENTS.md 最高工作原则](../AGENTS.md)：框架对、可用、面向未来即推进；可逆的放手迭代，不可逆的论证清楚。
