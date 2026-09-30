@@ -203,8 +203,25 @@ def _iso(moment: datetime) -> str:
 
 
 def _published(value):
+    """产生于 from the platform's own value: epoch numbers (Zhihu seconds, Xiaohongshu
+    milliseconds), ISO or RFC 2822 / Twitter-style text; a bare date (YouTube's
+    upload_date) stays a date because its time and zone are unknown."""
+    if isinstance(value, str) and value.strip().isdigit() and len(value.strip()) != 8:
+        value = int(value.strip())
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            seconds = value / 1000 if value > 1e11 else value
+            return _iso(datetime.fromtimestamp(seconds, UTC).astimezone()) if seconds > 0 else None
+        except (OverflowError, OSError, ValueError):
+            return None
     if not isinstance(value, str) or not value.strip():
         return None
+    value = value.strip()
+    if re.fullmatch(r'\d{8}|\d{4}-\d{2}-\d{2}', value):
+        try:
+            return datetime.strptime(value.replace('-', ''), '%Y%m%d').date().isoformat()
+        except ValueError:
+            return None
     try:
         try:
             parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
@@ -215,14 +232,16 @@ def _published(value):
     return _iso(parsed) if parsed.tzinfo is not None else None
 
 
-def _title(metadata, lineage, snapshot):
+def _title(metadata, lineage, snapshot, kind=None):
     for value in (metadata.get('source_title'), lineage.get('native_title')):
         if isinstance(value, str) and value.strip():
             return ' '.join(value.split())
     description = metadata.get('original_description')
     if isinstance(description, str) and description.strip():
         return ' '.join(description.strip().splitlines()[0].split())[:60]
-    if isinstance(metadata.get('submitted_name'), str) and metadata['submitted_name'].strip():
+    # Pasted text has no file: its submitted_name is only the channel label.
+    if (kind != 'direct_text' and isinstance(metadata.get('submitted_name'), str)
+            and metadata['submitted_name'].strip()):
         return metadata['submitted_name'].strip()
     return ' '.join(snapshot.split())[:20] or '（无标题）'
 
@@ -300,7 +319,7 @@ def render_material(row, available, raw_id: str, *, app_version: str, migrated: 
         record['来源笔记'] = row['published_path']
     fields = [
         ('编号', raw_id), ('格式版本', FORMAT_VERSION), ('身份', '第三方'),
-        ('标题', _title(metadata, lineage, snapshot)), ('作者', _author(metadata)),
+        ('标题', _title(metadata, lineage, snapshot, kind)), ('作者', _author(metadata)),
         ('渠道', CHANNELS.get(kind, kind)),
         ('原链接', url if urlsplit(url or '').scheme in {'http', 'https'} else None),
         ('产生于', _published(metadata.get('published_at'))), ('收录于', _iso(collected)),

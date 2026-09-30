@@ -105,6 +105,15 @@ def test_each_channel_writes_a_valid_envelope_and_v1_paragraphs(store, kind, cha
     assert '\r' not in text and text.endswith('\n')
 
 
+def test_untitled_sources_take_the_file_name_or_the_opening_words(store):
+    # Found in the phase 3 end-to-end run: every pasted text was titled "直接文本".
+    pasted = material(store, 'direct_text', '反馈回路越短，学习越快。写代码时，编译器几秒钟就告诉你哪里错了。',
+                      key='t1', url='', metadata={'submitted_name': '直接文本', 'user_declared': {}})
+    upload = material(store, 'markdown', '正文。', key='t2', url='', metadata={'submitted_name': '读书笔记.md'})
+    assert split(written(store, pasted)[1])[0]['标题'] == '反馈回路越短，学习越快。写代码时，编译器'
+    assert split(written(store, upload)[1])[0]['标题'] == '读书笔记.md'
+
+
 def test_image_sources_embed_bytes_at_their_place_and_list_released_ones(store):
     snapshot = '配文第一段。\n\n[图片 image-1 OCR]\n图片里的文字'
     start = snapshot.index('图片里的文字')
@@ -362,3 +371,17 @@ def test_packaged_command_line_runs_the_same_migration(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as done:
         mac_app.main(['--migrate-raw', '--data-dir', str(store.path.parent), '--vault', str(vault)])
     assert done.value.code == 0 and len(list((vault / 'raw').rglob('*.md'))) == 1
+
+
+@pytest.mark.parametrize('value,expected', [
+    (1727600000, datetime.fromtimestamp(1727600000).astimezone().isoformat(timespec='seconds')),  # Zhihu
+    (1727600000123, datetime.fromtimestamp(1727600000).astimezone().isoformat(timespec='seconds')),  # Xiaohongshu
+    ('20240918', '2024-09-18'),  # YouTube upload_date: the date is known, the time is not.
+    ('Wed Oct 10 20:19:24 +0000 2018', '2018-10-10T20:19:24+00:00'),  # X, Weibo
+    ('2026-08-03T20:14:00+08:00', '2026-08-03T20:14:00+08:00'),
+    ('2026-08-03T20:14:00', None), (True, None), ('', None), ('明天', None),
+])
+def test_publication_time_keeps_what_the_platform_gave(value, expected):
+    # Found while checking the phase 3 run: 20 of 57 materials in a V1.3 data copy
+    # (Zhihu, Xiaohongshu, YouTube) would have lost 产生于.
+    assert raw._published(value) == expected
