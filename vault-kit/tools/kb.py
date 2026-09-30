@@ -9,6 +9,7 @@
     python tools/kb.py init        初始化目录结构、七个主题页和系统页
     python tools/kb.py             完整运行：补填字段、生成图谱、重写自动内容、检查
     python tools/kb.py --dry-run   只检查，不修改任何文件
+    python tools/kb.py raw-id      取一个新的 raw 素材编号（Agent 新建 AI 对话素材时用）
 
 它做的事：
     1. 补填程序字段：编号、类型、创建、更新
@@ -17,7 +18,8 @@
     4. 重写所有"（自动）"小节、各主题页、index.md、待确认.md
     5. 程序检查，结果写入 .graph/检查结果.md
 
-它永远不会读写 raw/ 以外的原始文件内容，也永远不会修改 raw/。
+它只读取 raw/ 中素材的信封与段落编号，永远不会修改 raw/。raw 的格式见应用仓库的
+docs/engineering/raw-interface.md（守则 AGENTS.md 第 2.1 节有摘要）。
 """
 
 import argparse
@@ -101,6 +103,8 @@ SKILL_IDLE_DAYS = 90
 
 LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]")
 RAW_RE = re.compile(r"raw/[^\s)）\]】，,；;。|]+")
+RAW_ID_RE = re.compile(r"R-(\d{8})-(\d{4})")
+BLOCK_RE = re.compile(r"^\^([A-Za-z0-9-]+)\s*$", re.M)
 EVOLUTION_RE = re.compile(r"^\s*-\s*(\d{4}-\d{2}-\d{2})\s*\|(.*)$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -186,11 +190,41 @@ def section_name(head):
 
 
 def extract_links(line):
-    return [m.strip() for m in LINK_RE.findall(line)]
+    # [[raw/…]] 形式的原始素材引用由 extract_raw 处理，不当作页面标题。
+    return [m.strip() for m in LINK_RE.findall(line) if not m.strip().startswith("raw/")]
 
 
 def extract_raw(line):
     return [m.rstrip("/") for m in RAW_RE.findall(line)]
+
+
+def raw_file(ref):
+    """raw/…/编号.md#^source-3 → (raw/…/编号.md, source-3)。"""
+    path, _, block = ref.partition("#")
+    return path, block.lstrip("^") or None
+
+
+def read_envelope(path):
+    """raw 素材信封中的单行字段（编号、身份、标题、取代等）。"""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return {}, set()
+    fm, body = split_frontmatter(text)
+    meta = {}
+    for line in fm or []:
+        m = re.match(r"^([^\s:#-][^:]*):\s*(.*)$", line)
+        if not m:
+            continue
+        value = m.group(2).strip()
+        if value.startswith('"'):
+            # 应用把自由文本写成 JSON 形式的双引号字符串（合法 YAML）。
+            try:
+                value = json.loads(value)
+            except ValueError:
+                value = value.strip('"')
+        meta[m.group(1).strip()] = value
+    return meta, set(BLOCK_RE.findall(body))
 
 
 def visible_length(body_lines):
@@ -297,6 +331,39 @@ class Vault:
         self.events = []     # dict(页面, 日期, 动作, 内容, 起因, 状态)
         self.issues = []     # (级别, 类别, 说明)
         self.changes = {"补填字段": 0, "更新时间": 0, "重写自动内容": 0}
+        self.raws = {}       # 路径 → (信封, 段落编号集合)
+        self.superseded = {} # 被取代的编号 → 取代它的文件路径
+
+    def load_raw(self):
+        """读取 raw/ 中每份素材的信封与段落编号；取代关系以最新文件为准。"""
+        if not self.raw.is_dir():
+            return
+        by_id = {}
+        for f in sorted(self.raw.rglob("*.md")):
+            rel = f.relative_to(self.root).as_posix()
+            meta, blocks = read_envelope(f)
+            self.raws[rel] = (meta, blocks)
+            if meta.get("编号"):
+                by_id.setdefault(meta["编号"], []).append(rel)
+        for rid, paths in by_id.items():
+            if len(paths) > 1:
+                self.issue("错误", "素材编号重复", f"编号 {rid} 同时用于 " + "、".join(paths))
+        for rel, (meta, _) in self.raws.items():
+            old = meta.get("取代")
+            if old:
+                self.superseded[old] = rel
+                if old not in by_id:
+                    self.issue("提醒", "取代对象不存在", f"{rel} 取代的 {old} 不在 raw/ 中")
+
+    def current_raw(self, rel):
+        """沿取代关系找到最新的一份素材。"""
+        seen = set()
+        meta = self.raws.get(rel, ({}, set()))[0]
+        while meta.get("编号") in self.superseded and rel not in seen:
+            seen.add(rel)
+            rel = self.superseded[meta["编号"]]
+            meta = self.raws.get(rel, ({}, set()))[0]
+        return rel
 
     # ── 读取 ──
     def load(self):
@@ -497,8 +564,14 @@ class Vault:
         for e in self.edges:
             t = e["到"] if e["从"] in titles else e["从"]
             if t.startswith("raw/"):
-                if not (self.root / t).exists():
-                    self.issue("错误", "原始文件不存在", f"{e['所在']} 引用的 {t} 不存在")
+                path, block = raw_file(t)
+                if not (self.root / path).exists():
+                    self.issue("错误", "原始文件不存在", f"{e['所在']} 引用的 {path} 不存在")
+                elif block and path in self.raws and block not in self.raws[path][1]:
+                    self.issue("错误", "段落不存在", f"{e['所在']} 引用的 {t} 在该素材中没有段落 ^{block}")
+                elif path in self.raws and self.current_raw(path) != path:
+                    self.issue("提醒", "引用了被取代的素材",
+                               f"{e['所在']} 引用的 {path} 已被 {self.current_raw(path)} 取代，以最新文件为准")
             elif t not in titles:
                 self.issue("错误", "断链", f"{e['所在']} 链接到不存在的页面 [[{t}]]")
 
@@ -523,6 +596,8 @@ class Vault:
                 self.issue("错误", "编号前缀", f"[[{pg.title}]] 编号 {pg.get('编号')} 与类型 {pg.type} 不符")
             for f in ("创建", "更新", "发生日期", "发布日期"):
                 v = pg.meta.get(f)
+                if f == "发布日期" and v == "未知":
+                    continue  # 粘贴的文字、文件常常没有发布日期（raw 信封无「产生于」）
                 if v and not parse_date(v):
                     self.issue("提醒", "日期格式", f"[[{pg.title}]] 字段「{f}」应为 年-月-日 格式：{v}")
 
@@ -591,19 +666,19 @@ class Vault:
             if pg.type == "认知" and s.get("下透") == "悬空":
                 self.issue("信息", "悬空认知", f"[[{pg.title}]] 尚未推导出已确认的方法（仅供参考）")
 
-        # 待处理素材
+        # 待处理素材：去掉 #^段落 后比较；被取代的旧文件不再列出，以最新文件为准
         self.pending = {"外部": [], "自述": []}
-        referenced = {e["到"] for e in self.edges if e["到"].startswith("raw/")}
-        referenced |= {e["从"] for e in self.edges if e["从"].startswith("raw/")}
+        referenced = {raw_file(x)[0] for e in self.edges for x in (e["从"], e["到"]) if x.startswith("raw/")}
         log_text = (self.wiki / "log.md").read_text(encoding="utf-8") if (self.wiki / "log.md").exists() else ""
         for kind in ("外部", "自述"):
             d = self.raw / kind
             if d.is_dir():
-                for f in sorted(d.rglob("*")):
-                    if f.is_file():
-                        rel = f.relative_to(self.root).as_posix()
-                        if rel not in referenced and rel not in log_text:
-                            self.pending[kind].append(rel)
+                for f in sorted(d.rglob("*.md")):
+                    rel = f.relative_to(self.root).as_posix()
+                    if self.current_raw(rel) != rel:
+                        continue
+                    if rel not in referenced and rel not in log_text:
+                        self.pending[kind].append(rel)
 
         # 查询覆盖
         self.never_read = []
@@ -709,7 +784,11 @@ class Vault:
         lines += ["## 待处理素材", ""]
         for kind, files in self.pending.items():
             lines.append(f"- {kind}：{len(files)} 份")
-            lines += [f"  - {f}" for f in files[:50]]
+            for f in files[:50]:
+                meta = self.raws.get(f, ({}, set()))[0]
+                extra = " · ".join(filter(None, [meta.get("身份"), meta.get("渠道"), meta.get("标题")]))
+                note = f"（取代 {meta['取代']}）" if meta.get("取代") else ""
+                lines.append(f"  - {f}" + (f" · {extra}" if extra else "") + note)
         if self.never_read:
             lines += ["", "## 从未被查询读取的页面", ""] + [f"- [[{t}]]" for t in self.never_read]
         return "\n".join(lines) + "\n", issues
@@ -721,8 +800,11 @@ class Vault:
                           "主题": p.topics, "确认": p.get("确认"),
                           "当前判断": p.get("当前判断") or p.get("当前做法"),
                           "状态": self.state.get(p.title, {})})
-        raws = sorted({x for e in self.edges for x in (e["从"], e["到"]) if x.startswith("raw/")})
-        nodes += [{"标题": r, "类型": "原始", "路径": r} for r in raws]
+        raws = sorted({raw_file(x)[0] for e in self.edges for x in (e["从"], e["到"]) if x.startswith("raw/")})
+        for r in raws:
+            meta = self.raws.get(r, ({}, set()))[0]
+            nodes.append({"标题": meta.get("标题") or r, "类型": "原始", "路径": r, "编号": meta.get("编号"),
+                          "身份": meta.get("身份"), "取代者": self.current_raw(r) if self.current_raw(r) != r else None})
         return {"生成时间": dt.datetime.now().isoformat(timespec="seconds"),
                 "节点": nodes, "边": self.edges, "事件": self.events}
 
@@ -766,6 +848,7 @@ def cmd_run(root, dry):
     state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
 
     v.load()
+    v.load_raw()
     v.fill_program_fields(state)
     v.build_graph()
     v.compute_states()
@@ -803,15 +886,42 @@ def cmd_run(root, dry):
     sys.exit(1 if errors else 0)
 
 
+def next_raw_id(root, day=None):
+    """当天最大号加一：扫描 raw/ 下已有文件名（应用写入的与 Agent 写入的都算）。"""
+    day = day or dt.date.today()
+    stamp = day.strftime("%Y%m%d")
+    highest = 0
+    raw = root / "raw"
+    if raw.is_dir():
+        for f in raw.rglob(f"R-{stamp}-*.md"):
+            m = RAW_ID_RE.fullmatch(f.stem)
+            if m:
+                highest = max(highest, int(m.group(2)))
+    if highest >= 9999:
+        sys.exit(f"{stamp} 的编号已用完")
+    return f"R-{stamp}-{highest + 1:04d}"
+
+
+def cmd_raw_id(root, date_text):
+    day = dt.date.fromisoformat(date_text) if date_text else None
+    rid = next_raw_id(root, day)
+    d = day or dt.date.today()
+    print(rid)
+    print(f"新建文件：raw/自述/{d:%Y}/{d:%m}/{rid}.md（只新建，不修改已有文件）", file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser(description="个人知识库检查与关系图谱脚本")
-    ap.add_argument("command", nargs="?", default="run", choices=["run", "init"])
+    ap.add_argument("command", nargs="?", default="run", choices=["run", "init", "raw-id"])
     ap.add_argument("--root", default=None, help="知识库根目录，默认为脚本所在目录的上一级")
     ap.add_argument("--dry-run", action="store_true", help="只检查，不修改文件")
+    ap.add_argument("--date", default=None, help="raw-id：取号日期，年-月-日，默认今天")
     args = ap.parse_args()
     root = Path(args.root).resolve() if args.root else Path(__file__).resolve().parent.parent
     if args.command == "init":
         cmd_init(root)
+    elif args.command == "raw-id":
+        cmd_raw_id(root, args.date)
     else:
         cmd_run(root, args.dry_run)
 
