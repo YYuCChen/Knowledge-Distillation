@@ -27,7 +27,19 @@ def test_empty_vault_never_installs_into_cwd(tmp_path,monkeypatch):
     assert list(tmp_path.iterdir())==[]
 
 
-def test_source_metadata_keeps_timezone_and_escapes_multiple_authors():
+@pytest.fixture
+def shanghai_time(monkeypatch):
+    # Fixture correction (Q11, 2026-09-29): the label is the reader's local time
+    # and the expected text assumed +08:00. Pin that zone instead of the machine's.
+    import time
+    monkeypatch.setenv('TZ', 'Asia/Shanghai')
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_source_metadata_keeps_timezone_and_escapes_multiple_authors(shanghai_time):
     output=''.join(source_header('x',{'authors':[{'display_name':'甲<script>'},'乙'],
         'published_at':'2026-09-08T12:30:00+08:00'},'https://example.org/a'))
     assert '甲&lt;script&gt;、乙' in output and '<script>' not in output

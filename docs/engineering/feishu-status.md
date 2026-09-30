@@ -1,6 +1,6 @@
 # Feishu business status and group actions
 
-The receipt header projects six business states: 已接收／等待中、处理中、待你操作、已完成、未形成知识、需处理. Actionable judgment takes precedence over a blocking error, which precedes working, queued and terminal results. Task counts are exclusive: success, content rejection, technical failure, waiting confirmation and unfinished. Groups/positions and uncreated failed intake parts are reported separately. Action-queue toast text does not replace the business header.
+The receipt header projects six business states: 已接收／等待中、处理中、待你操作、已完成、未形成知识、需处理. Actionable judgment takes precedence over a blocking error, which precedes working, queued and terminal results. Task counts are exclusive: success, content rejection, technical failure, waiting confirmation and unfinished. Groups/positions and uncreated failed intake parts are reported separately. Action-queue toast text does not replace the business header. Exception: while a task waits on a concern, the receipt shows the V1.2 ordinary concern card, titled 有内容待你确认 and without the status footer (2026-09-15 decision in AGENTS.md; implemented in c838cc8).
 
 Group buttons carry explicit scope, current group revision and request identity. The shared service performs atomic validation and replay; switching displayed member/context pages does not submit a judgment. Candidate/keep/manual apply to the displayed full scope, unable selects only the displayed member. Local cards allow arbitrary member subsets. Existing receipt ownership, patch-in-place and old single-member callbacks are retained.
 

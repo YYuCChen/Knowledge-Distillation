@@ -80,8 +80,11 @@ def organization_status(store):
         covered = {r[0] for r in db.execute('SELECT knowledge_result_id FROM organization_event_coverages')}
         pending = sum(source.knowledge_result_id not in covered for source in load_sources(db))
         latest = db.execute('SELECT event_id,status,failure_code FROM organization_events ORDER BY event_id DESC LIMIT 1').fetchone()
+        # The failed event stays in history with its code; whether it is shown
+        # is decided per page against the event that page loaded with.
         return dict(pending=pending, running=bool(latest and latest['status']=='running'),
-                    failed=bool(latest and latest['status']=='failed'))
+                    failed=bool(latest and latest['status']=='failed'),
+                    latest_event=int(latest['event_id']) if latest else None)
 
 
 class GrowthRuntime:

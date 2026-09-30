@@ -49,7 +49,7 @@
           <input type="hidden" name="content_kind" value="{{ request.form.get('content_kind', '') if request.form.get('content_kind') in ['links', 'text'] else '' }}">
           <input type="hidden" name="processing_mode" value="">
           {% if form_error %}<p class="form-error" role="alert">{{ form_error }}</p>{% endif %}
-          <p class="organization-feedback" role="alert" {% if not organization_status.error and not organization_status.failed %}hidden{% endif %}>{% if organization_status.error %}{{ organization_status.error }}{% elif organization_status.failed %}本次知识整理未完成，已有主题和新知保留，可以重试。{% endif %}</p>
+          <p class="organization-feedback" role="alert" data-organization-event="{{ organization_status.latest_event or '' }}" data-organization-failed="{{ 'true' if organization_status.failed else 'false' }}" {% if not organization_status.error %}hidden{% endif %}>{% if organization_status.error %}{{ organization_status.error }}{% elif organization_status.failed %}本次知识整理未完成，已有主题和新知保留，可以重试。{% endif %}</p>
           <span data-source-filename></span>
           <label class="upload" title="选择一个 PDF、EPUB 或 Markdown 文件">
             <img

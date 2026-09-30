@@ -3,6 +3,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 import hashlib
+import json
 import sys
 import tomllib
 
@@ -59,7 +60,7 @@ def test_vision_preserves_original_plane_and_normalizes_transparency(native,mode
     result = vision_ocr.VisionOcrRunner().recognize_bytes(png(mode, color, exif=exif), 'image/png')
     assert calls['revision'] == 3 and calls['languages'] == ['zh-Hans', 'zh-Hant', 'en-US']
     assert calls['correction'] is False and calls['auto_language'] is False
-    assert calls['orientation'] == 1
+    assert calls['orientation'] == 1 and calls['options'] is None
     with Image.open(BytesIO(calls['data'])) as decoded:
         assert decoded.size == (100, 80) and decoded.getpixel((0, 0)) == (255, 255, 255)
         assert not decoded.getexif()
@@ -99,6 +100,64 @@ def test_native_request_failure_is_reported_without_paddle_fallback(native,monke
         ocr.default_ocr_runner().recognize_bytes(png(),'image/png')
 
 
+def objc_exception(name='NSInvalidArgumentException', reason='key does not exist'):
+    # PyObjC surfaces Objective-C exceptions as ValueError carrying _pyobjc_info_.
+    error = ValueError(f'{name} - {reason}')
+    error._pyobjc_info_ = {'name': name, 'reason': reason, 'userInfo': None}
+    return error
+
+
+def test_handler_options_are_nil_on_the_macos27_bridge(native):
+    # BUG-20260922-01: PyObjC 12.2.2 on macOS 27 rejects an empty options dict.
+    calls, module = native
+    def macos27(data, orientation, options):
+        if options is not None:
+            raise objc_exception()
+        calls.update(bridged_options=options)
+        return SimpleNamespace(performRequests_error_=lambda requests, error: (True, None))
+    module.VNImageRequestHandler.alloc = lambda: SimpleNamespace(initWithData_orientation_options_=macos27)
+    result = vision_ocr.VisionOcrRunner().recognize_bytes(png(), 'image/png')
+    assert calls['bridged_options'] is None and result.text == '原文 English'
+
+
+def test_handler_bridge_failure_keeps_stage_and_exception_class_only(native):
+    _, module = native
+    def rejected(*args):
+        raise objc_exception(reason='/Users/private/source.png 图片正文')
+    module.VNImageRequestHandler.alloc = lambda: SimpleNamespace(initWithData_orientation_options_=rejected)
+    with pytest.raises(ocr.OcrError, match='ocr_inference_failed') as caught:
+        vision_ocr.VisionOcrRunner().recognize_bytes(png(), 'image/png')
+    assert caught.value.diagnostic() == {'stage': 'handler_init', 'exception_type': 'ValueError',
+                                         'native_exception': 'NSInvalidArgumentException'}
+    assert 'private' not in json.dumps(caught.value.diagnostic(), ensure_ascii=False)
+
+
+def test_perform_failure_records_native_domain_and_code_without_description(native):
+    _, module = native
+    failure = SimpleNamespace(domain=lambda: 'com.apple.Vision', code=lambda: 9,
+                              localizedDescription=lambda: '图片正文')
+    module.VNImageRequestHandler.alloc = lambda: SimpleNamespace(
+        initWithData_orientation_options_=lambda *args: SimpleNamespace(
+            performRequests_error_=lambda *args: (False, failure)))
+    with pytest.raises(ocr.OcrError, match='ocr_inference_failed') as caught:
+        vision_ocr.VisionOcrRunner().recognize_bytes(png(), 'image/png')
+    assert caught.value.stage == 'perform_request'
+    assert caught.value.native_error == {'domain': 'com.apple.Vision', 'code': 9}
+
+
+def test_output_failures_distinguish_parsing_from_coordinate_validation():
+    with pytest.raises(ocr.OcrError, match='ocr_invalid_output') as parsing:
+        vision_ocr._result(None, 100, 80)
+    assert parsing.value.stage == 'parse_observations'
+    with pytest.raises(ocr.OcrError, match='ocr_invalid_output') as bridged:
+        vision_ocr._result([SimpleNamespace(topCandidates_=lambda count: [])], 100, 80)
+    assert bridged.value.stage == 'parse_observations'
+    with pytest.raises(ocr.OcrError, match='ocr_invalid_output') as coordinates:
+        vision_ocr._result([observation(points=((-.5,.9),(.8,.9),(.8,.6),(-.5,.6)))], 100, 80)
+    assert coordinates.value.stage == 'validate_coordinates'
+    assert coordinates.value.line_diagnostics[0]['text_available']
+
+
 def test_missing_bridge_and_invalid_input_fail_distinctly(monkeypatch):
     monkeypatch.setitem(sys.modules,'Vision',None)
     with pytest.raises(ocr.OcrError, match='ocr_runtime_unavailable'):
@@ -130,6 +189,57 @@ def test_platform_dependency_markers_keep_docling_and_windows_paddle():
     assert {'docling','rapidocr','onnxruntime','torch','torchvision','transformers','opencv-python'} <= mac & windows
 
 
+def cjk_font(size):
+    # Fixture correction: macOS 27 no longer ships PingFang.ttc at this path.
+    # Hiragino Sans GB renders this synthetic sample with the same exact reading;
+    # STHeiti Medium's 器 glyph is read as the variant 噐, so it is not a fallback.
+    for name in ('PingFang.ttc', 'Hiragino Sans GB.ttc'):
+        path = Path('/System/Library/Fonts') / name
+        if path.is_file():
+            return ImageFont.truetype(str(path), size)
+    pytest.fail('No system CJK font is available for the real Vision fixture')
+
+
+def encoded(image, kind, **options):
+    output = BytesIO()
+    image.save(output, format=kind, **options)
+    return output.getvalue()
+
+
+@pytest.mark.skipif(sys.platform != 'darwin', reason='Real Apple Vision requires macOS')
+def test_real_vision_x_sized_jpegs_formats_orientation_and_blank(tmp_path):
+    # BUG-20260922-01 reproduced at the first of four 1179px-wide X JPEGs on
+    # macOS 27; this runs the real PyObjC bridge, not a mock.
+    font = cjk_font(48)
+    runner = ocr.default_ocr_runner()
+    members, expected = [], []
+    for index, height in enumerate((606, 706, 622, 569), 1):
+        lines = [f'Source evidence {index}', '来源定位 保留原文']
+        image = Image.new('RGB', (1179, height), 'white')
+        draw = ImageDraw.Draw(image)
+        for text, y in zip(lines, (height // 4, height // 2)):
+            draw.text((80, y), text, fill='black', font=font)
+        data = encoded(image, 'JPEG', quality=92)
+        members.append({'member_id': f'image-{index}', 'sha256': hashlib.sha256(data).hexdigest(),
+                        'mime_type': 'image/jpeg', 'content': data})
+        expected.append(lines)
+    fact, lineage = image_source_fact('', members, runner, checkpoint_dir=tmp_path / 'ocr')
+    assert [[line['text'] for line in image['lines']] for image in lineage['image_ocr']] == expected
+    assert all(image['engine'] == 'apple_vision' for image in lineage['image_ocr'])
+    sample = Image.new('RGB', (640, 200), 'white')
+    ImageDraw.Draw(sample).text((40, 60), '来源定位 保留原文', fill='black', font=font)
+    for kind, mime in (('PNG', 'image/png'), ('WEBP', 'image/webp')):
+        options = {'lossless': True} if kind == 'WEBP' else {}
+        result = runner.recognize_bytes(encoded(sample, kind, **options), mime)
+        assert result.text == '来源定位 保留原文' and (result.width, result.height) == (640, 200)
+    exif = Image.Exif(); exif[274] = 6
+    rotated_tag = runner.recognize_bytes(encoded(sample, 'JPEG', quality=92, exif=exif), 'image/jpeg')
+    # EXIF orientation is ignored: evidence stays on the stored pixel plane.
+    assert rotated_tag.text == '来源定位 保留原文' and (rotated_tag.width, rotated_tag.height) == (640, 200)
+    assert runner.recognize_bytes(encoded(Image.new('RGB', (1179, 606), 'white'), 'JPEG'),
+                                  'image/jpeg').lines == ()
+
+
 @pytest.mark.skipif(sys.platform != 'darwin', reason='Real Apple Vision requires macOS')
 def test_real_vision_worker_recognition_and_immutable_source_locator(tmp_path,monkeypatch):
     import builtins
@@ -142,7 +252,7 @@ def test_real_vision_worker_recognition_and_immutable_source_locator(tmp_path,mo
     monkeypatch.setattr(builtins,'__import__',guarded)
     image = Image.new('RGB',(960,360),'white')
     draw = ImageDraw.Draw(image)
-    font = ImageFont.truetype('/System/Library/Fonts/PingFang.ttc',44)
+    font = cjk_font(44)
     expected = ['知识蒸馏器','Source evidence 2026','来源定位 保留原文']
     boxes = []
     for text,y in zip(expected,(35,135,235)):

@@ -468,11 +468,24 @@ def create_app(
     @app.get("/items/<int:item_id>/confirmation-audio")
     def confirmation_audio(item_id: int):
         path = service().confirmation_audio(item_id, request.args.get("concern_id", ""))
-        if path is None:
-            abort(404)
+        if path is None or not path.is_file():
+            abort(404)  # A missing clip is recorded as serve_failed by the distiller.
         response = send_file(path, mimetype="audio/wav", conditional=True)
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    @app.post("/items/<int:item_id>/confirmation-audio/diagnostic")
+    def confirmation_audio_diagnostic(item_id: int):
+        # The page reports only that playback failed and the MediaError code.
+        if store.item_bundle(item_id) is None:
+            abort(404)
+        from .audio_diagnostics import record
+        code = request.form.get("media_error", "")
+        runtime_root = getattr(service(), 'runtime_root', None)
+        if runtime_root is not None:
+            record(runtime_root, item_id, request.form.get("concern_id", ""), 'playback_failed',
+                   media_error=int(code) if code.isdigit() and len(code) < 3 else 0)
+        return "", 204
 
     @app.post('/items/<int:item_id>/recover-confirmation-audio')
     def recover_confirmation_audio(item_id: int):
@@ -710,7 +723,7 @@ def _item_view(row, vault_path: str | None, data_root=None) -> dict[str, object]
                   if row["error_code"] == "source_unconfirmed" and not confirmation
                   else ERROR_TEXT.get(row["error_code"], "无法完整读取此文件，请修正内容后重新投递。" if row["retryable"] == 0 else "本次处理未完成，可以稍后重试。")),
         "error_code": row["error_code"],
-        "needs_settings": row["error_code"] in {"weibo_not_configured", "weibo_runtime_unavailable", "zhihu_not_configured", "zhihu_runtime_unavailable", "x_not_configured", "x_runtime_unavailable", "xiaohongshu_not_configured", "xiaohongshu_runtime_unavailable", "youtube_not_configured", "youtube_runtime_unavailable", "vault_not_configured", "douyin_not_configured", "chrome_remote_debugging_disabled", "llm_not_configured", "asr_runtime_unavailable", "review_runtime_unavailable"},
+        "needs_settings": row["error_code"] in {"weibo_not_configured", "weibo_runtime_unavailable", "zhihu_not_configured", "zhihu_runtime_unavailable", "x_not_configured", "x_runtime_unavailable", "xiaohongshu_not_configured", "xiaohongshu_runtime_unavailable", "youtube_not_configured", "youtube_runtime_unavailable", "vault_not_configured", "douyin_not_configured", "douyin_login_required", "chrome_remote_debugging_disabled", "llm_not_configured", "asr_runtime_unavailable", "review_runtime_unavailable"},
         "confirmation": confirmation,
     }
 

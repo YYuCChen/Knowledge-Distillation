@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import sys
 
-from flask import Blueprint, current_app, redirect, render_template, request, url_for
+from flask import Blueprint, abort, current_app, redirect, render_template, request, url_for
 
 from .chrome import ChromeSessionError
 from .settings import SettingsError, SettingsService
@@ -237,6 +237,13 @@ def settings_blueprint(service: SettingsService) -> Blueprint:
         try:connection.renew_receipt(request.form.get('message_id',''),request.form.get('card_id',''))
         except Exception:return _back('feishu_configuration_failed','paths')
         return _back('feishu_receipt_renewed','paths')
+
+    @blueprint.get('/settings/platforms/<platform>/health')
+    def platform_health(platform):
+        try:
+            return service.platform_health(platform)
+        except LookupError:
+            abort(404)
 
     @blueprint.post('/settings/<platform>/cancel-login')
     def cancel_login(platform):

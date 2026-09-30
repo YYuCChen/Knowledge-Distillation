@@ -50,12 +50,14 @@
         <details class="connection-troubleshooting"><summary>扩展没有连接？</summary><p>扩展显示 Reconnect 时，点击重连，再回到这里配置登录。若使用多个 Chrome 个人资料，请暂时只保留目标个人资料的扩展连接。</p></details>
       </details>
       {% for platform in settings.platforms %}
-        <div class="setting-row media-row">
+        <div class="setting-row media-row"{% if platform.state == 'checking' %} data-platform-health="{{ url_for('settings.platform_health', platform=platform.key) }}"{% endif %}>
           <span class="state-dot {{ platform.state }}" aria-hidden="true"></span>
           <strong>{{ platform.label }}</strong>
-          <span class="status-text">
+          <span class="status-text" role="status">
             {{ {
               'connected': '已登录',
+              'checking': '正在校验',
+              'configured': '已配置',
               'relogin_required': '需重新登录',
               'unconfigured': '未配置'
             }[platform.state] }}
@@ -70,15 +72,21 @@
               <form action="{{ url_for('settings.cancel_login', platform=platform.key) }}" method="post">
                 <button class="outline-button">取消登录</button>
               </form>
-            {% elif platform.available and platform.state == 'connected' %}
-              <form action="{{ url_for('settings.clear_' + platform.key) }}" method="post">
+            {% elif platform.available and platform.state in ['connected', 'checking', 'configured'] %}
+              <form action="{{ url_for('settings.clear_' + platform.key) }}" method="post" data-when="connected">
             <input type="hidden" name="return_to" value="{{ return_to }}">
                 <button class="outline-button">清除配置</button>
               </form>
-              <form action="{{ url_for('settings.connect_' + platform.key) }}" method="post">
+              <form action="{{ url_for('settings.connect_' + platform.key) }}" method="post" data-when="connected">
             <input type="hidden" name="return_to" value="{{ return_to }}">
                 <button class="secondary-button">{{ '重新连接' if platform.key in ['zhihu', 'xiaohongshu'] else '替换配置' }}</button>
               </form>
+              {% if platform.state == 'checking' %}
+              <form action="{{ url_for('settings.connect_' + platform.key) }}" method="post" data-when="relogin_required" hidden>
+            <input type="hidden" name="return_to" value="{{ return_to }}">
+                <button class="primary-button">重新登录</button>
+              </form>
+              {% endif %}
             {% elif platform.available %}
               <form action="{{ url_for('settings.connect_' + platform.key) }}" method="post">
             <input type="hidden" name="return_to" value="{{ return_to }}">

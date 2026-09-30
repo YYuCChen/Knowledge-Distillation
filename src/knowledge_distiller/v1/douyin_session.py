@@ -13,8 +13,17 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from .chrome import ChromePage, ChromeSessionError, DouyinConnection
+from .chrome import ChromePage, ChromeSessionError, DouyinConnection, _read_endpoint
 from .keychain import KeychainError
+
+
+# In-page read of the dedicated profile's own account. Douyin answers HTTP 200
+# with status_code 8 ("用户未登录") when the profile has no live session.
+DOUYIN_LIVE_PROBE = (
+    "(async()=>{try{const r=await fetch('/aweme/v1/web/user/profile/self/?device_platform=webapp&aid=6383',"
+    "{credentials:'include'});if(r.status===401)return 'logged_out';if(!r.ok)return 'unknown';"
+    "const d=await r.json();if(d&&d.status_code===0&&d.user&&d.user.sec_uid)return 'connected';"
+    "if(d&&d.status_code===8)return 'logged_out';return 'unknown'}catch(e){return 'unknown'}})()")
 
 
 class DouyinOwnedSession:
@@ -169,10 +178,63 @@ class DouyinOwnedSession:
         with self._lock:
             return self._page(url, self._launch(self._context()))
 
+    def live_status(self, *, timeout=20):
+        """Read the dedicated profile's current login without changing it.
+
+        Returns 'connected', 'logged_out' or 'unknown'. It never saves, replaces
+        or clears stored credentials; only a definite logout is 'logged_out'.
+        """
+        if self.platform != 'douyin':
+            raise NotImplementedError(self.platform)
+        identifier = self._context()
+        with self._lock:
+            try:
+                with self._page('https://www.douyin.com/', self._launch(identifier)) as page:
+                    if not page.wait_for("location.hostname==='www.douyin.com' && "
+                                         "document.readyState==='complete'", timeout=timeout):
+                        return 'unknown'
+                    result = page.call('Runtime.evaluate', {'expression': DOUYIN_LIVE_PROBE,
+                        'returnByValue': True, 'awaitPromise': True}, page=True)
+            except ChromeSessionError as error:
+                if str(error).endswith('_login_required'):
+                    return 'logged_out'
+                return 'unknown'
+            except Exception:
+                return 'unknown'
+        value = result.get('result', {}).get('value')
+        return value if value in {'connected', 'logged_out'} else 'unknown'
+
+    def _quit_gracefully(self, process, profile):
+        """Ask Chrome to exit through DevTools so its cookie store is flushed.
+
+        A signal right after login lost the new auth cookies from the profile
+        (BUG-20260922-02): later headless launches were logged out.
+        """
+        if profile is None:
+            return False
+        try:
+            import websocket
+            endpoint = _read_endpoint(profile / 'DevToolsActivePort')
+            connection = websocket.create_connection(endpoint, timeout=5, suppress_origin=True,
+                                                     http_no_proxy=['127.0.0.1'])
+            try:
+                connection.send(json.dumps({'id': 1, 'method': 'Browser.close'}))
+            finally:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+            process.wait(timeout=10)
+            return True
+        except Exception:
+            return False
+
     def close(self):
         with self._lock:
             process, self._process = self._process, None
             if process is not None and process.poll() is None:
+                if sys.platform != 'win32' and self._quit_gracefully(process, self._profile):
+                    return
                 if sys.platform == 'win32':
                     # Only this Popen-owned live process tree, never /IM chrome.
                     subprocess.run(

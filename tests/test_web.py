@@ -1001,6 +1001,11 @@ def _human_confirmation_app(tmp_path):
                 )
             )
         ),
+        # Fixture correction (Q11, 2026-09-29): without an explicit deriver the
+        # legacy app builds a real LLM runtime from environment variables, so the
+        # outcome depended on the machine (and could call a paid model).
+        knowledge_deriver=StaticKnowledgeDeriver(),
+        knowledge_qualifier=StaticKnowledgeQualifier(),
         secondary_resolver=StaticSecondaryResolver("采购量或上报量都有可能"),
         secondary_audio_clipper=clipper,
     )
@@ -1169,6 +1174,8 @@ def test_web_pipeline_uses_secondary_only_for_target_and_then_continues(tmp_path
                 )
             )
         ),
+        knowledge_deriver=StaticKnowledgeDeriver(),  # Fixture correction (Q11): no env-built LLM.
+        knowledge_qualifier=StaticKnowledgeQualifier(),
         secondary_resolver=resolver,
         secondary_audio_clipper=clipper,
     )

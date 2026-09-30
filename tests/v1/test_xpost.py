@@ -129,3 +129,42 @@ def test_last_image_failure_cannot_create_partial_source(store,image,tmp_path):
     assert not (tmp_path/'attempt/x-media').exists()
 
 from .test_xiaohongshu import FakeOcr
+
+
+def test_first_image_bridge_failure_is_diagnosed_and_retry_reuses_downloads(store,image,tmp_path):
+    # BUG-20260922-01: four X images downloaded, the Vision bridge failed at the
+    # first one; retry must reuse the retained images rather than re-capture.
+    from knowledge_distiller.v1.ocr import OcrError
+    from .test_vision_ocr import objc_exception
+    media=[{'type':'photo','media_url_https':f'https://pbs.twimg.com/media/{n}.png'} for n in range(1,5)]
+    downloads=[]
+    def download(url,path):
+        downloads.append(url);shutil.copyfile(image,path)
+    class BridgeThenVision(FakeOcr):
+        calls=0
+        def recognize_bytes(self,content,mime):
+            self.calls+=1
+            if self.calls==1:
+                raise OcrError('ocr_inference_failed',stage='handler_init',cause=objc_exception())
+            return super().recognize_bytes(content,mime)
+    class Model:
+        def derive(self,snapshot,uncertainties):
+            start=snapshot.index('图片文字')
+            return Knowledge('标题','副标题','摘要',(Point('p1','观点','论证',('e1',)),),(),(Evidence('e1',start,start+4,'图片文字'),))
+    session=Session(response(tweet(media=media)))
+    vault=tmp_path/'vault';vault.mkdir()
+    ocr=BridgeThenVision()
+    service=Distiller(store=store,source=None,normalizer=None,recognizer=None,reviewer=None,confirmation_clipper=None,
+        knowledge_model=Model(),runtime_root=tmp_path/'runtime',vault=vault,
+        xpost_source=XPostSource(store,session,downloader=download),ocr=ocr)
+    item=store.create_item(URL)
+    assert service.run(item).state=='failed'
+    assert store.item_bundle(item)['error_code']=='ocr_inference_failed' and len(downloads)==4
+    diagnostic=json.loads((tmp_path/'runtime/items'/str(item)/'ocr-diagnostic.json').read_text())
+    assert diagnostic['member_id']=='image-1' and diagnostic['completed_members']==[]
+    assert (diagnostic['stage'],diagnostic['exception_type'],diagnostic['native_exception'])==(
+        'handler_init','ValueError','NSInvalidArgumentException')
+    store.retry_item(item)
+    assert service.run(item).state=='succeeded'
+    assert len(downloads)==4 and session.calls==1  # Retained images, no second capture.
+    assert store.item_bundle(item)['snapshot'].count('图片文字')==4

@@ -7,6 +7,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
@@ -20,6 +21,9 @@ from .store import Store
 
 
 logger = logging.getLogger(__name__)
+
+# A live login check launches the dedicated browser; reuse its answer briefly.
+HEALTH_TTL_SECONDS = 60
 
 PLATFORMS = (
     ("douyin", "抖音"),
@@ -91,6 +95,7 @@ class SettingsService:
         self.qwen_probe = qwen_probe or (lambda: self.qwen_component.supported and self.qwen_component.ready())
         self.slot_id = slot_id or (lambda: uuid4().hex)
         self._labelled_accounts: set[str] = set()
+        self._health: dict[str, tuple[str | None, float, str]] = {}
 
     def sync_credential_labels(self) -> None:
         values = self.store.settings()
@@ -139,6 +144,57 @@ class SettingsService:
         address = load(self.store.path.parent)
         return {'name': address.name, 'port': address.port, 'host': address.host, 'url': address.url}
 
+    def platform_health(self, platform: str) -> dict[str, str]:
+        """Live, non-destructive login state of a dedicated session.
+
+        Stored connection material only proves configuration, not a live login
+        (BUG-20260922-02). Only a definite logout changes the stored state; a
+        check that cannot conclude reports 'configured'.
+        """
+        if platform != 'douyin':
+            raise LookupError(platform)
+        row = self.store.connection(platform)
+        if row is None or row['state'] != 'connected':
+            return {'state': row['state'] if row is not None else 'unconfigured'}
+        live = getattr(self.chrome, 'live_status', None)
+        if live is None:
+            return {'state': 'connected'}
+        context = row['browser_context']
+        cached = self._health.get(platform)
+        if cached and cached[0] == context and time.monotonic() - cached[1] < HEALTH_TTL_SECONDS:
+            status = cached[2]
+        else:
+            try:
+                status = live()
+            except ChromeSessionError as error:
+                status = 'logged_out' if str(error).endswith('_login_required') else 'unknown'
+            except Exception:
+                status = 'unknown'
+            self._health[platform] = (context, time.monotonic(), status)
+        if status == 'logged_out':
+            current = self.store.connection(platform)
+            # A reconnect finished during the check owns a new context.
+            if current is not None and current['state'] == 'connected' and current['browser_context'] == context:
+                self.store.require_relogin(platform)
+            return {'state': 'relogin_required'}
+        return {'state': 'connected' if status == 'connected' else 'configured'}
+
+    def _platform_state(self, key, row):
+        if row is None:
+            return "unconfigured"
+        session = {'douyin': self.chrome, 'youtube': self.youtube, 'xiaohongshu': self.xiaohongshu,
+                   'x': self.xpost, 'zhihu': self.zhihu, 'weibo': self.weibo}[key]
+        if (row["state"] == "connected" and hasattr(session, 'browser_page')
+                and not (row["browser_context"] or '').startswith('owned:')):
+            return "relogin_required"
+        if row["state"] == "connected" and key == 'douyin' and hasattr(session, 'live_status'):
+            cached = self._health.get(key)
+            if not (cached and cached[0] == row['browser_context']
+                    and time.monotonic() - cached[1] < HEALTH_TTL_SECONDS):
+                return "checking"  # The page asks platform_health() for the live answer.
+            return {'connected': 'connected', 'logged_out': 'relogin_required'}.get(cached[2], 'configured')
+        return row["state"]
+
     def view(self) -> dict[str, object]:
         values = self.store.settings()
         connections = self.store.connections()
@@ -149,10 +205,7 @@ class SettingsService:
                 {
                     "key": key,
                     "label": label,
-                    "state": ("relogin_required" if row is not None
-                              and row["state"] == "connected" and hasattr({'douyin': self.chrome, 'youtube': self.youtube, 'xiaohongshu': self.xiaohongshu, 'x': self.xpost, 'zhihu': self.zhihu, 'weibo': self.weibo}[key], 'browser_page')
-                              and not (row["browser_context"] or '').startswith('owned:')
-                              else row["state"] if row is not None else "unconfigured"),
+                    "state": self._platform_state(key, row),
                     "account_label": row["account_label"] if row is not None else None,
                     "connection_mode": ('owned' if (row['browser_context'] or '').startswith('owned:') else 'foreground') if key in {'zhihu', 'xiaohongshu'} and row is not None and row['state'] != 'unconfigured' else None,
                     "pending_login": bool(values.get(key + "_pending_login")),

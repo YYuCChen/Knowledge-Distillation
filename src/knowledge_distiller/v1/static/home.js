@@ -3,6 +3,18 @@ let polling = false;
 let actionGeneration = 0;
 const drafts = new Map();
 let lastServerHTML = document.querySelector('#home-results')?.innerHTML;
+// The organization event this tab saw when it loaded. A failure recorded before
+// then is history, not feedback for this page (BUG-20260916-02); a refresh or a
+// new tab starts from a new baseline, and each tab keeps its own.
+const organizationBaseline = (node => node && {
+  event: node.dataset.organizationEvent || '',
+  failed: node.dataset.organizationFailed === 'true',
+})(document.querySelector('.organization-feedback'));
+
+function observedOrganizationFailure(node) {
+  return node.dataset.organizationFailed === 'true' && !(organizationBaseline?.failed &&
+    node.dataset.organizationEvent === organizationBaseline.event);
+}
 
 document.addEventListener('change', event => {
   if (!event.target.matches('[data-source-file]')) return;
@@ -127,7 +139,9 @@ function applyPage(html, submittedForm, submittedCard) {
   const nextFeedback = page.querySelector('.organization-feedback');
   if (feedback && nextFeedback) {
     feedback.textContent = nextFeedback.textContent;
-    feedback.hidden = nextFeedback.hidden;
+    feedback.dataset.organizationEvent = nextFeedback.dataset.organizationEvent || '';
+    feedback.dataset.organizationFailed = nextFeedback.dataset.organizationFailed || 'false';
+    feedback.hidden = nextFeedback.hidden && !observedOrganizationFailure(nextFeedback);
   }
   const status = page.querySelector('.topbar-status');
   if (status) reconcile(document.querySelector('.topbar-status'), status);
@@ -261,6 +275,7 @@ document.addEventListener('submit', async event => {
     if (suggesting) button.textContent = '正在结合上下文生成候选…';
     if (recovering) button.textContent = '正在恢复局部原音…';
   }
+  let accepted = false;
   try {
     const response = await fetch(button?.getAttribute('formaction') || form.getAttribute('action'), { method: 'POST', body: data });
     const html = await response.text();
@@ -268,16 +283,35 @@ document.addEventListener('submit', async event => {
     if (!response.ok && !html.includes('id="home-results"')) throw new Error(html);
     applyPage(html, response.ok ? form.id : null,
       response.ok ? form.closest('.todo-card-shell')?.dataset.syncKey : null);
+    accepted = response.ok;
   } catch (error) {
     await window.kdDialog(error.message);
   } finally {
     updating = false;
     if (button) {
-      button.disabled = Boolean(button.closest('[data-stale-confirmation]'));
+      // An accepted response already gave this button the server's state, e.g.
+      // 整理 stays disabled while running (BUG-20260916-01). Only a request
+      // that was not accepted restores the local in-flight state.
+      if (!accepted || button.closest('[data-stale-confirmation]'))
+        button.disabled = Boolean(button.closest('[data-stale-confirmation]'));
       if (suggesting || recovering) button.textContent = buttonLabel;
     }
   }
 });
+
+// Redacted local diagnostics (BUG-20260917-01): report only that a concern's
+// local audio failed to play and the MediaError code. Nothing visible changes.
+document.addEventListener('error', event => {
+  const audio = event.target;
+  if (!audio?.matches?.('audio[data-audio-identity]')) return;
+  const url = new URL(audio.currentSrc || audio.getAttribute('src') || '', window.location.href);
+  const match = url.pathname.match(/^\/items\/(\d+)\/confirmation-audio$/);
+  if (!match) return;
+  const body = new FormData();
+  body.append('concern_id', url.searchParams.get('concern_id') || '');
+  body.append('media_error', String(audio.error?.code || 0));
+  fetch(`/items/${match[1]}/confirmation-audio/diagnostic`, {method: 'POST', body}).catch(() => {});
+}, true);
 
 let pollTimer;
 async function pollStatus() {

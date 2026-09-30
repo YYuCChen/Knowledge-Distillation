@@ -269,7 +269,20 @@ def test_review_records_and_reuses_only_matching_valid_result(tmp_path):
     record = json.loads(path.read_text())
     record['text'] = 'invalid result'
     path.write_text(json.dumps(record))
-    assert reviewer.review_in_directory(source, tmp_path).candidate
+    # Assertion correction (Q11, 2026-09-29): since 1293fa5 the request-owned
+    # receipt keeps the model's own response. A changed evidence copy is never
+    # reused; the intact prepared response is re-validated instead of paid for again.
+    assert reviewer.review_in_directory(source, tmp_path).candidate.text == '这是完整原文。'
+    assert len(calls) == 1
+    for receipt in (tmp_path / 'review-response.responses').glob('[0-9a-f]*.json'):
+        saved = json.loads(receipt.read_text())
+        saved['text'] = json.dumps({'candidate_text': '被改动的回复。', 'issues': []}, ensure_ascii=False)
+        receipt.write_text(json.dumps(saved, ensure_ascii=False))
+    record = json.loads(path.read_text())
+    record['text'] = 'invalid result'
+    path.write_text(json.dumps(record))
+    # With no intact response left, only a new model call can supply a result.
+    assert reviewer.review_in_directory(source, tmp_path).candidate.text == '这是完整原文。'
     assert len(calls) == 2
     assert build_reviewer(Client('model-b')).review_in_directory(source, tmp_path).candidate
     assert len(calls) == 3

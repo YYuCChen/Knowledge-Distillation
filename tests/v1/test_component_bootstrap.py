@@ -56,3 +56,61 @@ def test_manifest_http_failure_keeps_target_and_has_recovery_message(tmp_path, m
         time.sleep(.01)
     assert '程序未被替换' in body and 'HTTPStatusError' not in body
     assert not target.exists() and not root.exists()
+
+
+
+import pytest
+
+
+@pytest.mark.parametrize('role,fault,lead', [
+    ('base', 404, '应用基础文件不可取得。'), ('docling', 404, '文档识别组件不可取得。'),
+    ('delta', 404, '目标更新文件不可取得。'), ('docling', 'timeout', '文档识别组件需处理。'),
+    ('base', 'hash', '应用基础文件需处理。'),
+])
+def test_component_asset_failure_is_not_reported_as_missing_manifest(tmp_path, monkeypatch, role, fault, lead):
+    # BUG-20260914-09 (Q9): the installer page names the failing resource and
+    # stage; only a manifest 404 may say the release has no platform manifest.
+    import hashlib, re, time
+    from types import SimpleNamespace
+    import httpx
+    import knowledge_distiller.v1.component_bootstrap as module
+    from knowledge_distiller.v1.component_assembly import ComponentAssembly
+    from knowledge_distiller.v1.component_download import ComponentDownloader
+    data = b'expected'
+    asset = {'url': 'https://example.com/asset.zip?private=secret', 'sha256': hashlib.sha256(data).hexdigest(),
+             'size': len(data), 'unpacked_size': 100}
+    other = {**asset, 'sha256': 'f' * 64}
+    release = {'version': '2.0', 'target_identity': 'fixture', 'deltas': [],
+               'base': asset if role == 'base' else other, 'docling': asset if role == 'docling' else other}
+    def respond(request):
+        if fault == 'timeout':
+            raise httpx.ReadTimeout('timed out', request=request)
+        if isinstance(fault, int):
+            return httpx.Response(fault)
+        return httpx.Response(200, content=b'x' * len(data))
+    client = httpx.Client(transport=httpx.MockTransport(respond))
+    class Assembly(ComponentAssembly):
+        def prepare(self, envelope, **kwargs):  # Signed-manifest parsing is covered elsewhere.
+            return release, SimpleNamespace(assets=[asset], download_bytes=len(data), source='base')
+    class Stream:
+        def __enter__(self): return SimpleNamespace(raise_for_status=lambda: None, iter_bytes=lambda size: [b'{}'])
+        def __exit__(self, *args): pass
+    monkeypatch.setattr(module, 'ComponentAssembly', Assembly)
+    monkeypatch.setattr(module, 'ComponentDownloader', lambda cache, **kwargs: ComponentDownloader(cache, client=client))
+    monkeypatch.setattr(module.httpx, 'stream', lambda *args, **kwargs: Stream())
+    root, target = tmp_path / 'data', tmp_path / 'program'
+    app = create_installer(target=target, data_root=root, platform='macos-arm64',
+        public_key='unused', manifest_url='https://example.com/release.json')
+    web = app.test_client()
+    token = re.search(r'name="token" value="([^"]+)"', web.get('/').text).group(1)
+    for action in ('prepare', 'install'):
+        web.post('/', data={'token': token, 'action': action, 'target': str(target), 'data_root': str(root)})
+        deadline = time.monotonic() + 3
+        while web.get('/status').get_json()['busy']:
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+    state = web.get('/status').get_json()
+    assert state['error'].startswith(lead) and '当前发布尚未提供' not in state['error']
+    assert state['problem']['resource_role'] == role and state['problem']['stage'] == 'prepare'
+    assert 'secret' not in web.get('/').text and not target.exists()
+    client.close()

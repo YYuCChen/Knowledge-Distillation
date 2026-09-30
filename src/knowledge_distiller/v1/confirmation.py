@@ -57,7 +57,11 @@ def alignment_blocks(original, candidate):
 
 
 class ConfirmationAudioError(RuntimeError):
-    pass
+    def __init__(self, code="confirmation_audio_unavailable", *, stage=None):
+        super().__init__(code)
+        # Internal step for local diagnostics (BUG-20260917-01): locate,
+        # ffmpeg, invalid_output or write. The user-facing code is unchanged.
+        self.stage = stage
 
 
 class FFmpegConfirmationClipper:
@@ -86,11 +90,13 @@ class FFmpegConfirmationClipper:
             audio, recovery, candidate_text, concern, blocks=blocks
         )
         if time_range is None:
-            raise ConfirmationAudioError("confirmation_audio_unavailable")
+            raise ConfirmationAudioError("confirmation_audio_unavailable", stage="locate")
         start, end = time_range
-        output_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = output_path.with_name(f'.{output_path.stem}-{uuid4().hex}.tmp.wav')
+        stage = "write"
         try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            stage = "ffmpeg"
             result = self.runner.run(
                 [
                     "ffmpeg",
@@ -114,16 +120,21 @@ class FFmpegConfirmationClipper:
                 ]
             )
             if result.returncode != 0:
-                raise ConfirmationAudioError("confirmation_audio_unavailable")
+                raise ConfirmationAudioError("confirmation_audio_unavailable", stage="ffmpeg")
+            stage = "invalid_output"
             duration = _wav_duration(temporary)
             if abs(duration - (end - start)) > 0.25:
-                raise ConfirmationAudioError("confirmation_audio_unavailable")
+                raise ConfirmationAudioError("confirmation_audio_unavailable", stage=stage)
+            stage = "write"
             os.replace(temporary, output_path)
             return output_path
         except (OSError, ValueError, wave.Error):
-            raise ConfirmationAudioError("confirmation_audio_unavailable") from None
+            raise ConfirmationAudioError("confirmation_audio_unavailable", stage=stage) from None
         finally:
-            temporary.unlink(missing_ok=True)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def locate_concern_audio(
