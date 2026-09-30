@@ -319,6 +319,63 @@ mark {
   min-width: 56px;
 }
 
+/* Quick-note identity card (user design 2026-09-30): index | what to decide, the
+   whole message, source and time | the choices stacked vertically. */
+.failure-card.capture-card {
+  grid-template-columns: 32px minmax(0, 1fr) max-content;
+}
+
+.capture-content {
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Type roles from the design master: Knowledge/Title for the decision point,
+   Confirmation/Fragment for the original words, UI/Error, UI/Meta. */
+.capture-content > .capture-point {
+  font: 600 14px/20px "Noto Serif SC", serif;
+  letter-spacing: 1.4px;
+  color: var(--text);
+}
+
+.capture-content > .capture-error {
+  font: 400 11px/16.5px "Noto Sans SC", sans-serif;
+  color: #a83224;
+}
+
+.capture-content > .capture-text {
+  margin: 0;
+  font: 500 10px/16px "Noto Serif SC", serif;
+  letter-spacing: 0.5px;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.capture-content > .capture-meta {
+  font: 400 10px/16px "Noto Sans SC", sans-serif;
+  letter-spacing: 0.5px;
+  color: #6b6a65;
+}
+
+.capture-actions {
+  display: grid;
+  gap: 8px;
+  align-self: center;
+}
+
+.capture-actions form {
+  margin: 0;
+}
+
+.capture-actions .primary-small,
+.capture-actions .secondary-small {
+  width: 100%;
+  min-width: 56px;
+}
+
 
 @media (max-width: 720px) {
   .todo-card {
@@ -335,6 +392,10 @@ mark {
 
   .failure-card {
     grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .failure-card.capture-card {
+    grid-template-columns: 24px minmax(0, 1fr) max-content;
   }
 
   .failure-actions {

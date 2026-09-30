@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from pathlib import Path
 
 from .database import connect
 
@@ -113,15 +114,36 @@ class FeishuInbox:
             return None
         if not message.message_id:
             raise ValueError('飞书消息缺少稳定标识，不能推进补收进度。')
-        text, same_topic, error = '', False, None
-        if message.message_type in {'image','post'}:
+        text, same_topic, error, voice, plain = '', False, None, None, None
+        if message.message_type == 'post':
+            try:
+                from .feishu_images import post_text
+                plain = post_text(message.content)
+            except (ValueError, TypeError, KeyError, AttributeError, StopIteration):
+                error = '这条富文本消息无法完整读取，请改为纯文字重新发送。'
+        if error:
+            pass
+        elif plain is not None:
+            # A post without pictures is text, e.g. Markdown pasted into Feishu (BUG-20260930-04).
+            text = plain
+            if not text.strip():
+                error = '请输入需要处理的文字或链接。'
+        elif message.message_type in {'image','post'}:
             try:
                 from .feishu_images import blocks
                 blocks(message.message_type,message.content)
             except (ValueError,TypeError,KeyError,StopIteration):
                 error = '图片消息无法完整读取，请重新发送原图或支持的图文消息。'
+        elif message.message_type == 'audio':
+            # A voice note is a quick-note capture (docs/roadmap/handoff-feishu-capture.md).
+            try:
+                voice = json.loads(message.content)
+                if not isinstance(voice.get('file_key'), str) or not voice['file_key']:
+                    raise ValueError()
+            except (ValueError, TypeError, AttributeError):
+                error = '这条语音无法读取，请重新发送。'
         elif message.message_type != 'text':
-            error = '支持文字、链接和图片，暂不接收文件或音频。'
+            error = '支持文字、链接、图片和语音，暂不接收文件。'
         else:
             try:
                 text = json.loads(message.content)['text']
@@ -138,13 +160,31 @@ class FeishuInbox:
                     error = '请输入需要处理的文字或链接。'
             except (ValueError, TypeError, KeyError):
                 error = '这条消息的文字格式无法读取，请重新发送。'
+        from .captures import record_adjacency, record_capture, now_ms, DEFAULT_WINDOW_MINUTES, WINDOW_SETTING
+        from .intake import links_in
         with connect(self.store.path) as db:
             db.execute('BEGIN IMMEDIATE')
-            db.execute('''INSERT INTO feishu_receipts
+            inserted = db.execute('''INSERT INTO feishu_receipts
                 (app_id,message_id,created_ms,raw_json,text,same_topic,state,error)
                 VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(app_id,message_id) DO NOTHING''',
                 (self.app_id, message.message_id, message.created_ms, _json(message.raw),
-                 text, int(same_topic), 'rejected' if error else 'received', error))
+                 text, int(same_topic), 'rejected' if error else 'received', error)).rowcount
+            if inserted and not error:
+                # Adjacency and the capture itself are facts of this moment; they
+                # cannot be reconstructed later, so they are stored with the receipt.
+                window = db.execute('SELECT value FROM settings WHERE key=?', (WINDOW_SETTING,)).fetchone()
+                record_adjacency(db, self.app_id, message.message_id, message.created_ms,
+                                 int(window['value']) if window and window['value'].isdigit() else DEFAULT_WINDOW_MINUTES)
+                vault = db.execute("SELECT value FROM settings WHERE key='vault_path'").fetchone()
+                vault = Path(vault['value']) if vault and vault['value'] else None
+                if voice is not None:
+                    record_capture(db, self.app_id, message.message_id, message_type='audio',
+                                   created_ms=message.created_ms, received_ms=now_ms(), file_key=voice['file_key'],
+                                   duration_ms=voice.get('duration') if isinstance(voice.get('duration'), int) else None,
+                                   vault=vault)
+                elif (message.message_type == 'text' or plain is not None) and not same_topic and not links_in(text):
+                    record_capture(db, self.app_id, message.message_id, message_type='text',
+                                   created_ms=message.created_ms, received_ms=now_ms(), text=text, vault=vault)
             return dict(db.execute('SELECT * FROM feishu_receipts WHERE app_id=? AND message_id=?',
                                   (self.app_id, message.message_id)).fetchone())
 

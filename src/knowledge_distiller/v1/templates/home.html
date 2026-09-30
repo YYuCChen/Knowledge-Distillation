@@ -49,7 +49,7 @@
           <input type="hidden" name="content_kind" value="{{ request.form.get('content_kind', '') if request.form.get('content_kind') in ['links', 'text'] else '' }}">
           <input type="hidden" name="processing_mode" value="">
           {% if form_error %}<p class="form-error" role="alert">{{ form_error }}</p>{% endif %}
-          <p class="organization-feedback" role="alert" {% if not organization_status.error and not organization_status.failed %}hidden{% endif %}>{% if organization_status.error %}{{ organization_status.error }}{% elif organization_status.failed %}本次知识整理未完成，已有主题和新知保留，可以重试。{% endif %}</p>
+          <p class="organization-feedback" role="alert" data-organization-event="{{ organization_status.latest_event or '' }}" data-organization-failed="{{ 'true' if organization_status.failed else 'false' }}" {% if not organization_status.error %}hidden{% endif %}>{% if organization_status.error %}{{ organization_status.error }}{% elif organization_status.failed %}本次知识整理未完成，已有主题和新知保留，可以重试。{% endif %}</p>
           <span data-source-filename></span>
           <label class="upload" title="选择一个 PDF、EPUB 或 Markdown 文件">
             <img
@@ -157,7 +157,7 @@
       </section>
     {% endif %}
 
-    {% if todo %}
+    {% if todo or pending_captures %}
       <section class="section" data-sync-key="todo" data-live-status>
         <h2>待处理</h2>
         {% set failed_count = todo | selectattr('state', 'equalto', 'failed') | list | length %}
@@ -171,7 +171,7 @@
               <img src="{{ url_for('static', filename='icons/state-yellow.svg') }}" alt="">
             </span>
             <span class="summary-text">
-              {% if confirmation_count %}{{ confirmation_count }} 处待确认{% endif %}{% if failed_count %}{% if confirmation_count %} · {% endif %}{{ failed_count }} 项需处理{% endif %}
+              {% if confirmation_count %}{{ confirmation_count }} 处待确认{% endif %}{% if failed_count %}{% if confirmation_count %} · {% endif %}{{ failed_count }} 项需处理{% endif %}{% if pending_captures %}{% if confirmation_count or failed_count %} · {% endif %}{{ pending_captures|length }} 条随手记待定身份{% endif %}
             </span>
             <span class="panel-chevron">
               <img class="closed-chevron" src="{{ url_for('static', filename='icons/chevron-up.svg') }}" alt="">
@@ -180,6 +180,23 @@
           </summary>
           <div class="todo-list">
             {% set cards = namespace(index=0) %}
+            {% for capture in pending_captures %}
+              {% set cards.index = cards.index + 1 %}
+              <div class="todo-card-shell" data-sync-key="capture-{{ capture.id }}"><article class="todo-card failure-card capture-card">
+                <span class="todo-index">{{ cards.index }}</span>
+                <div class="todo-content capture-content">
+                  <span class="capture-point">身份待定：这条消息是谁的话？</span>
+                  {% if capture.error %}<span class="capture-error" role="alert">{{ capture.error }}</span>{% endif %}
+                  <p class="capture-text">{{ capture.text }}</p>
+                  <span class="capture-meta">飞书随手记 · {{ capture.received }}</span>
+                </div>
+                <div class="capture-actions">
+                  <form action="{{ url_for('capture_identity', capture_id=capture.id) }}" method="post"><button class="primary-small" name="identity" value="my_thought">我的想法</button></form>
+                  <form action="{{ url_for('capture_identity', capture_id=capture.id) }}" method="post"><button class="secondary-small" name="identity" value="third_party">第三方内容</button></form>
+                  {% if capture.annotation %}<form action="{{ url_for('capture_identity', capture_id=capture.id) }}" method="post"><button class="secondary-small" name="identity" value="annotation">附言</button></form>{% endif %}
+                </div>
+              </article></div>
+            {% endfor %}
             {% for item in todo %}
               {% if item.state == 'waiting_user' %}
                 {% if confirmation_error and confirmation_error.id == item.id %}

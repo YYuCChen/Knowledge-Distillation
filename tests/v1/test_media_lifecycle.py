@@ -24,10 +24,25 @@ def captured(tmp_path, *, kind='douyin'):
     return store, item, material, fact, content
 
 
+def raw_written(store, material, tmp_path):
+    """Schema 20: bytes may be released only after the material's raw file exists."""
+    from knowledge_distiller.v1.raw import RawLedger
+    vault = tmp_path / 'raw-vault'
+    vault.mkdir(exist_ok=True)
+    store.set_setting('vault_path', str(vault))
+    ledger = RawLedger(store, version='测试')
+    record = ledger.ensure_material(material)
+    assert ledger.write(record) == 'placed'
+    return vault, ledger.record(record['raw_id'])
+
+
 def test_completed_releases_content_not_identity_and_reclaims_disk(tmp_path):
     store, item, material, fact, content = captured(tmp_path)
     before = store.path.stat().st_size
     store.mark_succeeded(item)
+    assert release_completed(store.path) == 0  # Its raw file is not written yet.
+    vault, record = raw_written(store, material, tmp_path)
+    assert (vault / f"附件/raw/{record['raw_id']}/image-1.png").read_bytes() == content
     assert release_completed(store.path) == len(content)
     assert store.media_members(material) == []
     assert store.media_manifest(material)[0] == dict(member_id='image-1', position=0,
@@ -64,6 +79,7 @@ def test_unfinished_and_shared_references_protect_bytes(tmp_path, state):
             db.execute("UPDATE source_media SET content=X''")
     store.mark_failed(shared, 'reviewing', 'temporary')
     store.dismiss_item(shared)
+    raw_written(store, material, tmp_path)
     assert release_completed(store.path) == len(content)
 
 
@@ -93,6 +109,7 @@ def test_upgrade_preserves_history_preview_does_not_write(tmp_path):
     assert report[0]['bytes'] == len(content) and report[0]['disposition'] == 'eligible'
     assert store.path.read_bytes() == before
     store.initialize()
+    raw_written(store, material, tmp_path)  # Even with raw written, legacy media stays.
     assert release_completed(store.path) == 0
     assert store.media_members(material)[0]['content'] == content
     with connect(store.path) as db:
@@ -139,6 +156,7 @@ def test_vault_preview_preserves_user_changes_and_shared_references(tmp_path):
 def test_duplicate_capture_reuses_text_fact_after_media_release(tmp_path):
     store, item, material, fact, content = captured(tmp_path)
     store.mark_succeeded(item)
+    raw_written(store, material, tmp_path)
     release_completed(store.path)
     duplicate = store.create_item('https://www.douyin.com/video/123')
     same = store.attach_material(duplicate, CapturedMaterial('douyin', '123', 'url', 'url', {}, tmp_path/'owned.raw', 1))
@@ -153,6 +171,7 @@ def test_failed_compaction_retries_after_restart_without_releasing_twice(tmp_pat
     import knowledge_distiller.v1.media_lifecycle as module
     store, item, material, fact, content = captured(tmp_path)
     store.mark_succeeded(item)
+    raw_written(store, material, tmp_path)
     real_compact = module.compact
     monkeypatch.setattr(module, 'compact', lambda path: (_ for _ in ()).throw(sqlite3.OperationalError('busy')))
     TemporaryArtifacts(store, tmp_path/'runtime').sweep()
@@ -165,3 +184,21 @@ def test_failed_compaction_retries_after_restart_without_releasing_twice(tmp_pat
     with connect(store.path) as db:
         row = db.execute('SELECT released_bytes,compacted_bytes FROM media_lifecycle').fetchone()
         assert tuple(row) == (len(content), len(content))
+
+
+def test_unwritten_raw_keeps_bytes_and_the_guard_refuses_release(tmp_path):
+    # Vault unavailable: the raw record waits, and so do the image bytes.
+    from knowledge_distiller.v1.raw import RawLedger
+    store, item, material, fact, content = captured(tmp_path)
+    store.mark_succeeded(item)
+    store.set_setting('vault_path', str(tmp_path / 'missing-vault'))
+    ledger = RawLedger(store, version='测试')
+    record = ledger.ensure_material(material)
+    assert ledger.write(record) == 'vault_unavailable'
+    assert release_completed(store.path) == 0
+    with connect(store.path) as db:
+        with pytest.raises(sqlite3.IntegrityError, match='immutable'):
+            db.execute("UPDATE source_media SET content=X''")
+    (tmp_path / 'missing-vault').mkdir()
+    assert ledger.write_pending() == {record['raw_id']: 'placed'}
+    assert release_completed(store.path) == len(content)

@@ -15,10 +15,13 @@
 | 飞书 | `v1/feishu_*` |
 | OCR与选装ASR | `v1/ocr.py`、`v1/vision_ocr.py`、`v1/qwen_component.py`及适配器 |
 | 更新 | `v1/updates.py`、`v1/update_web.py`及打包辅助模块 |
+| raw/ 写入与存量迁移 | `v1/raw.py`、`v1/raw_migration.py`（[raw 接口规格](raw-interface.md)） |
+| 飞书随手记 | `v1/captures.py`、`v1/capture_schema.py`（[需求第 7 节](../roadmap/handoff-feishu-capture.md#7-实现与验收第-2-阶段2026-09-29)） |
+| Jev 封闭判断（随手记身份、历史召回） | `v1/jev.py`、`v1/jev_recall.py`（[Jev 说明](jev.md)） |
 
 入口导入v1.app；V1仍复用根包的primary等模块。不能因代码在v1之外或看起来年代较早就删除。
 
-SQLite是持久化正式记录，UI消费应用状态而不维护第二套权威。外部采集和模型调用边界需要明确校验和失败反馈。平台适配保留各自支持类型、证据定位和登录限制。
+SQLite记录加工过程（任务、疑点、订正、飞书收据）；vault 的 raw/ 是知识库正本，数据库中的 raw 索引可由它重建（[决策0004](../decisions/0004-phase2-alignment.md) D1）。UI消费应用状态而不维护第二套权威。外部采集和模型调用边界需要明确校验和失败反馈。平台适配保留各自支持类型、证据定位和登录限制。
 
 Mac平台OCR使用Apple Vision；文档处理包含Docling；选装Qwen拥有独立安装生命周期。删除某个旧测试目录的模型不等于取消产品文档处理能力，也不允许删除用户正式安装组件。
 

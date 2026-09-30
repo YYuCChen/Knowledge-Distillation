@@ -49,7 +49,10 @@ def test_scope_command_survives_restart_and_maps_member_confirmation(setup):
     item=items(inbox,'om_1')[0]['item_id']
     inbox.store.mark_waiting(item,{'snapshot':'已核对原文','concerns':[],'review_required':True})
     card=FeishuCards(inbox,None,None,restored).card('om_1')
-    assert card['header']['title']['content']=='待你操作'
+    # Assertion correction (Q11, 2026-09-29): c838cc8 restored the V1.2 ordinary
+    # concern card per the 2026-09-15 decision (AGENTS.md), whose title is
+    # "有内容待你确认"; the six-state status header applies to other receipts.
+    assert card['header']['title']['content']=='有内容待你确认'
 
 
 def test_changed_scope_requires_new_confirmation_and_updates_both_entrypoints(setup):

@@ -5,7 +5,7 @@ from .vault_access import publication_status, open_saved_location
 import json
 import re
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote, urlsplit
@@ -468,11 +468,24 @@ def create_app(
     @app.get("/items/<int:item_id>/confirmation-audio")
     def confirmation_audio(item_id: int):
         path = service().confirmation_audio(item_id, request.args.get("concern_id", ""))
-        if path is None:
-            abort(404)
+        if path is None or not path.is_file():
+            abort(404)  # A missing clip is recorded as serve_failed by the distiller.
         response = send_file(path, mimetype="audio/wav", conditional=True)
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    @app.post("/items/<int:item_id>/confirmation-audio/diagnostic")
+    def confirmation_audio_diagnostic(item_id: int):
+        # The page reports only that playback failed and the MediaError code.
+        if store.item_bundle(item_id) is None:
+            abort(404)
+        from .audio_diagnostics import record
+        code = request.form.get("media_error", "")
+        runtime_root = getattr(service(), 'runtime_root', None)
+        if runtime_root is not None:
+            record(runtime_root, item_id, request.form.get("concern_id", ""), 'playback_failed',
+                   media_error=int(code) if code.isdigit() and len(code) < 3 else 0)
+        return "", 204
 
     @app.post('/items/<int:item_id>/recover-confirmation-audio')
     def recover_confirmation_audio(item_id: int):
@@ -482,6 +495,19 @@ def create_app(
         except (ValueError, LookupError) as error:
             return str(error), 409
         return redirect(url_for('home', item=item_id))
+
+    @app.post("/captures/<int:capture_id>/identity")
+    def capture_identity(capture_id: int):
+        from .captures import Captures
+        try:
+            captures = Captures(store)
+            captures.decide(capture_id, request.form.get("identity", ""))
+            captures.write_ready()
+        except (ValueError, LookupError) as error:
+            return str(error), 409, {'Content-Type': 'text/plain; charset=utf-8'}
+        if wake_worker is not None:
+            wake_worker()
+        return redirect(url_for("home"))
 
     @app.post("/items/<int:item_id>/continue")
     def continue_knowledge(item_id: int):
@@ -638,7 +664,34 @@ def _home_context(
         "draft": draft,
         "confirmation_error": confirmation_error,
         "confirmation_count": sum(max(1, len(item["confirmation"]["concerns"])) for item in todo if item["state"] == "waiting_user"),
+        "pending_captures": _pending_captures(store),
     }
+
+
+JEV_ERRORS = {
+    'jev_unauthorized': 'Jev 没有接受 API Key，请在设置中更换密钥。',
+    'jev_busy': 'Jev 服务繁忙，这条没能自动判断。',
+    'jev_request_failed': '连不上 Jev，这条没能自动判断。',
+    'jev_response_invalid': 'Jev 返回的结果不完整，这条没能自动判断。',
+    'jev_request_invalid': 'Jev 不接受这次请求，这条没能自动判断。',
+    'jev_secret_unavailable': '读取不到 Jev API Key，这条没能自动判断。',
+}
+
+
+def _pending_captures(store):
+    """Quick notes whose identity only the user can decide (never assumed to be theirs)."""
+    from .captures import Captures, JEV_FAILED
+    captures = Captures(store)
+    views = []
+    for capture in captures.pending():
+        received = datetime.fromtimestamp(capture['received_ms'] / 1000, UTC).astimezone()
+        basis = (captures.identity(capture['capture_id']) or {}).get('basis') or ''
+        # A Jev failure is an error to report and fix, shown as such (user decision 2026-09-30).
+        error = JEV_ERRORS.get(basis[len(JEV_FAILED):], 'Jev 判断出错，这条没能自动判断。') if basis.startswith(JEV_FAILED) else None
+        views.append({'id': capture['capture_id'], 'text': capture['text'] or '', 'error': error,
+                      'received': f'{received.month} 月 {received.day} 日  {received:%H:%M}',
+                      'annotation': captures.recent_delivery(capture) is not None})
+    return views
 
 
 def _item_view(row, vault_path: str | None, data_root=None) -> dict[str, object]:
@@ -710,7 +763,7 @@ def _item_view(row, vault_path: str | None, data_root=None) -> dict[str, object]
                   if row["error_code"] == "source_unconfirmed" and not confirmation
                   else ERROR_TEXT.get(row["error_code"], "无法完整读取此文件，请修正内容后重新投递。" if row["retryable"] == 0 else "本次处理未完成，可以稍后重试。")),
         "error_code": row["error_code"],
-        "needs_settings": row["error_code"] in {"weibo_not_configured", "weibo_runtime_unavailable", "zhihu_not_configured", "zhihu_runtime_unavailable", "x_not_configured", "x_runtime_unavailable", "xiaohongshu_not_configured", "xiaohongshu_runtime_unavailable", "youtube_not_configured", "youtube_runtime_unavailable", "vault_not_configured", "douyin_not_configured", "chrome_remote_debugging_disabled", "llm_not_configured", "asr_runtime_unavailable", "review_runtime_unavailable"},
+        "needs_settings": row["error_code"] in {"weibo_not_configured", "weibo_runtime_unavailable", "zhihu_not_configured", "zhihu_runtime_unavailable", "x_not_configured", "x_runtime_unavailable", "xiaohongshu_not_configured", "xiaohongshu_runtime_unavailable", "youtube_not_configured", "youtube_runtime_unavailable", "vault_not_configured", "douyin_not_configured", "douyin_login_required", "chrome_remote_debugging_disabled", "llm_not_configured", "asr_runtime_unavailable", "review_runtime_unavailable"},
         "confirmation": confirmation,
     }
 

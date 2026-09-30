@@ -90,6 +90,8 @@ def check(destination, audio=None, *, ocr_image=None, pdf=None, epub=None, compo
         report.update(ok=False,failed_stage=stage,error_type=type(error).__name__)
         if isinstance(getattr(error,'code',None),str):
             report['error_code']=error.code
+        if callable(getattr(error,'diagnostic',None)):
+            report['error_diagnostic']=error.diagnostic()
         if isinstance(error,subprocess.CalledProcessError):
             report['diagnostic']=error.stderr[-1500:]
     Path(destination).write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')

@@ -59,6 +59,11 @@ def test_image_source_uses_shared_ocr_review_and_releases_media_only_after_done(
     resolve_review(inbox.store,row,pending,'manual','确认文字',concern['audio_name'])
     assert inbox.store.item_bundle(item)['source_fact_id'] is not None
     inbox.store.mark_succeeded(item)
+    # Schema 20: bytes are released only after the material's raw file exists.
+    assert release_completed(inbox.store.path)==0
+    from .test_media_lifecycle import raw_written
+    vault,record=raw_written(inbox.store,inbox.store.item_bundle(item)['material_id'],inbox.store.path.parent)
+    assert (vault/f"附件/raw/{record['raw_id']}/image-1.png").read_bytes()==out.getvalue()
     assert release_completed(inbox.store.path)==len(out.getvalue())
     with connect(inbox.store.path) as db:
         assert db.execute('SELECT length(content) FROM source_media').fetchone()[0]==0

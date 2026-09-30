@@ -75,6 +75,7 @@ class BrowserCollectionClient:
                 data = json.loads(value['body'])
             except (KeyError, TypeError, ValueError) as error:
                 raise CollectionError('collection_upstream_failed') from error
+            _require_session(data)
             if not isinstance(data, dict) or data.get('status_code') != 0:
                 raise CollectionError('collection_upstream_failed')
             return data
@@ -119,6 +120,7 @@ class BrowserCollectionClient:
             if not isinstance(event, dict) or event.get('status') != 200:
                 raise CollectionError('collection_upstream_failed')
             data = event.get('data')
+            _require_session(data)
             if not isinstance(data, dict) or data.get('status_code') != 0:
                 raise CollectionError('collection_upstream_failed')
             detail = data.get('aweme_detail')
@@ -278,9 +280,17 @@ class BrowserCollectionClient:
         if not isinstance(event, dict) or event.get('status') != 200:
             raise CollectionError('collection_membership_incomplete')
         data = event.get('data')
+        _require_session(data)
         if not isinstance(data, dict) or data.get('status_code') != 0:
             raise CollectionError('collection_upstream_failed')
         return data
+
+
+def _require_session(data):
+    """HTTP 200 + status_code 8 is Douyin's "用户未登录": the dedicated profile
+    has no live session, which is not an upstream failure (BUG-20260922-02)."""
+    if isinstance(data, dict) and data.get('status_code') == 8:
+        raise ChromeSessionError('douyin_login_required')
 
 
 def _log_read(stage, kind, number, response, data, *, exception=False, key=None):

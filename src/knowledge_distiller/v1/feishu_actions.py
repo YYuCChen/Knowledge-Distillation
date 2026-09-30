@@ -29,7 +29,9 @@ class FeishuActions:
             if value.get('kind')=='retry_receipt':
                 with connect(self.inbox.store.path) as db:
                     db.execute("UPDATE feishu_receipts SET state='received',error=NULL WHERE app_id=? AND message_id=? AND state='needs_desktop' AND error IS NOT NULL",(self.inbox.app_id,receipt['message_id']))
-                return self._toast('success','已接收重试，将重新下载原图。')
+                from .captures import Captures
+                voice=Captures(self.inbox.store).for_message(self.inbox.app_id,receipt['message_id']) is not None
+                return self._toast('success','已接收重试，将重新下载语音。' if voice else '已接收重试，将重新下载原图。')
             if value.get('kind')=='content_choice':
                 self.intake.choose(receipt['message_id'],value.get('choice'))
                 return self._toast('success','已保存处理方式。')

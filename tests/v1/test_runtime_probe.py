@@ -11,6 +11,11 @@ from knowledge_distiller.v1 import runtime_probe as probe
 
 @pytest.fixture
 def runtime(monkeypatch,tmp_path):
+    # Fixture correction: the fake subprocess.run below is process-global, and a
+    # first import of pycryptodome (via lark_oapi) runs platform.architecture()
+    # through it. Import the real runtime first so the file passes in isolation.
+    import lark_oapi  # noqa: F401
+    from Crypto.Cipher import AES  # noqa: F401
     tensor=SimpleNamespace(item=lambda:3.0)
     mx=SimpleNamespace(array=lambda x:x,sum=lambda x:tensor)
     modules={
@@ -53,6 +58,17 @@ def test_explicit_image_failure_is_reported_not_success(runtime,monkeypatch):
     assert probe.check(runtime,ocr_image=Path('broken.png')) == 1
     report=json.loads(runtime.read_text())
     assert report['failed_stage'] == 'ocr' and report['error_code'] == 'ocr_invalid_image'
+
+
+def test_packaged_ocr_failure_reports_redacted_engine_stage(runtime,monkeypatch):
+    from knowledge_distiller.v1.ocr import OcrError
+    def failed(path):
+        raise OcrError('ocr_inference_failed',stage='handler_init',cause=ValueError('private'))
+    monkeypatch.setattr(probe,'_check_ocr',failed)
+    assert probe.check(runtime,ocr_image=Path('x.jpg')) == 1
+    report=json.loads(runtime.read_text())
+    assert report['error_diagnostic'] == {'stage':'handler_init','exception_type':'ValueError'}
+    assert 'private' not in runtime.read_text()
 
 
 def test_only_explicit_document_inputs_are_converted(runtime,monkeypatch):

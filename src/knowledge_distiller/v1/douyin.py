@@ -22,10 +22,26 @@ logger = logging.getLogger(__name__)
 
 
 class DouyinSourceError(RuntimeError):
-    pass
+    def __init__(self, code, *, subcode=None, exception_type=None):
+        super().__init__(code)
+        # Redacted local diagnostics (BUG-20260922-02): a stable internal
+        # subcode and an exception class name, never cookies, URLs or text.
+        self.subcode = subcode
+        self.exception_type = exception_type
+
+    def diagnostic(self):
+        return {key: value for key, value in (('subcode', self.subcode),
+                ('exception_type', self.exception_type)) if value}
 
 
-class _LoginRequired(Exception):
+class _Diagnosed(Exception):
+    def __init__(self, subcode=None, exception_type=None):
+        super().__init__(subcode)
+        self.subcode = subcode
+        self.exception_type = exception_type
+
+
+class _LoginRequired(_Diagnosed):
     pass
 
 
@@ -33,11 +49,11 @@ class _Unsupported(Exception):
     pass
 
 
-class _SourceUnavailable(Exception):
+class _SourceUnavailable(_Diagnosed):
     pass
 
 
-class _UpstreamFailed(Exception):
+class _UpstreamFailed(_Diagnosed):
     pass
 
 
@@ -84,13 +100,14 @@ class DouyinSource:
         except _LoginRequired as error:
             if authority is not None and connection_authority(self._session.store) == authority:
                 self._session.store.require_relogin('douyin')
-            raise DouyinSourceError("douyin_login_required") from error
+            raise DouyinSourceError("douyin_login_required", subcode=error.subcode) from error
         except _Unsupported as error:
             raise DouyinSourceError("douyin_input_unsupported") from error
         except _SourceUnavailable as error:
-            raise DouyinSourceError("douyin_source_unavailable") from error
+            raise DouyinSourceError("douyin_source_unavailable", subcode=error.subcode) from error
         except _UpstreamFailed as error:
-            raise DouyinSourceError("douyin_upstream_failed") from error
+            raise DouyinSourceError("douyin_upstream_failed", subcode=error.subcode,
+                                    exception_type=error.exception_type) from error
 
         if isinstance(downloaded, DouyinTextDownload):
             if authority is not None and connection_authority(self._session.store) != authority:
@@ -199,7 +216,7 @@ class InstalledDouyinBinding:
     async def _download(self, submitted_url: str, work_dir: Path) -> DouyinDownload:
         from .douyin_collections import CollectionError
         if not self._cookies:
-            raise _LoginRequired
+            raise _LoginRequired('no_saved_session')
         try:
             from config import ConfigLoader
             from core.api_client import DouyinAPIClient, LoginRequiredError
@@ -208,7 +225,7 @@ class InstalledDouyinBinding:
             from storage import FileManager
             from utils.validators import is_short_url, normalize_short_url
         except ImportError as error:
-            raise _UpstreamFailed from error
+            raise _UpstreamFailed('downloader_unavailable', type(error).__name__) from error
 
         work_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -228,11 +245,13 @@ class InstalledDouyinBinding:
                     raise _Unsupported
                 item_id = str(parsed.get("aweme_id") or "")
                 if not item_id:
-                    raise _SourceUnavailable
+                    raise _SourceUnavailable('item_unresolved')
 
                 detail = await detail_client.get_video_detail(item_id)
-                if not isinstance(detail, dict) or str(detail.get("aweme_id") or "") != item_id:
-                    raise _SourceUnavailable
+                if not isinstance(detail, dict):
+                    raise _SourceUnavailable('detail_missing')
+                if str(detail.get("aweme_id") or "") != item_id:
+                    raise _SourceUnavailable('detail_identity_mismatch')
                 try:
                     native = parse_douyin_text(detail)
                 except DouyinTextError as error:
@@ -255,17 +274,18 @@ class InstalledDouyinBinding:
                         'published_at': published_at})
                 downloader = VideoDownloader(
                     _download_config(work_dir),
-                    client,
+                    _VerifiedDetailClient(client, item_id, detail),
                     FileManager(str(work_dir)),
                     _CookieManager(self._cookies),
                     database=None,
                 )
                 result = await downloader.download(parsed)
                 if not _one_success(result):
-                    raise _SourceUnavailable
-                media_path = _find_media(work_dir, item_id)
-                if media_path is None:
-                    raise _SourceUnavailable
+                    raise _SourceUnavailable('download_failed')
+                matches = _media_matches(work_dir, item_id)
+                if len(matches) != 1:
+                    raise _SourceUnavailable('media_missing' if not matches else 'media_ambiguous')
+                media_path = matches[0]
                 current = await detail_client.get_video_detail(item_id)
                 if not isinstance(current, dict) or content_version(current) != content_version(detail):
                     raise DouyinSourceError('source_snapshot_changed')
@@ -283,17 +303,40 @@ class InstalledDouyinBinding:
                 )
         except ChromeSessionError as error:
             if str(error) == 'douyin_login_required':
-                raise _LoginRequired from error
+                raise _LoginRequired('session_logged_out') from error
             raise
         except LoginRequiredError as error:
-            raise _LoginRequired from error
+            raise _LoginRequired('downloader_login_required') from error
         except CollectionError as error:
             raise DouyinSourceError(str(error)) from error
         except (_LoginRequired, _Unsupported, _SourceUnavailable, DouyinSourceError):
             raise
         except Exception as error:
             logger.warning("Douyin download failed: %s", type(error).__name__)
-            raise _UpstreamFailed from error
+            raise _UpstreamFailed('upstream_exception', type(error).__name__) from error
+
+
+class _VerifiedDetailClient:
+    """Serve the browser-verified work detail to the installed downloader.
+
+    Its own unsigned detail request is refused with HTTP 403 even for a live
+    session (BUG-20260922-02), after the authorized browser already read and
+    identity-checked this exact work. Every other call reaches the real client.
+    """
+
+    def __init__(self, client, item_id: str, detail: Mapping[str, object]):
+        self._client = client
+        self._item_id = item_id
+        self._detail = detail
+
+    async def get_video_detail(self, aweme_id, *args, **kwargs):
+        if str(aweme_id) != self._item_id:
+            raise _SourceUnavailable('detail_identity_mismatch')
+        import copy
+        return copy.deepcopy(dict(self._detail))
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
 
 
 class _CookieManager:
@@ -334,12 +377,16 @@ def _one_success(result: object) -> bool:
     return total == 1 and failed == 0 and success + skipped == 1
 
 
-def _find_media(work_dir: Path, item_id: str) -> Path | None:
-    matches = [
+def _media_matches(work_dir: Path, item_id: str) -> list[Path]:
+    return [
         path
         for path in work_dir.rglob(f"{item_id}.mp4")
         if path.is_file() and not path.is_symlink()
     ]
+
+
+def _find_media(work_dir: Path, item_id: str) -> Path | None:
+    matches = _media_matches(work_dir, item_id)
     return matches[0] if len(matches) == 1 else None
 
 

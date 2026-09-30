@@ -196,3 +196,21 @@ def test_transport_diagnostics_keep_counts_without_error_content():
     raw = b'PRIVATE stream disconnected - retrying sampling request (1/5) idle timeout waiting for websocket'
     assert codex._transport_diagnostics(raw) == {'stream_retry_count':1,'websocket_idle_timeout':True}
     assert codex._transport_diagnostics(None) == {'stream_retry_count':0,'websocket_idle_timeout':False}
+
+
+def test_packaged_minimal_path_still_finds_the_users_cli(monkeypatch, tmp_path):
+    # The frozen Mac app sets PATH to its bundle and system dirs only; the CLI
+    # the user logged in with lives outside it (Homebrew/npm, or ChatGPT.app's
+    # codex-cli/bin since its 2026-09 layout). BUG found in phase-2 packaging.
+    import os
+    monkeypatch.setattr(codex.sys, 'platform', 'darwin')
+    monkeypatch.delenv('KNOWLEDGE_DISTILLER_CODEX', raising=False)
+    monkeypatch.setattr(codex.shutil, 'which', lambda name: None)
+    present = {'/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex'}
+    monkeypatch.setattr(codex.os, 'access', lambda path, mode: path in present)
+    assert codex.executable() == '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex'
+    present.add('/opt/homebrew/bin/codex')
+    assert codex.executable() == '/opt/homebrew/bin/codex'  # The user's own CLI first.
+    present.clear()
+    with pytest.raises(LLMRequestError, match='llm_config_unavailable'):
+        codex.executable()

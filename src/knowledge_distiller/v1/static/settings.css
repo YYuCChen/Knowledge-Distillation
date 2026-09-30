@@ -169,7 +169,8 @@
   margin: 0;
 }
 
-.model-setting > summary {
+.model-setting > summary,
+.jev-setting > summary {
   cursor: pointer;
   list-style: none;
 }
@@ -269,8 +270,13 @@
 #llm-form .codex-connect { grid-column: 1; justify-self: start; }
 #llm-save, #asr-save, .asr-key-form button { grid-column: 2; }
 .asr-key-form .model-secret { grid-column: 1; }
+/* Jev: the key and its save button on one line (user design 2026-09-30). */
+.jev-form { grid-template-columns: minmax(0, 1fr) max-content; }
+.jev-form .model-secret { grid-column: 1; }
+.jev-form button { grid-column: 2; }
 @media (max-width: 720px) {
-  #llm-form .codex-connect, #llm-save, #asr-save, .asr-key-form button { grid-column: 1; }
+  #llm-form .codex-connect, #llm-save, #asr-save, .asr-key-form button, .jev-form .model-secret, .jev-form button { grid-column: 1; }
+  .jev-form { grid-template-columns: 1fr; }
 }
 
 #llm-form[data-provider="codex"] .model-provider { grid-column: 1; grid-row: 1; }

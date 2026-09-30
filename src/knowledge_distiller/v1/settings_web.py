@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import sys
 
-from flask import Blueprint, current_app, redirect, render_template, request, url_for
+from flask import Blueprint, abort, current_app, redirect, render_template, request, url_for
 
 from .chrome import ChromeSessionError
 from .settings import SettingsError, SettingsService
@@ -75,6 +75,9 @@ MESSAGES = {
     "youtube_login_required": "请先在当前 Chrome 会话登录 YouTube，再次连接。",
     "source_files_opened": "",
     "source_files_open_failed": "未能打开原文件副本目录，请检查应用数据目录。",
+    "jev_saved": "Jev 已启用：随手记身份判断和整理时的历史召回改由 Jev 完成。",
+    "jev_key_invalid": "Jev 没有接受这个 API Key，请检查后重新保存。",
+    "jev_unreachable": "暂时连不上 Jev，API Key 未保存，请稍后再试。",
     "douyin_browser_missing": "未找到 Google Chrome，请先安装后连接抖音。",
     "douyin_browser_unavailable": "抖音专用浏览器未能启动，请重新连接。",
     "douyin_connected": "抖音连接已更新。",
@@ -173,6 +176,7 @@ def settings_blueprint(service: SettingsService) -> Blueprint:
                 "qwen_install_started",
                 "vault_saved",
                 "reading_style_installed", "reading_style_disabled",
+                "jev_saved",
                 "feishu_configuration_saved",
                 "feishu_receipt_renewed",
                 "feishu_pairing_started",
@@ -182,6 +186,14 @@ def settings_blueprint(service: SettingsService) -> Blueprint:
             draft_asr=request.args.get("asr", ""),
             draft_llm=request.args.get("llm", ""),
         )
+
+    @blueprint.post('/settings/jev')
+    def save_jev():
+        try:
+            service.save_jev_key(request.form.get('api_key', ''))
+        except SettingsError as error:
+            return _back(str(error), 'models')
+        return _back('jev_saved', 'models')
 
     @blueprint.post('/settings/feishu')
     def configure_feishu():
@@ -237,6 +249,13 @@ def settings_blueprint(service: SettingsService) -> Blueprint:
         try:connection.renew_receipt(request.form.get('message_id',''),request.form.get('card_id',''))
         except Exception:return _back('feishu_configuration_failed','paths')
         return _back('feishu_receipt_renewed','paths')
+
+    @blueprint.get('/settings/platforms/<platform>/health')
+    def platform_health(platform):
+        try:
+            return service.platform_health(platform)
+        except LookupError:
+            abort(404)
 
     @blueprint.post('/settings/<platform>/cancel-login')
     def cancel_login(platform):

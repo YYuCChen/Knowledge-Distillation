@@ -157,7 +157,19 @@ def main(argv=None):
     parser.add_argument('--check-ocr-image', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--check-pdf', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--check-epub', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--migrate-raw', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--vault', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--dry-run', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--report', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.migrate_raw:
+        # One-time, explicit export of existing source facts to raw/外部/.
+        from .raw_migration import main as migrate_raw
+        if args.vault is None:
+            parser.error('--migrate-raw 需要 --vault')
+        raise SystemExit(migrate_raw(['--data-dir', str(args.data_dir), '--vault', str(args.vault)]
+                                     + (['--dry-run'] if args.dry_run else [])
+                                     + (['--report', str(args.report)] if args.report else [])))
     if args.check_runtime:
         from .runtime_probe import check
         raise SystemExit(check(args.check_runtime,args.check_audio,ocr_image=args.check_ocr_image,
@@ -226,9 +238,6 @@ def main(argv=None):
 
     def reveal(url, bundle_id=None):
         # The worker never owns Cocoa objects; tick_ marshals its callbacks.
-        if recovery_alert is not None:
-            native.activateIgnoringOtherApps_(True)
-            return False
         return reopener.request()
 
 
@@ -357,45 +366,15 @@ def main(argv=None):
         state_path.unlink(missing_ok=True)
         lock.close();output.flush()
 
-    recovery_alert = None
-    recovery_outcome = None
+    from .desktop_pages import DockFollowUp
+    follow_up = DockFollowUp()
 
     def completed(outcome):
-        nonlocal recovery_alert, recovery_outcome
         logging.info('desktop outcome request=%s status=%s target=%s epoch=%s generation=%s received=%s visible=%s focused=%s reason=%s',
             outcome.request_id, outcome.status, outcome.target, outcome.connection_epoch,
             outcome.generation, outcome.received, outcome.visible, outcome.focused, outcome.reason)
-        needs_recovery = outcome.status in {'unknown', 'failed'} or (
-            outcome.status == 'online' and outcome.reason != 'opened_handshake')
-        if not needs_recovery or recovery_alert is not None:
-            return
-        native.activateIgnoringOtherApps_(True)
-        recovery_alert = NSAlert.alloc().init()
-        recovery_alert.setMessageText_('未能显示已有页面' if outcome.status != 'failed' else '暂未打开产品页面')
-        recovery_alert.setInformativeText_('旧页面可能仍保留。你可以重试显示，或另开产品页面；另开可能保留两个页面，原有输入不会被替换。')
-        recovery_alert.addButtonWithTitle_('重试显示')
-        recovery_alert.addButtonWithTitle_('另开产品页面')
-        recovery_alert.addButtonWithTitle_('取消')
-        recovery_outcome = outcome
-        for button, selector in zip(recovery_alert.buttons(),
-                                    ('retryDisplay:', 'openAnotherPage:', 'cancelRecovery:')):
-            button.setTarget_(delegate)
-            button.setAction_(selector)
-        recovery_alert.layout()
-        recovery_alert.window().makeKeyAndOrderFront_(None)
-        # This is a nonmodal native window. The application timer and normal
-        # event loop keep running while it is visible; no runModal/network wait.
-
-    def finish_recovery(action):
-        nonlocal recovery_alert, recovery_outcome
-        if recovery_alert is None:
-            return
-        outcome = recovery_outcome
-        recovery_alert.window().orderOut_(None)
-        recovery_alert = recovery_outcome = None
-        if action == 'retry':
-            reopener.request()
-        elif action == 'new':
+        # No dialog (user decision 2026-09-30); see DockFollowUp.
+        if follow_up.after(outcome) == 'open_another':
             reopener.request(explicit_request=outcome.request_id)
 
     def activate_page(page):
@@ -468,9 +447,6 @@ def main(argv=None):
                         reveal(url)
                     if updates.info['feed_url'] and updates.info['public_key']:
                         updates.start('check', automatic=True)
-        def retryDisplay_(self,sender):finish_recovery('retry')
-        def openAnotherPage_(self,sender):finish_recovery('new')
-        def cancelRecovery_(self,sender):finish_recovery('cancel')
         def openHome_(self,sender):reveal(url)
         def openSettings_(self,sender):open_url(url+'settings')
         def applicationShouldHandleReopen_hasVisibleWindows_(self,application,visible):

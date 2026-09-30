@@ -96,6 +96,13 @@ class FeishuCards:
             parts=db.execute('SELECT * FROM feishu_parts WHERE app_id=? AND message_id=? ORDER BY position',
                 (self.inbox.app_id,message_id)).fetchall()
         if receipt is None:raise ValueError('unknown receipt')
+        from .captures import Captures
+        if (Captures(self.inbox.store).for_message(self.inbox.app_id,message_id) is not None
+                and receipt['state']!='needs_desktop' and not parts):
+            # Quick note: zero friction, one confirmation, no questions in the chat.
+            return {'schema':'2.0','config':{'update_multi':True,'enable_forward':False},
+                    'header':{'title':{'tag':'plain_text','content':'已记录'}},
+                    'body':{'elements':[text('原话已保存。')]}}
         from .feishu_scopes import items as receipt_items
         items=receipt_items(self.inbox,message_id)
         actionable=False

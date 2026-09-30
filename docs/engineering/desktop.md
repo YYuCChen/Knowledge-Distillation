@@ -10,11 +10,22 @@ V1.3 协议实现说明。原生 Chrome/Safari 成品的真实 Dock 验收另行
 
 一次 open request 等待匹配 nonce 的页面握手，超时不循环自动新开；后续 Dock 请求复用当前状态。`ReopenOutcome` 分 opening、online、visible_reported、unknown、failed，并独立记录 received、visible、focused，foreground_verified 始终不因协议响应置真。显式另开操作用原 request_id 去重。
 
-Mac 主循环通过 NativeReopener 排队；探测、导航宽限和握手等待均在线程内，openURL、原生激活和结果展示回到主线程。未知/隐藏 ACK/打开失败展示单例、非模态 NSAlert 窗口，提供重试显示、另开产品页面、取消，并说明旧页可能仍保留。窗口不运行网络等待或 runModal，因此正常 timer 与事件循环继续。没有引入 Apple Events、辅助功能、扩展或 WebView。
+Mac 主循环通过 NativeReopener 排队；探测、导航宽限和握手等待均在线程内，openURL、原生激活和结果展示回到主线程。未知、隐藏 ACK 与打开失败都不再弹出窗口，只写日志（2026-09-30 用户裁决）；连续两次未知时另开一页。没有引入 Apple Events、辅助功能、扩展或 WebView。
 
 当前时序是待原生成品量测的初始值：导航宽限 2 秒、探测 1 秒、一次恢复 3 秒、打开握手 10 秒。浏览器暂停、进程退出与导航存在不可完全观察的边界；实际正常关闭矩阵必须证明能恢复，不能用 unknown 掩盖零页失败。应用内慢导航与浏览器 reload 的 0.4/2/5 秒合成服务器延迟已纳入浏览器 runner；更慢载入、bfcache、休眠及 Safari 需单独原生证据。
 
 favicon 从既有 `packaging/assets/app-icon.png` 用系统 sips 派生 16/32/48/64/96 PNG；文件名带内容摘要，base 模板统一声明，desktop.js 以 protocol 查询参数更新旧缓存。现有静态 PNG 打包 glob 应包含资源，最终包仍须逐项读回。错误页必须由 Web Owner 继承同一 base；本模块不改 Web 错误行为。
+
+## 产品承诺边界（Dock 方案③，2026-09-29 用户裁决）
+
+BUG-20260915-01 选定方案③：不新增 Apple Events、辅助功能或浏览器扩展权限，也不改用应用自有窗口。承诺边界如下，产品说明（README）同步写明：
+
+- 所有产品页面都已关闭（pagehide 与流终止、或原生证实浏览器实例已退出）时，程序坞点击重新打开一页，一次请求只开一页。
+- 仍有产品页面时，只激活承载它的浏览器并请求该页显示；不保证切换到已有的后台标签。隐藏或未聚焦的 ACK 不算显示成功，但不再弹出提示（2026-09-30 用户裁决：既然无法切到后台标签，提示只会打扰）。页面在一分钟内连续两次都没有回应时，可能已经消失却没有发出 pagehide，这时另开一页，替代原提示中的"另开产品页面"（`desktop_pages.DockFollowUp`）。
+- 多个产品页面时的目标页规则：最近一次可见且聚焦、或有真实交互的页面优先；都没有时按打开顺序取最早的一页。同一状态下结果确定，可以解释，不随机。
+- 已有页面不重新载入、不导航、不改写输入，草稿保留；未证实关闭的页面不会被当作零页而另开重复页。
+
+合成与隔离验证见 `tests/v1/test_dock_option3_browser.py`（Playwright 自带 Chromium，非用户日常 Chrome）：多标签选页与草稿、关标签、关窗口、无 pagehide 的异常消失、浏览器退出后的原生信号。Playwright 会把每个页面都模拟为可见且聚焦，隔离浏览器无法复现“后台标签”状态，这一项由单元测试的 hidden ACK 判定覆盖，真实 Chrome 与 Safari 的程序坞点击（含退出浏览器）列入用户验收清单。
 
 ## 验证入口
 

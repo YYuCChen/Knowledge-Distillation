@@ -26,29 +26,30 @@
 
 - **平台链接**：抖音、小红书、知乎、微博、X、YouTube、B 站中已支持的内容类型。具体获取受登录、权限和平台限制影响，并非任意页面都能处理；视频主要处理讲述内容，不分析画面。
 - **文本与文档**：直接粘贴正文，或提交单个 PDF、EPUB、UTF-8 Markdown 文件；不递归导入整个目录或 Vault。
-- **飞书投递**：配置自己的机器人后，可在已绑定私聊中发送链接和文字。电脑需要开机且应用运行；支持已接入的图片、图文投递与确认；不支持任意文件或音频附件。
+- **飞书投递与随手记**：配置自己的机器人后，可在已绑定私聊中发送链接、文字、语音和已支持的附件。电脑需要开机且应用运行；本人想法、附言和外部材料分开保存，拿不准的身份会回到首页由你判断。
 
 ### 下载与开始使用
 
-- **当前公开版：V1.3**（构建 `2026.09.15.6`）。[发行与验收说明](docs/releases/v1.3/release-20260915.md)。
-- **Mac**：[下载 Apple Silicon 安装器](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.15.6/KnowledgeDistillerInstaller-macos-arm64.zip)，约 33 MB，要求 macOS 14+。解压并打开安装器，选择应用和数据目录；不支持 Intel Mac。
-- **Windows**：[下载 x64 安装器](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.15.6/KnowledgeDistillerInstaller-windows-x86_64.exe)，约 46 MB。运行安装器并选择可写的程序与数据目录。已验证 Windows 10 22H2，Windows 11 与 ARM64 尚未验证。
+- **当前公开版：V2.0**（macOS 构建 `2026.09.30.4`）。[发行与验收说明](docs/releases/v2.0/release-20260930.md)。
+- **Mac**：[下载 Apple Silicon 安装器](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.30.4/KnowledgeDistillerInstaller-2026.09.30.4-Mac-arm64.zip)，约 31 MB，要求 macOS 14+。解压并打开安装器，选择应用和数据目录；不支持 Intel Mac。公开 V1.3 可直接在应用内更新。
+- **Windows**：本轮没有开发、构建或验收 Windows V2.0；Windows 当前最后一个公开版仍是 [V1.3](https://github.com/YYuCChen/Knowledge-Distillation/releases/tag/v2026.09.15.6)。保留旧版下载和签名更新入口只为避免既有安装失效，不代表继续维护或发布 Windows V2.0。
 - **首次安全提示**：Mac 当前未公证，Windows 未作发行者代码签名。请核对下载来源，按系统提示处理，不关闭整体安全防护；Mac 可参考 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。GitHub 的 `Source code` 压缩包不是应用安装包。
 - **首次配置**：在设置中选择已在 Obsidian 打开过的 Vault，配置模型连接，再用一段短文本试一次蒸馏。按所用功能准备 Chrome、Codex、Obsidian 及自己的账号，无需另搭 Python 环境。
 - **按需启用**：处理有声内容前配置语音识别，可选本地 Qwen 或云端豆包；Qwen 需主动下载安装并保存启用。内容平台连接、飞书机器人按需配置。
+- **从程序坞找回页面（Mac）**：产品页面已关闭时，点击程序坞图标会重新打开一页；页面仍在浏览器里时，应用会尽量把浏览器调到前台并请求显示该页，但不能保证切换到已有的后台标签。不再弹出提示；连续两次点击仍没有页面响应时，会另开一页。同时开着多个产品页面时，优先最近使用过的那一页。
 
 应用启动后在浏览器中使用，可在设置中自定义本地访问名称和固定端口。Windows 服务窗口需保持运行；只关闭网页不会退出后台。
 
-本版沿用 CPython 3.11.16，主程序、Qwen、更新辅助程序与安装器均自带运行环境。首次安装另需下载约 1.55 GB（Mac）或 1.85 GB（Windows）的程序及文档模型资源；可选 Qwen 另计。文档模型与固定平台基座在后续发布中复用。
+本版沿用 CPython 3.11.16，主程序、Qwen、更新辅助程序与安装器均自带运行环境。Mac 首次安装另需下载约 1.55 GB 的程序及文档模型资源；可选 Qwen 另计。文档模型与固定平台基座在后续发布中复用。
 
-V1.3 将同一素材内等价疑点合并为一次判断，沿用原疑点卡设计，后台同步各处决定，并保留跨页面草稿。来源修改与证据校验继续加强，无效提议保留原文，关键疑点继续确认；优先采用合格原语言字幕，支持分段识别恢复，并修复等待队列顺序和 Apple Vision 极小边界舍入问题。Mac、Windows 均支持签名差量升级：检查更新、下载差量、安装并重启，展示实际下载大小。两端离线 OCR、PDF、EPUB 样本已检查，PDF 结构识别可能不同；Windows SSH 环境下 B 站超时清理可能延迟，普通桌面场景仍待验证。
+V2.0 新增不可变 raw 素材层、飞书随手记和 `vault-kit`：外部材料、本人附言与本人自述保持身份边界，原始材料可以写入个人 Vault，再由 Agent 维护 wiki、关系和待确认内容。应用内的 Topic、关系、洞见、演化、重新审查与谱系继续保存在 SQLite。V1.3 到 V2.0 的 Mac 签名差量约 4.43 MB；新安装走固定基座和组件清单。V1.3 已定稿的疑点卡、一次判断同步和主要交互不因本版改变。
 
 ### 数据、费用与更新
 
-- **本地保存**：应用记录保存在本机 SQLite；Obsidian 保存来源型笔记。AI 新知和相关个人判断当前保留在应用内，不自动写入 Obsidian，也不做双向同步。
+- **本地保存**：应用记录保存在本机 SQLite；Obsidian Vault 保存来源型笔记和 V2.0 的 raw 原始素材。AI 新知及相关个人判断仍以应用数据库为权威；`vault-kit` 维护的是个人 wiki，不是应用数据库的双向镜像。
 - **本地优先不等于全离线**：已有内容浏览与搜索在本机完成；获取网络材料、使用云模型或飞书需要联网。云端处理会将任务所需材料交给对应服务，账号、额度及费用由你自行管理。
 - **备份两处**：同时备份应用数据与 Vault。Mac 数据位于 `~/Library/Application Support/Knowledge Distiller/`，Windows 位于 `%LOCALAPPDATA%\Knowledge Distiller`；凭据迁移可能需要重新配置。
-- **升级**：V1.1、V1.2 .3 和 .9 使用上述安装器完成一次性迁移，选择原程序与原数据目录，合格旧文档模型会复用；旧应用更新器不会自动桥接新协议。迁移后可在设置中检查更新，使用固定基座到目标版本的签名差量。Windows 已使用文件内二进制补丁，本次差量约 6.78 MB，Mac 约 5.45 MB，不承诺每版同样大小。安装前正常退出旧应用，等待任务结束；不要同时运行两个版本或用旧版打开新版数据。
+- **升级**：公开 V1.3 可在设置中直接更新到 V2.0；更早版本使用上述安装器完成迁移，选择原程序与原数据目录，合格旧文档模型会复用。安装前正常退出旧应用并同时备份应用数据与 Vault；V2.0 会把数据库升级到 schema 21，不能再用 V1.3 打开升级后的数据库。不要同时运行两个版本。
 
 ### 关于项目
 
@@ -60,17 +61,19 @@ V1.3 将同一素材内等价疑点合并为一次判断，沿用原疑点卡设
 
 ## 源码开发
 
-源码面向希望理解、测试或继续改进项目的开发者。当前快照主要在 macOS 上开发和验证；发行包仍以上方 Releases 中的实际平台说明为准。
+源码面向希望理解、测试或继续改进项目的开发者。V2.0 只在 macOS 上开发和验证；仓库中保留的 Windows 路径是 V1.3 历史基线，不是当前门禁。
 
 ~~~bash
 git clone https://github.com/YYuCChen/Knowledge-Distillation.git
 cd Knowledge-Distillation
 uv venv --python 3.11.16
-uv pip install --python .venv/bin/python -e '.[test]'
+uv pip sync --python .venv/bin/python packaging/mac-requirements-lock.txt
+uv pip install --python .venv/bin/python --no-deps -e .
+.venv/bin/python -m playwright install chromium
 PYTHONPATH=src .venv/bin/python -m pytest -p no:cacheprovider
 ~~~
 
-本次源码、构建与运行环境统一使用 CPython 3.11.16，具体版本及下载校验契约见 [Python 运行环境](docs/engineering/python-runtime.md)。完整来源采集、OCR、语音和桌面打包功能还需要项目依赖中列出的系统组件、浏览器登录态或用户自己的服务凭据；源码不会提供任何账号、Cookie、API Key、数据库或 Vault。
+依赖按 Mac 发行锁安装，与构建环境逐一一致；不要用 `pip install -e '.[test]'`，它不读锁，会装出更新的版本。Playwright 的 Chromium 只用于浏览器回归测试，未安装时这些用例会跳过。本次源码、构建与运行环境统一使用 CPython 3.11.16，具体版本及下载校验契约见 [Python 运行环境](docs/engineering/python-runtime.md)。完整来源采集、OCR、语音和桌面打包功能还需要项目依赖中列出的系统组件、浏览器登录态或用户自己的服务凭据；源码不会提供任何账号、Cookie、API Key、数据库或 Vault。
 
 开发时请使用独立的测试数据目录，不要把个人 SQLite、Obsidian Vault、浏览器资料、模型缓存或凭据复制到仓库。提交 Issue 或日志前，也请先移除来源文本、账号标识、Cookie、路径和其他私人信息。安全问题请参阅 [SECURITY.md](SECURITY.md)。
 
@@ -117,7 +120,7 @@ PYTHONPATH=src .venv/bin/python -m pytest -p no:cacheprovider
 | 来源型笔记 | Markdown、Obsidian | 保存可独立阅读的观点、依据与来源文本 |
 | 文档与图片 | Docling；Mac 平台 OCR 使用 Apple Vision，Windows 使用 PaddleOCR | 恢复正文、结构与图片文字 |
 | 语音与生成 | Qwen3-ASR／豆包；用户配置的 LLM 连接 | 音频转写、观点提炼与知识整理 |
-| 桌面发行 | PyInstaller；固定平台基座、独立文档模型、签名清单；Mac Sparkle 解码与 Windows HDiffPatch 文件内补丁 | 自带环境的安装器及差量更新 |
+| 桌面发行 | PyInstaller；固定平台基座、独立文档模型、签名清单；Mac Sparkle 差量解码 | 自带环境的安装器及签名差量更新；Windows 路径冻结在 V1.3 |
 
 SQLite 与 Markdown 分开，是因为结构化关系和独立阅读有不同需要。笔记可以脱离应用打开，但仅靠笔记无法恢复全部新知、判断与任务状态，因此备份需要同时保留应用数据和 Vault。
 
@@ -134,7 +137,7 @@ SQLite 与 Markdown 分开，是因为结构化关系和独立阅读有不同需
 | 整理与个人判断 | 材料之间的联系如何转化为思考线索？ | 主动整理、新知候选、认可与再思考、个人批注 |
 | 桌面发行 | 怎样从开发环境走向日常使用？ | 平台连接、飞书投递、运行依赖打包，以及 Mac／Windows 安装包 |
 
-2026 年 9 月，项目发布 V1.0，提供 Mac 与 Windows 发行包。此后的工作继续围绕真实使用展开，包括核对与阅读体验、固定本地访问地址，以及双平台构建和升级验证。开发与验收进展不等同于正式发布，当前可下载版本以上半部和 Releases 为准。
+2026 年 9 月，项目先后发布 V1.0～V1.3，提供 Mac 与 Windows 发行包；随后发布仅面向 macOS 的 V2.0，把 raw 素材层、飞书随手记、个人 wiki 工具和二期知识骨架接入正式产品。开发与验收进展不等同于正式发布，当前可下载版本以上半部和 Releases 为准。
 
 ### 迭代方向
 
@@ -152,4 +155,4 @@ SQLite 与 Markdown 分开，是因为结构化关系和独立阅读有不同需
 
 这些探索尚未确定产品形式和交付时间。当前不会据此承诺新入口、知识图谱或自动生成个人立场；正式功能与变化会在每次发行时说明，并同步更新 README。
 
-V1.2 已发布，来源完整性、字幕优先、失败恢复和等待队列顺序的行为与验收边界见[版本说明](docs/releases/v1.2/README.md)。
+V2.0 的交付、升级链和平台边界见[版本说明](docs/releases/v2.0/release-20260930.md)；V1.2、V1.3 的历史验收仍分别保留在[版本记录](docs/releases/)中。

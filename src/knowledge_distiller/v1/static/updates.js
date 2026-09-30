@@ -2,7 +2,23 @@
   const seed = document.querySelector('#update-state');
   if (!seed) return;
   let state = JSON.parse(seed.textContent);
-  if (state.manual_download_url) return;
+  // The startup document-model check can finish after this page rendered
+  // (BUG-20260915-02): follow the polled state, not the server-rendered notice.
+  const notice = document.querySelector('[data-document-component]');
+  function syncDocumentComponent(component) {
+    if (!notice || !component?.state) return;
+    notice.dataset.documentComponent = component.state;
+    notice.hidden = !['checking', 'unavailable'].includes(component.state);
+    if (!notice.hidden && component.message) notice.textContent = component.message;
+  }
+  if (state.manual_download_url) {
+    const waitForComponent = setInterval(async () => {
+      if (notice?.dataset.documentComponent !== 'checking') { clearInterval(waitForComponent); return; }
+      try { const response = await fetch('/settings/updates/status'); if (response.ok) syncDocumentComponent((await response.json()).document_component); }
+      catch (_) {}
+    }, 3000);
+    return;
+  }
   let pending = false;
   const group = document.querySelector('#version-updates');
   const text = (selector, value) => { const node = document.querySelector(selector); if (node) node.textContent = value; };
@@ -74,7 +90,7 @@
   render();
   setInterval(async () => {
     if (pending || document.hidden) return;
-    try { const response = await fetch('/settings/updates/status'); if (response.ok) { state = await response.json(); render(); } }
+    try { const response = await fetch('/settings/updates/status'); if (response.ok) { state = await response.json(); render(); syncDocumentComponent(state.document_component); } }
     catch (_) { if (state.phase === 'installing') text('[data-update-status]', '应用正在重启，请使用重新打开的页面。'); }
   }, 3000);
 })();

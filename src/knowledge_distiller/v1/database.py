@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 21
 TOPIC_STATEMENTS = (
     """CREATE TABLE topic_entries (
         topic_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -23,6 +23,44 @@ TOPIC_STATEMENTS = (
         singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
         knowledge_count INTEGER NOT NULL CHECK(knowledge_count >= 0),
         input_signature TEXT NOT NULL
+    )""",
+)
+
+RAW_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS raw_records (
+        raw_id TEXT PRIMARY KEY CHECK (raw_id GLOB 'R-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]'),
+        subject_kind TEXT NOT NULL CHECK (subject_kind IN ('material', 'capture')),
+        subject_id INTEGER NOT NULL,
+        identity TEXT NOT NULL CHECK (identity IN ('第三方', '本人', '本人附言')),
+        relative_path TEXT NOT NULL UNIQUE,
+        content TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+        attachments_json TEXT NOT NULL DEFAULT '[]',
+        supersedes TEXT UNIQUE,
+        origin TEXT NOT NULL CHECK (origin IN ('app', 'migration', 'vault')),
+        created_at TEXT NOT NULL,
+        written_at TEXT,
+        written_vault TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS raw_records_subject ON raw_records(subject_kind, subject_id)",
+    """CREATE TRIGGER IF NOT EXISTS raw_records_content_no_update
+    BEFORE UPDATE OF raw_id, subject_kind, subject_id, identity, relative_path, content, content_sha256,
+        attachments_json, supersedes, origin, created_at ON raw_records BEGIN
+        SELECT RAISE(ABORT, 'raw record is immutable');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS raw_records_written_once
+    BEFORE UPDATE OF written_at, written_vault ON raw_records WHEN OLD.written_at IS NOT NULL BEGIN
+        SELECT RAISE(ABORT, 'raw record was already written');
+    END""",
+    """CREATE TRIGGER IF NOT EXISTS raw_records_no_delete
+    BEFORE DELETE ON raw_records BEGIN
+        SELECT RAISE(ABORT, 'raw record is immutable');
+    END""",
+    """CREATE TABLE IF NOT EXISTS raw_counters (
+        day TEXT PRIMARY KEY CHECK (length(day) = 8),
+        last INTEGER NOT NULL CHECK (last BETWEEN 0 AND 9999)
     )""",
 )
 
@@ -175,7 +213,7 @@ def initialize(path: Path) -> None:
             connection.execute(SUBMITTED_SCHEMA)
             connection.execute("ALTER TABLE source_facts ADD COLUMN lineage_json TEXT NOT NULL DEFAULT '{}'")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, SCHEMA_VERSION):
+        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, SCHEMA_VERSION):
             raise RuntimeError(f"unsupported database version: {version}")
 
         if version < 6:
@@ -338,4 +376,25 @@ def initialize(path: Path) -> None:
                 connection.execute("BEGIN IMMEDIATE")
             from .confirmation_schema import migrate
             migrate(connection)
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+        if version < 20:
+            # raw/ index (docs/engineering/raw-interface.md). A V1.3 binary cannot
+            # open schema 20; that rule is unchanged from earlier upgrades.
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+            for statement in RAW_STATEMENTS:
+                connection.execute(statement)
+            from .media_lifecycle import require_raw
+            require_raw(connection)
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+        if version < 21:
+            # Feishu quick notes: append-only captures, transcripts, adjacency and
+            # identity events (docs/roadmap/handoff-feishu-capture.md).
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+            from .capture_schema import STATEMENTS as CAPTURE_STATEMENTS
+            for statement in CAPTURE_STATEMENTS:
+                connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

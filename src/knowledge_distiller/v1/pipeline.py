@@ -111,10 +111,19 @@ class Distiller:
                 directory.mkdir(parents=True, exist_ok=True)
                 write_record(directory / 'ocr-diagnostic.json', {
                     'code': error.code, 'member_id': error.member_id,
+                    **error.diagnostic(),
+                    **({'native_error': error.native_error} if getattr(error, 'native_error', None) else {}),
                     'completed_members': error.completed_members,
                     'completed_images': getattr(error, 'completed_images', []),
                     'line_diagnostics': getattr(error, 'line_diagnostics', [])})
             code = error.args[0] if error.args else "distill_failed"
+            if isinstance(error, DouyinSourceError) and error.diagnostic():
+                # Redacted internal subcode only (BUG-20260922-02).
+                from .local_records import write_record
+                directory = self.runtime_root / "items" / str(item_id)
+                directory.mkdir(parents=True, exist_ok=True)
+                write_record(directory / 'source-diagnostic.json',
+                             {'code': str(code), **error.diagnostic()})
             self.store.mark_failed(item_id, self._item(item_id)["phase"], str(code),
                                    rejection_reason=error.rejection_reason if isinstance(error, KnowledgeModelError) else None)
             return DistillResult(item_id, "failed")
@@ -419,6 +428,7 @@ class Distiller:
         return result
 
     def recover_confirmation_audio(self, item_id, *, token, concern_id):
+        from .audio_diagnostics import record
         row = self._item(item_id)
         pending = _pending_confirmation(row, token)
         concern = next((c for c in pending['concerns'] if c.get('audio_name') == concern_id), None)
@@ -426,22 +436,30 @@ class Distiller:
             raise ValueError('疑点已更新，请查看当前状态。')
         timeline = pending.get('audio_timeline')
         if not timeline:
+            record(self.runtime_root, item_id, concern_id, 'timeline_missing')
             raise ValueError('原音定位信息不可用，已有文字和判断已保留。')
         directory = self.runtime_root / 'items' / str(item_id)
         from .file_lock import acquire
         from .audio_location_recovery import recover_locations
-        audio = StandardAudio(self.transcript_audio(item_id, token=token), timeline['duration_seconds'])
+        try:
+            audio = StandardAudio(self.transcript_audio(item_id, token=token), timeline['duration_seconds'])
+        except ValueError as error:
+            record(self.runtime_root, item_id, concern_id, 'source_audio_missing', error=error)
+            raise
         recovery = PrimaryRecovery(timeline['text'], None,
             tuple(PrimaryChunk(**chunk) for chunk in timeline['chunks']),
             timeline_status=timeline.get('timeline_status', 'unverified'))
         issue = ReviewConcern(concern['start'], concern['end'], concern['text'], concern['reason'], True)
         name = f'concern-1-{uuid4().hex}.wav'
         output = directory / 'confirmation' / name
+        stage = 'relocation_failed'
         try:
             with acquire(directory / '.audio-recovery.lock'):
                 if locate_concern_audio(audio, recovery, pending['snapshot'], issue) is None:
                     recovery = recover_locations(self.recognizer, audio, recovery, directory)
+                stage = 'clip_failed'
                 self.confirmation_clipper.clip(audio, recovery, pending['snapshot'], issue, output)
+                stage = 'state_save_failed'
                 concern.update(audio_file=name, audio_recovery_required=False)
                 concern['reason'] = concern['reason'].removesuffix(' 局部原音定位恢复未完成，已保留疑点与原文，可重试恢复。')
                 pending['audio_alignment'] = 'local_preview_10s_v3'
@@ -450,7 +468,14 @@ class Distiller:
                 self.store.update_confirmation_suggestions(item_id, row['confirmation_json'], pending)
         except (OSError, ValueError, EOFError, wave.Error, ConfirmationAudioError) as error:
             output.unlink(missing_ok=True)
+            clip = getattr(error, 'stage', None) if isinstance(error, ConfirmationAudioError) else None
+            if stage == 'clip_failed' and clip == 'locate':
+                stage = 'relocation_failed'
+            elif stage == 'clip_failed' and clip == 'write':
+                stage = 'write_failed'
+            record(self.runtime_root, item_id, concern_id, stage, error=error)
             raise ValueError('局部原音尚未恢复，已有文字、候选和人工判断均已保留。') from error
+        record(self.runtime_root, item_id, concern_id, 'recovered')
 
     def _corrected_audio_locations(self, item_id, pending, start, end, replacement):
         # Preserve the pre-edit replay anchor even when no corrected character
@@ -495,12 +520,18 @@ class Distiller:
                 try:
                     self.confirmation_clipper.clip(audio, recovery, pending['snapshot'],
                         ReviewConcern(concern['start'], concern['end'], concern['text'], concern['reason'], True), aligned)
-                except ConfirmationAudioError:
+                except ConfirmationAudioError as error:
+                    from .audio_diagnostics import record
+                    record(self.runtime_root, item_id, concern.get('audio_name'), 'serve_failed',
+                           error=error, reason='realign_failed')
                     return None
             return aligned
         if path.is_file() and not path.is_symlink():
             return path
         # Missing local playback is a recovery state, never a full-audio task.
+        from .audio_diagnostics import record
+        record(self.runtime_root, item_id, concern.get('audio_name'), 'serve_failed',
+               reason='symlink' if path.is_symlink() else 'missing_file')
         return None
 
     def rerecognize_group(self, item_id, *, token, request_id, group_id, group_revision,
@@ -640,13 +671,15 @@ class Distiller:
         work_dir = self.runtime_root / "items" / str(item_id)
         captured = None
         from .intake import platform_for_url
-        kind = platform_for_url(row['submitted_url'])
+        from .captures import FeishuVoiceSource, is_voice_url
+        kind = 'feishu_voice' if is_voice_url(row['submitted_url']) else platform_for_url(row['submitted_url'])
         if kind is None:
             raise DistillError('source_platform_unsupported')
         source = {'douyin': self.source, 'youtube': self.youtube_source,
                   'xiaohongshu': self.xiaohongshu_source, 'x': self.xpost_source,
                   'zhihu': self.zhihu_source, 'weibo': self.weibo_source,
-                  'bilibili': self.bilibili_source}.get(kind)
+                  'bilibili': self.bilibili_source,
+                  'feishu_voice': FeishuVoiceSource(self.store) if kind == 'feishu_voice' else None}.get(kind)
         if source is None:
             raise DistillError(kind + '_runtime_unavailable')
         source_options = {'expected_authority': json.loads(row['platform_authority_json'])} if kind in {'youtube', 'xiaohongshu', 'x', 'zhihu', 'weibo'} else {}
@@ -724,8 +757,23 @@ class Distiller:
         if kind == 'xiaohongshu':
             self.store.record_video_transcript(material_id, recognition.recovery.chunks)
         review_revision = self._item(item_id)['review_revision']
-        review = (self.reviewer.review_in_directory(recognition.recovery, work_dir)
-            if isinstance(self.reviewer, RecordedReviewer) else self.reviewer.review(recognition.recovery))
+        if kind == 'feishu_voice':
+            # The ASR original is part of the immutable capture record (4.1).
+            from .captures import Captures, asr_identity
+            engine, model, version = asr_identity(self.store)
+            captures = Captures(self.store)
+            voice = captures.for_item(item_id)
+            if voice is not None:
+                captures.record_transcript(voice['capture_id'], recognition.recovery,
+                                           engine=engine, model=model, version=version)
+        if kind == 'feishu_voice':
+            # The user checks their own voice notes before sending; they are not
+            # sent to the LLM for review (user decision 2026-09-30).
+            from knowledge_distiller.faithful_review import FaithfulReview, FaithfulReviewCandidate
+            review = FaithfulReview.succeeded(FaithfulReviewCandidate(recognition.recovery.text, ()))
+        else:
+            review = (self.reviewer.review_in_directory(recognition.recovery, work_dir)
+                if isinstance(self.reviewer, RecordedReviewer) else self.reviewer.review(recognition.recovery))
         import hashlib
         review_identity = hashlib.sha256(recognition.recovery.text.encode()).hexdigest()
         stage_result = {'schema': 1, 'source_sha256': review_identity,
@@ -760,8 +808,10 @@ class Distiller:
                     concern,
                     work_dir / "confirmation" / name,
                 )
-            except ConfirmationAudioError:
+            except ConfirmationAudioError as error:
                 replay_note = " 局部原音定位恢复未完成，已保留疑点与原文，可重试恢复。"
+                from .audio_diagnostics import record
+                record(self.runtime_root, item_id, name, 'initial_clip_failed', error=error)
 
             blocking.append(
                 _compact_concern({
@@ -836,6 +886,17 @@ class Distiller:
         row = self._item(item_id)
         if row["source_fact_id"] is None:
             return DistillResult(item_id, "waiting_user")
+        if row["source_kind"] == "feishu_voice":
+            # A voice quick note ends as the user's own words in raw/自述, not as knowledge.
+            self.store.mark_succeeded(item_id)
+            try:
+                from .captures import Captures
+                Captures(self.store).write_ready()
+            except Exception as error:
+                import logging
+                logging.getLogger(__name__).warning('capture raw deferred (%s)', type(error).__name__)
+            return DistillResult(item_id, "succeeded")
+        self._write_raw(row)
         if row["knowledge_result_id"] is None:
             if self.store.prepare_image_review(item_id):
                 row = self._item(item_id)
@@ -863,6 +924,23 @@ class Distiller:
             raise DistillError("obsidian_target_conflict")
         self.store.mark_succeeded(item_id)
         return DistillResult(item_id, "succeeded")
+
+    def _write_raw(self, row) -> None:
+        """The finished material goes to raw/ (raw-interface §5.1) before any
+        distillation, so a knowledge failure never keeps it out. A raw failure
+        is recorded for backfill and never blocks the V1 note."""
+        try:
+            from .raw import RawLedger
+            from .captures import Captures
+            ledger = RawLedger(self.store)
+            record = ledger.ensure_material(int(row['material_id']),
+                                            **Captures(self.store).material_hints(row['item_id']))
+            if record is not None and record['written_at'] is None:
+                ledger.write(record, self.vault)
+        except Exception as error:
+            import logging
+            logging.getLogger(__name__).warning('raw deferred for material %s (%s)',
+                                                row['material_id'], type(error).__name__)
 
     def _knowledge_for_item(self, item_id):
         scope = getattr(self.knowledge_model, 'for_item', None)

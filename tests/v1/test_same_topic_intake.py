@@ -163,7 +163,11 @@ def test_feishu_same_platform_survives_preview_restart_and_confirmation(store, m
     c = Collections(store, discovery)
     intake = FeishuIntake(inbox, SimpleNamespace(collections=c))
     assert intake.process('om_1') == 'waiting_input'
-    command = FeishuCards(inbox, None, None, c).card('om_1')['body']['elements'][-1]['behaviors'][0]['value']
+    # Assertion correction (Q11, 2026-09-29): since the receipt status footer
+    # (feishu_status.project, BUG-20260914-06) the confirm button is no longer
+    # the last card element; locate it by its action instead of by position.
+    elements = FeishuCards(inbox, None, None, c).card('om_1')['body']['elements']
+    command, = [e['behaviors'][0]['value'] for e in elements if e.get('name') == 'confirm_scope']
     c = Collections(store, discovery)
     request(inbox, 'om_1', command)
     intake.links.collections = c

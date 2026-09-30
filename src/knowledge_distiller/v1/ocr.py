@@ -24,9 +24,20 @@ _MIMES = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP",
 
 
 class OcrError(RuntimeError):
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, stage: str | None = None, cause: BaseException | None = None):
         self.code = code
+        # Redacted local diagnostics: engine stage and exception class names only,
+        # never image text, source paths or native exception messages.
+        self.stage = stage
+        self.exception_type = type(cause).__name__ if cause is not None else None
+        info = getattr(cause, '_pyobjc_info_', None)
+        self.native_exception = info.get('name') if isinstance(info, dict) else None
         super().__init__(code)
+
+    def diagnostic(self) -> dict:
+        return {key: value for key, value in (('stage', self.stage),
+                ('exception_type', self.exception_type),
+                ('native_exception', self.native_exception)) if value is not None}
 
 
 @dataclass(frozen=True)

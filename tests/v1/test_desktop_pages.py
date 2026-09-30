@@ -312,3 +312,22 @@ def test_reconnect_after_finished_probe_does_not_replay_old_show_request():
     assert b'hello' in next(iterator)
     assert next(iterator).startswith(b': alive')
     first.close(); second.close()
+
+
+def test_dock_follow_up_never_prompts_and_opens_another_page_only_after_two_silent_clicks():
+    # User decision 2026-09-30: no "未能显示已有页面" dialog after a Dock click.
+    from types import SimpleNamespace
+    from knowledge_distiller.v1.desktop_pages import DockFollowUp
+    now = [0.0]
+    follow = DockFollowUp(clock=lambda: now[0])
+    hidden = SimpleNamespace(status='online')  # A background tab: the browser comes forward, nothing more.
+    silent = SimpleNamespace(status='unknown')
+    assert follow.after(hidden) is None
+    assert follow.after(silent) is None           # First silent click: maybe a throttled background tab.
+    now[0] = 30
+    assert follow.after(silent) == 'open_another'  # Clicked again, still no answer: open a page.
+    now[0] = 40
+    assert follow.after(silent) is None           # Counting restarts after opening.
+    now[0] = 200
+    assert follow.after(silent) is None           # Too long apart to be a retry.
+    assert follow.after(hidden) is None and follow.after(silent) is None  # A live page resets the count.

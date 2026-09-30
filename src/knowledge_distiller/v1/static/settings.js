@@ -220,3 +220,24 @@ document.querySelectorAll('form[data-discover-storage]').forEach(form => {
     finally { originals.forEach(({button,text,disabled}) => { button.textContent=text;button.disabled=disabled; }); }
   });
 });
+
+// Stored connection material is not a live login (BUG-20260922-02): ask the
+// dedicated session once, then show only what the check actually concluded.
+document.querySelectorAll('[data-platform-health]').forEach(async row => {
+  const labels = {connected: '已登录', configured: '已配置', relogin_required: '需重新登录'};
+  const show = state => {
+    row.querySelector('.state-dot').className = `state-dot ${state}`;
+    row.querySelector('.status-text').textContent = labels[state];
+    row.querySelectorAll('[data-when]').forEach(form => {
+      form.hidden = (form.dataset.when === 'relogin_required') !== (state === 'relogin_required');
+    });
+    row.removeAttribute('data-platform-health');
+  };
+  try {
+    const response = await fetch(row.dataset.platformHealth, {cache: 'no-store', headers: {Accept: 'application/json'}});
+    const result = response.ok ? await response.json() : {};
+    show(result.state in labels ? result.state : 'configured');
+  } catch (_) {
+    show('configured');
+  }
+});
