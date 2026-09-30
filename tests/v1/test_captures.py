@@ -352,6 +352,8 @@ def test_browser_desk_decision_writes_the_note_and_clears_the_card(world):
     from werkzeug.serving import make_server
     from knowledge_distiller.v1.web import create_app
     send(world, 'om_b1', text='要不要换个方向')
+    long_text = '要不要把周会改成隔周开？现在每次信息重复太多，\n但隔周又怕问题积压到来不及处理，先观察两周再定。'
+    send(world, 'om_b2', text=long_text, at=10)
     server = make_server('127.0.0.1', 0, create_app(world.store, object()), threaded=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -363,7 +365,17 @@ def test_browser_desk_decision_writes_the_note_and_clears_the_card(world):
             page = browser.new_page()
             page.goto(f'http://127.0.0.1:{server.server_port}/')
             page.locator('details[data-persist-details="todo"] > summary').click()
+            # The whole message is shown, line breaks kept, nothing clipped (vertical layout).
+            long_card = page.locator('[data-sync-key^="capture-"]', has_text='周会')
+            text = long_card.locator('.capture-text')
+            expect(text).to_have_text(long_text)
+            assert text.evaluate('e => e.scrollWidth <= e.clientWidth && e.scrollHeight <= e.clientHeight + 1')
+            meta, words, actions = (long_card.locator(s).bounding_box()
+                                    for s in ('.capture-meta', '.capture-text', '.failure-actions'))
+            assert meta['y'] < words['y'] < actions['y']  # Stacked: meta, message, then the choices.
+            long_card.get_by_role('button', name='第三方内容').click()
             card = page.locator('[data-sync-key^="capture-"]')
+            expect(card).to_have_count(1)
             expect(card).to_contain_text('要不要换个方向')
             page.locator('textarea[name="content"]').fill('未提交的投递草稿')
             card.get_by_role('button', name='我的想法').click()

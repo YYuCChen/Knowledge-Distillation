@@ -319,6 +319,27 @@ mark {
   min-width: 56px;
 }
 
+/* Quick-note identity card (design master "Failure": meta, full text, actions below).
+   Deciding whose words these are needs the whole message, so it stacks vertically. */
+.failure-content.capture-content {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.capture-content > .capture-meta {
+  font: 400 10px/16px "Noto Sans SC", sans-serif;
+  color: #6b6a65;
+}
+
+.capture-content > .capture-text {
+  margin: 0;
+  font: 500 10px/16px "Noto Serif SC", serif;
+  letter-spacing: 0.5px;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 
 @media (max-width: 720px) {
   .todo-card {

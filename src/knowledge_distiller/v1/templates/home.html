@@ -182,10 +182,11 @@
             {% set cards = namespace(index=0) %}
             {% for capture in pending_captures %}
               {% set cards.index = cards.index + 1 %}
-              <div class="todo-card-shell" data-sync-key="capture-{{ capture.id }}"><article class="todo-card failure-card">
+              <div class="todo-card-shell" data-sync-key="capture-{{ capture.id }}"><article class="todo-card failure-card capture-card">
                 <span class="todo-index">{{ cards.index }}</span>
-                <div class="todo-content failure-content">
-                  <div class="failure-source"><strong title="{{ capture.text }}">{{ capture.excerpt }}</strong><span>飞书随手记 · {{ capture.received }}</span></div>
+                <div class="todo-content failure-content capture-content">
+                  <span class="capture-meta">飞书随手记 · {{ capture.received }}</span>
+                  <p class="capture-text">{{ capture.text }}</p>
                   <span class="failure-reason">身份待定：请选择这条消息是谁的话。</span>
                   <span class="failure-actions">
                     <form action="{{ url_for('capture_identity', capture_id=capture.id) }}" method="post"><button class="primary-small" name="identity" value="my_thought">我的想法</button></form>

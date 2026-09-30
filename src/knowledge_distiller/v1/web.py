@@ -675,9 +675,7 @@ def _pending_captures(store):
     views = []
     for capture in captures.pending():
         received = datetime.fromtimestamp(capture['received_ms'] / 1000, UTC).astimezone()
-        text = ' '.join((capture['text'] or '').split())
         views.append({'id': capture['capture_id'], 'text': capture['text'] or '',
-                      'excerpt': text[:60] + ('…' if len(text) > 60 else ''),
                       'received': f'{received.month} 月 {received.day} 日  {received:%H:%M}',
                       'annotation': captures.recent_delivery(capture) is not None})
     return views
