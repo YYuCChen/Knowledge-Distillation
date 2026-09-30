@@ -23,9 +23,16 @@ from .llm import LLMRequestError
 
 
 def executable() -> str:
-    candidates = [os.environ.get('KNOWLEDGE_DISTILLER_CODEX'), shutil.which('codex.exe' if sys.platform == 'win32' else 'codex'),
-                  '/Applications/ChatGPT.app/Contents/Resources/codex',
-                  '/Applications/Codex.app/Contents/Resources/codex']
+    candidates = [os.environ.get('KNOWLEDGE_DISTILLER_CODEX'), shutil.which('codex.exe' if sys.platform == 'win32' else 'codex')]
+    if sys.platform == 'darwin':
+        # The packaged app runs with a minimal PATH, so look where a login shell
+        # would find the user's own CLI before any app-bundled copy. ChatGPT.app
+        # moved its CLI to codex-cli/bin in 2026-09; keep the older location too.
+        home = Path.home()
+        candidates += ['/opt/homebrew/bin/codex', '/usr/local/bin/codex', str(home / '.local/bin/codex'),
+                       '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex',
+                       '/Applications/ChatGPT.app/Contents/Resources/codex',
+                       '/Applications/Codex.app/Contents/Resources/codex']
     if sys.platform == 'win32':
         # Desktop-app version directories contain native executables. Do not run
         # npm .cmd wrappers through a shell, or assume the user installed Node.

@@ -185,3 +185,5 @@ def test_running_event_that_fails_after_load_is_shown(served, browser):
     page.wait_for_function("!document.querySelector('.organization-feedback').hidden", timeout=8000)
     button = page.locator('.organization-section button')
     assert button.is_enabled() and button.inner_text() == '开始整理'  # Retry is available.
+    page.wait_for_timeout(300)  # Past the 100 ms background transition.
+    assert button.evaluate('e => getComputedStyle(e).backgroundColor') == 'rgb(20, 20, 19)'
