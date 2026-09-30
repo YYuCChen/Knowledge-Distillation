@@ -11,10 +11,12 @@
 | 界面修改如何保持用户意图 | [设计维护](product/design.md) |
 | 代码职责在哪里 | [架构](engineering/architecture.md) |
 | 工作纪律、怎样证明完成 | [测试与证据](engineering/testing.md) |
+| Claude、Codex 怎样先讨论再交接开发 | [Agent 需求讨论、归档与开发交接](engineering/agent-collaboration.md) |
 | Python共同基线与旧环境退役 | [运行环境契约](engineering/python-runtime.md) |
 | 源码、构建和发行如何对应 | [发布](engineering/release.md) |
 | 什么保留、什么清理 | [存储](engineering/storage.md) |
 | 哪些后续优化已提出 | [版本优化待办](roadmap/next-version.md) |
+| 下一大版本怎样施工 | [V3.0 统一知识整理与 Obsidian 呈现施工包](roadmap/v3-plan.md) |
 | 远期构想和开放问题是什么 | [探索登记](roadmap/exploration.md) |
 | 原始产品讨论和历史取舍在哪里 | [项目记忆归档](history/2026-09-project-memory/README.md) |
 | 知识怎样走向实际应用 | [研究报告与证据](research/2026-09-11-knowledge-to-tools/report.md) |
