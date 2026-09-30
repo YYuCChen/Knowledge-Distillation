@@ -124,6 +124,41 @@ class CloudIdentityJudge:
         return None
 
 
+class JevIdentityJudge:
+    """The same decision as a closed choice on TypeSafe Jev (v1/jev.py).
+
+    Jev's probabilities are calibrated, so the thresholds keep their meaning:
+    a note becomes "mine" only when Jev is right about such answers >=90% of the time.
+    """
+
+    INSTRUCTIONS = ('这是用户发给自己私聊机器人的一条消息（state.message）。判断这条消息是谁的话。'
+                    'just_after_a_delivery 为 true 表示用户刚刚投递过一条链接或材料。拿不准时选 unknown。')
+    OPTIONS = {
+        'my_thought': '用户自己的想法、感受、计划、反思或决定，是用户本人说的话',
+        'third_party': '转发或粘贴的他人内容，例如文章段落、别人说的话、新闻、引用或摘录',
+        'annotation': '对刚刚投递的那条链接或材料的附言，例如"这篇重点看后半段"',
+        'unknown': '无法判断这条消息是谁的话',
+    }
+
+    def __init__(self, client):
+        self.client = client
+
+    def judge(self, text, *, recent_delivery):
+        options = dict(self.OPTIONS)
+        if recent_delivery is None:
+            options.pop('annotation')
+        answer = self.client.choose({'message': text, 'just_after_a_delivery': recent_delivery is not None},
+                                    instructions=self.INSTRUCTIONS, options=options)
+        basis = 'Jev·' + answer.model
+        if answer.choice == 'my_thought' and answer.probability >= 0.9:
+            return 'my_thought', basis, answer.probability, None
+        if answer.choice == 'third_party' and answer.probability >= 0.8:
+            return 'third_party', basis, answer.probability, None
+        if answer.choice == 'annotation' and answer.probability >= 0.8 and recent_delivery is not None:
+            return 'annotation', basis, answer.probability, recent_delivery
+        return None
+
+
 class Captures:
     def __init__(self, store, *, client_factory=None, api=None, audio_root: Path | None = None):
         self.store = store
