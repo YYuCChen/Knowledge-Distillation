@@ -370,9 +370,13 @@ def test_browser_desk_decision_writes_the_note_and_clears_the_card(world):
             text = long_card.locator('.capture-text')
             expect(text).to_have_text(long_text)
             assert text.evaluate('e => e.scrollWidth <= e.clientWidth && e.scrollHeight <= e.clientHeight + 1')
-            meta, words, actions = (long_card.locator(s).bounding_box()
-                                    for s in ('.capture-meta', '.capture-text', '.failure-actions'))
-            assert meta['y'] < words['y'] < actions['y']  # Stacked: meta, message, then the choices.
+            # User design 2026-09-30: index | what to decide, message, source and time | choices stacked.
+            point, words, meta = (long_card.locator(s).bounding_box()
+                                  for s in ('.capture-point', '.capture-text', '.capture-meta'))
+            assert point['y'] < words['y'] < meta['y']
+            mine, other = (long_card.get_by_role('button', name=n).bounding_box() for n in ('我的想法', '第三方内容'))
+            assert mine['x'] > words['x'] + words['width'] - 1 and other['x'] > words['x'] + words['width'] - 1
+            assert mine['y'] + mine['height'] <= other['y'] and abs(mine['width'] - other['width']) < 1
             long_card.get_by_role('button', name='第三方内容').click()
             card = page.locator('[data-sync-key^="capture-"]')
             expect(card).to_have_count(1)

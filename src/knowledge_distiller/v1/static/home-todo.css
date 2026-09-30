@@ -319,16 +319,22 @@ mark {
   min-width: 56px;
 }
 
-/* Quick-note identity card (design master "Failure": meta, full text, actions below).
-   Deciding whose words these are needs the whole message, so it stacks vertically. */
-.failure-content.capture-content {
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
+/* Quick-note identity card (user design 2026-09-30): index | what to decide, the
+   whole message, source and time | the choices stacked vertically. */
+.failure-card.capture-card {
+  grid-template-columns: 32px minmax(0, 1fr) max-content;
 }
 
-.capture-content > .capture-meta {
-  font: 400 10px/16px "Noto Sans SC", sans-serif;
-  color: #6b6a65;
+.capture-content {
+  padding: 0;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.capture-content > .capture-point {
+  font: 400 10px/15px "Noto Sans SC", sans-serif;
+  color: #4d4c48;
 }
 
 .capture-content > .capture-text {
@@ -338,6 +344,28 @@ mark {
   color: var(--text);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.capture-content > .capture-meta {
+  font: 400 10px/16px "Noto Sans SC", sans-serif;
+  letter-spacing: 0.5px;
+  color: #6b6a65;
+}
+
+.capture-actions {
+  display: grid;
+  gap: 8px;
+  align-self: center;
+}
+
+.capture-actions form {
+  margin: 0;
+}
+
+.capture-actions .primary-small,
+.capture-actions .secondary-small {
+  width: 100%;
+  min-width: 56px;
 }
 
 
@@ -356,6 +384,10 @@ mark {
 
   .failure-card {
     grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .failure-card.capture-card {
+    grid-template-columns: 24px minmax(0, 1fr) max-content;
   }
 
   .failure-actions {

@@ -184,15 +184,15 @@
               {% set cards.index = cards.index + 1 %}
               <div class="todo-card-shell" data-sync-key="capture-{{ capture.id }}"><article class="todo-card failure-card capture-card">
                 <span class="todo-index">{{ cards.index }}</span>
-                <div class="todo-content failure-content capture-content">
-                  <span class="capture-meta">飞书随手记 · {{ capture.received }}</span>
+                <div class="todo-content capture-content">
+                  <span class="capture-point">身份待定：请选择这条消息是谁的话。</span>
                   <p class="capture-text">{{ capture.text }}</p>
-                  <span class="failure-reason">身份待定：请选择这条消息是谁的话。</span>
-                  <span class="failure-actions">
-                    <form action="{{ url_for('capture_identity', capture_id=capture.id) }}" method="post"><button class="primary-small" name="identity" value="my_thought">我的想法</button></form>
-                    <form action="{{ url_for('capture_identity', capture_id=capture.id) }}" method="post"><button class="secondary-small" name="identity" value="third_party">第三方内容</button></form>
-                    {% if capture.annotation %}<form action="{{ url_for('capture_identity', capture_id=capture.id) }}" method="post"><button class="secondary-small" name="identity" value="annotation">附言</button></form>{% endif %}
-                  </span>
+                  <span class="capture-meta">飞书随手记 · {{ capture.received }}</span>
+                </div>
+                <div class="capture-actions">
+                  <form action="{{ url_for('capture_identity', capture_id=capture.id) }}" method="post"><button class="primary-small" name="identity" value="my_thought">我的想法</button></form>
+                  <form action="{{ url_for('capture_identity', capture_id=capture.id) }}" method="post"><button class="secondary-small" name="identity" value="third_party">第三方内容</button></form>
+                  {% if capture.annotation %}<form action="{{ url_for('capture_identity', capture_id=capture.id) }}" method="post"><button class="secondary-small" name="identity" value="annotation">附言</button></form>{% endif %}
                 </div>
               </article></div>
             {% endfor %}
