@@ -1,6 +1,6 @@
 # 二期施工计划
 
-状态：待开工。依据：[决策0004](../decisions/0004-phase2-alignment.md)、[raw 接口规格](../engineering/raw-interface.md)、[个人知识系统方案](../product/phase2-knowledge-system.md)。执行者：Claude Code，在本机项目目录 `知识蒸馏器/V1.3开发-20260914/source`，分支 `phase2/foundation`。
+状态：已完成并作为 V2.0 正式交付。依据：[决策0004](../decisions/0004-phase2-alignment.md)、[raw 接口规格](../engineering/raw-interface.md)、[个人知识系统方案](../product/phase2-knowledge-system.md)。主体施工由 Claude Code 在 `phase2/foundation` 完成；账号中断后由 Codex 在同一工作树完成进度核对、最后修复复验、正式安装、更新链、文档与发行收口。最终构建和证据见 [V2.0 发行说明](../releases/v2.0/release-20260930.md)。
 
 本计划分两段执行：**开工前准备**（与用户一起完成），然后是**无人值守施工**（用户离开电脑）。
 
@@ -190,9 +190,9 @@
 | 开工前准备 | 完成，等待用户在施工会话中说"可以开始" | 本次提交 | 2026-09-29 |
 | 第 0 阶段 | 完成 | `ff2b5b9` 及本阶段验收提交 | [验收记录](../releases/phase2/phase0-acceptance.md)；候选 2026.09.29.1 未发布 |
 | 第 1 阶段 | 完成 | 见 git 日志"第 1 阶段 应用写 raw" | 规格第 10 节；正式数据副本迁移实跑通过 |
-| 第 2 阶段 | 完成；真实飞书收发待用户验收 | 见 git 日志"第 2 阶段 飞书随手记" | [需求第 7 节](handoff-feishu-capture.md#7-实现与验收第-2-阶段2026-09-29)；合成场景 15 项，全量 2790 通过、36 跳过 |
-| 第 3 阶段 | 完成；Claudian 界面试用待用户 | 见 git 日志"第 3 阶段 vault-kit" | [端到端记录](../releases/phase2/phase3-e2e.md)：真实 Codex CLI 四步跑通，kb.py 0 错误；kb.py 单元测试 8 项 |
-| 第 4 阶段 | 完成；抖音真实过期样本已由用户手动登出后验证（2026-09-30） | 见 git 日志"第 4 阶段 集成与交付" | [交付报告](../releases/phase2/delivery.md)；全量 2801 通过、36 跳过（均为 Windows 专属）；候选 2026.09.30.1 未发布 |
+| 第 2 阶段 | 完成；真实飞书文字、长文、语音、链接和附言已验收 | 见 git 日志"第 2 阶段 飞书随手记"及收尾提交 | [需求第 7 节](handoff-feishu-capture.md#7-实现与验收第-2-阶段2026-09-29)；合成场景与正式机器人均有证据 |
+| 第 3 阶段 | 完成；vault-kit 已装入正式 Vault | 见 git 日志"第 3 阶段 vault-kit"及收尾提交 | [端到端记录](../releases/phase2/phase3-e2e.md)：真实 Codex CLI 四步跑通；正式 Vault 检查 0 错误、0 提醒 |
+| 第 4 阶段 | 完成并正式发布 | 见 git 日志"第 4 阶段 集成与交付"及收尾提交 | [交付报告](../releases/phase2/delivery.md)；最终全量 2831 通过、36 跳过（均为 Windows 专属）；正式构建 `2026.09.30.4` |
 
 ### 开工确认单（2026-09-29 用户确认）
 
