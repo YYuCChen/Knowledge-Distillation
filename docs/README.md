@@ -16,6 +16,7 @@
 | 源码、构建和发行如何对应 | [发布](engineering/release.md) |
 | 什么保留、什么清理 | [存储](engineering/storage.md) |
 | 哪些后续优化已提出 | [版本优化待办](roadmap/next-version.md) |
+| 下一大版本怎样施工 | [V3.0 统一知识整理与 Obsidian 呈现施工包](roadmap/v3-plan.md) |
 | 远期构想和开放问题是什么 | [探索登记](roadmap/exploration.md) |
 | 原始产品讨论和历史取舍在哪里 | [项目记忆归档](history/2026-09-project-memory/README.md) |
 | 知识怎样走向实际应用 | [研究报告与证据](research/2026-09-11-knowledge-to-tools/report.md) |
