@@ -392,3 +392,46 @@ def test_browser_desk_decision_writes_the_note_and_clears_the_card(world):
         server.shutdown()
         thread.join(timeout=2)
     assert len(raw_files(world, '自述')) == 1
+
+
+# ───────────────────────── Rich-text posts without pictures (BUG-20260930-04) ─────────────────────────
+
+def send_post(world, mid, paragraphs, *, at=0):
+    """A Feishu 'post' as the client sends pasted Markdown: styled text paragraphs, no pictures."""
+    content = json.dumps({'title': '', 'content': [[{'tag': 'text', 'text': text, 'style': ['bold'] if n == 0 else []}]
+                                                  for n, text in enumerate(paragraphs)]}, ensure_ascii=False)
+    raw = {'message_id': mid, 'chat_id': 'oc_private', 'create_time': str(START + at * 1000),
+           'sender': {'id': 'ou_owner', 'id_type': 'open_id', 'sender_type': 'user'},
+           'msg_type': 'post', 'body': {'content': content}, 'mentions': []}
+    world.inbox.receive(history_message(raw), history=True)
+    return world.intake.process(mid)
+
+
+def test_pasted_markdown_arrives_as_a_post_and_is_read_as_text(world):
+    paragraphs = ['反馈回路越短，学习越快'] + ['写代码时，编译器几秒钟就告诉你哪里错了；而做管理的反馈，可能要一年后才看得清。'] * 8
+    assert send_post(world, 'om_md1', paragraphs) == 'accepted'
+    with connect(world.store.path) as db:
+        receipt = db.execute("SELECT state, error, text FROM feishu_receipts WHERE message_id='om_md1'").fetchone()
+    assert receipt['state'] != 'rejected' and receipt['error'] is None and receipt['text'].startswith('反馈回路越短')
+    capture = capture_of(world, 'om_md1')
+    assert world.captures.identity(capture['capture_id'])['result'] == 'third_party'  # Long pasted text, by rule.
+    run_material(world, capture['item_id'])
+    env = envelope(raw_files(world, '外部')[0])
+    assert env['身份'] == '第三方' and env['标题'].startswith('反馈回路越短，学习越快')
+
+
+def test_short_post_is_a_quick_note_and_a_post_with_a_link_is_a_delivery(world):
+    send_post(world, 'om_md2', ['周末要不要去看那个展'])
+    assert world.captures.identity(capture_of(world, 'om_md2')['capture_id'])['result'] == 'pending'
+    send_post(world, 'om_md3', ['看看这个', 'https://www.douyin.com/video/101'], at=10)
+    assert capture_of(world, 'om_md3') is None
+    assert world.store.recent_items()[0]['submitted_url'] == 'https://www.douyin.com/video/101'
+
+
+def test_unreadable_post_is_rejected_with_a_text_message_not_the_picture_one(world):
+    content = json.dumps({'title': '', 'content': [[{'tag': 'unknown_block'}]]})
+    raw = {'message_id': 'om_md4', 'chat_id': 'oc_private', 'create_time': str(START),
+           'sender': {'id': 'ou_owner', 'id_type': 'open_id', 'sender_type': 'user'},
+           'msg_type': 'post', 'body': {'content': content}, 'mentions': []}
+    receipt = world.inbox.receive(history_message(raw), history=True)
+    assert receipt['state'] == 'rejected' and '富文本' in receipt['error'] and '图片' not in receipt['error']

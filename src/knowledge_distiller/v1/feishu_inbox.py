@@ -114,8 +114,21 @@ class FeishuInbox:
             return None
         if not message.message_id:
             raise ValueError('飞书消息缺少稳定标识，不能推进补收进度。')
-        text, same_topic, error, voice = '', False, None, None
-        if message.message_type in {'image','post'}:
+        text, same_topic, error, voice, plain = '', False, None, None, None
+        if message.message_type == 'post':
+            try:
+                from .feishu_images import post_text
+                plain = post_text(message.content)
+            except (ValueError, TypeError, KeyError, AttributeError, StopIteration):
+                error = '这条富文本消息无法完整读取，请改为纯文字重新发送。'
+        if error:
+            pass
+        elif plain is not None:
+            # A post without pictures is text, e.g. Markdown pasted into Feishu (BUG-20260930-04).
+            text = plain
+            if not text.strip():
+                error = '请输入需要处理的文字或链接。'
+        elif message.message_type in {'image','post'}:
             try:
                 from .feishu_images import blocks
                 blocks(message.message_type,message.content)
@@ -169,7 +182,7 @@ class FeishuInbox:
                                    created_ms=message.created_ms, received_ms=now_ms(), file_key=voice['file_key'],
                                    duration_ms=voice.get('duration') if isinstance(voice.get('duration'), int) else None,
                                    vault=vault)
-                elif message.message_type == 'text' and not same_topic and not links_in(text):
+                elif (message.message_type == 'text' or plain is not None) and not same_topic and not links_in(text):
                     record_capture(db, self.app_id, message.message_id, message_type='text',
                                    created_ms=message.created_ms, received_ms=now_ms(), text=text, vault=vault)
             return dict(db.execute('SELECT * FROM feishu_receipts WHERE app_id=? AND message_id=?',

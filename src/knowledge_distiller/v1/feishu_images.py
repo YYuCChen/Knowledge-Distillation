@@ -8,6 +8,32 @@ from .file_sources import SubmittedSource
 from .source_parsing import ParsedSource, ParsedMedia, SourceReadError
 
 
+def post_text(content):
+    """Plain text of a rich-text post without pictures, else None.
+
+    Text pasted into Feishu (Markdown, styled paragraphs) arrives as a post; with no
+    picture it is ordinary text and takes the text path (BUG-20260930-04).
+    """
+    data=json.loads(content)
+    if 'content' not in data:
+        data=data.get('zh_cn') or data.get('en_us') or next(iter(data.values()))
+    lines=[data['title']] if data.get('title') else []
+    for row in data['content']:
+        parts=[]
+        for entry in row:
+            tag=entry['tag']
+            if tag in {'img','media'}:return None
+            if tag=='a':
+                label,href=entry.get('text') or '',entry.get('href') or ''
+                parts.append(label if href and href in label else (label+' '+href).strip())
+            elif tag=='at':parts.append('@'+(entry.get('user_name') or ''))
+            elif tag in {'emotion','hr'}:continue
+            elif isinstance(entry.get('text'),str):parts.append(entry['text'])  # text, md, code_block
+            else:raise ValueError('rich text element not readable')
+        lines.append(''.join(parts))
+    return '\n'.join(lines)
+
+
 def blocks(kind, content):
     data=json.loads(content)
     if kind=='image':

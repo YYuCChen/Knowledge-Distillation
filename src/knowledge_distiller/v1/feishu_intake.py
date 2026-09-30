@@ -51,7 +51,8 @@ class FeishuIntake:
         raw=json.loads(row['raw_json'])
         from .feishu_inbox import event_message, history_message
         message=event_message(raw) if 'event' in raw else history_message(raw)
-        if message.message_type in {'image','post'}:
+        from .feishu_images import post_text
+        if message.message_type=='image' or (message.message_type=='post' and post_text(message.content) is None):
             existing=self._part(key,0)
             if existing and existing['item_id'] is not None:
                 self._state(key,'accepted')

@@ -317,11 +317,23 @@ def test_subpixel_boundary_roundoff_is_recorded(axis,bound):
     assert any(x<0 or x>100 or y<0 or y>80 for x,y in line.original_polygon)
 
 
-@pytest.mark.parametrize('value',[-.001,float('nan'),float('inf'),-float('inf')])
+# Assertion update (BUG-20260930-03, 2026-09-30): -0.001 px used to count as a
+# genuine violation, but Vision pads edge text by a few pixels on real X images
+# (3.1 px measured); overflow beyond 1% of the side (at least 4 px) is still rejected.
+@pytest.mark.parametrize('value',[-5,105,float('nan'),float('inf'),-float('inf')])
 def test_real_overflow_or_nonfinite_is_not_clamped(value):
     points=((value/100,.9),(.8,.9),(.8,.6),(value/100,.6))
     with pytest.raises(ocr.OcrError,match='ocr_invalid_output'):
         vision_ocr._result([observation(points=points)],100,80)
+
+
+def test_edge_text_box_a_few_pixels_outside_is_clamped_and_recorded():
+    # The real X case: a slightly skewed first line whose top-left corner is 3.1 px above the image.
+    width,height=1179,606
+    corners=[(432.4,-3.1),(757.1,2.3),(756.4,44.5),(431.7,39.1)]
+    line=vision_ocr._result([observation(points=tuple((x/width,1-y/height) for x,y in corners))],width,height).lines[0]
+    assert all(0<=x<=width and 0<=y<=height for x,y in line.polygon)
+    assert min(y for _,y in line.original_polygon)<-3  # The engine's own box is kept as evidence.
 
 
 def test_clamping_must_not_make_degenerate_polygon_valid():

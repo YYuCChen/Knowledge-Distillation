@@ -7,7 +7,16 @@ import math
 from .ocr import OcrError, OcrResult, decode_image, validate_lines
 
 
-BOUNDARY_TOLERANCE_PIXELS = 1e-4
+# Apple Vision pads the box of text that touches the canvas edge, so a box can
+# reach a few pixels past it (measured 3.1 px on a 1179x606 X screenshot,
+# BUG-20260930-03). Such a box is clamped and its original polygon kept as
+# evidence; anything farther out, or not finite, is still rejected.
+BOUNDARY_TOLERANCE_RATIO = 0.01
+BOUNDARY_TOLERANCE_MIN_PIXELS = 4.0
+
+
+def _tolerance(bound):
+    return max(BOUNDARY_TOLERANCE_MIN_PIXELS, bound * BOUNDARY_TOLERANCE_RATIO)
 
 VISION_REVISION = 3  # Available on the supported macOS 14+ baseline.
 VISION_MODEL = "VNRecognizeTextRequestRevision3"
@@ -98,8 +107,7 @@ def _result(observations, width, height):
             points = (observation.topLeft(), observation.topRight(),
                       observation.bottomRight(), observation.bottomLeft())
             raw = tuple((point.x * width, (1 - point.y) * height) for point in points)
-            if any(not math.isfinite(v) or v < -BOUNDARY_TOLERANCE_PIXELS
-                   or v > bound + BOUNDARY_TOLERANCE_PIXELS
+            if any(not math.isfinite(v) or v < -_tolerance(bound) or v > bound + _tolerance(bound)
                    for x,y in raw for v,bound in ((x,width),(y,height))):
                 # Keep the text for diagnostics, but let the shared validator
                 # reject these coordinates. Never clamp a genuine violation.

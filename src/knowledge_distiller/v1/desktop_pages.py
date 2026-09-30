@@ -282,6 +282,30 @@ class DesktopPages:
             return pending
 
 
+class DockFollowUp:
+    """What follows a Dock outcome; there is no dialog (user decision 2026-09-30).
+
+    With option ③ a background tab cannot be selected, so a page that exists but
+    stays hidden is left as is: the browser was brought forward. If a second
+    click soon after still gets no answer from the page, the page may be gone
+    without a pagehide, so another page is opened (what the old dialog offered).
+    """
+
+    def __init__(self, clock=time.monotonic, window_seconds=60.0):
+        self.clock, self.window, self.unknown_at = clock, window_seconds, None
+
+    def after(self, outcome) -> str | None:
+        if outcome.status != 'unknown':
+            self.unknown_at = None
+            return None
+        now, previous = self.clock(), self.unknown_at
+        if previous is not None and now - previous <= self.window:
+            self.unknown_at = None
+            return 'open_another'
+        self.unknown_at = now
+        return None
+
+
 def _identifier(value):
     return isinstance(value, str) and 0 < len(value) <= 100
 

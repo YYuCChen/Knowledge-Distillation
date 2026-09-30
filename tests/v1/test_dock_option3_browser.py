@@ -136,8 +136,8 @@ def test_closed_tab_and_closed_window_reopen_exactly_one_page(app_server, chromi
 def test_page_gone_without_pagehide_is_unknown_not_success_or_duplicate(app_server, chromium):
     # Playwright's context teardown runs no unload handlers, like a crash. With
     # no departure signal the page is not proven closed: no duplicate is opened
-    # and the outcome is unknown, which the native app turns into its recovery
-    # prompt (重试显示 / 另开产品页面 / 取消).
+    # and the outcome is unknown; since 2026-09-30 the native app shows no prompt
+    # and opens another page only if a second click is still unanswered.
     url, pages = app_server
     pages.recovery_timeout = pages.probe_timeout = .5
     browser = chromium.launch()
@@ -187,8 +187,7 @@ def test_background_tab_is_never_reported_as_shown_and_keeps_its_draft(app_serve
     # the hidden-ACK rule itself is covered in test_desktop_pages.py.
     if hidden:
         # The boundary of option ③: activation plus a show request cannot pick a
-        # background tab; the app must not claim it did (the native recovery
-        # prompt then offers 重试显示 / 另开产品页面).
+        # background tab; the app must not claim it did (no prompt since 2026-09-30).
         assert outcome.status != 'visible_reported'
     assert product.locator('#draft').input_value() == '后台草稿'
     assert product.evaluate('window.__sameDocument === true')
