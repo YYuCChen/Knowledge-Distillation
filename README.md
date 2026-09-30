@@ -67,11 +67,13 @@ V1.3 将同一素材内等价疑点合并为一次判断，沿用原疑点卡设
 git clone https://github.com/YYuCChen/Knowledge-Distillation.git
 cd Knowledge-Distillation
 uv venv --python 3.11.16
-uv pip install --python .venv/bin/python -e '.[test]'
+uv pip sync --python .venv/bin/python packaging/mac-requirements-lock.txt
+uv pip install --python .venv/bin/python --no-deps -e .
+.venv/bin/python -m playwright install chromium
 PYTHONPATH=src .venv/bin/python -m pytest -p no:cacheprovider
 ~~~
 
-本次源码、构建与运行环境统一使用 CPython 3.11.16，具体版本及下载校验契约见 [Python 运行环境](docs/engineering/python-runtime.md)。完整来源采集、OCR、语音和桌面打包功能还需要项目依赖中列出的系统组件、浏览器登录态或用户自己的服务凭据；源码不会提供任何账号、Cookie、API Key、数据库或 Vault。
+依赖按 Mac 发行锁安装，与构建环境逐一一致；不要用 `pip install -e '.[test]'`，它不读锁，会装出更新的版本。Playwright 的 Chromium 只用于浏览器回归测试，未安装时这些用例会跳过。本次源码、构建与运行环境统一使用 CPython 3.11.16，具体版本及下载校验契约见 [Python 运行环境](docs/engineering/python-runtime.md)。完整来源采集、OCR、语音和桌面打包功能还需要项目依赖中列出的系统组件、浏览器登录态或用户自己的服务凭据；源码不会提供任何账号、Cookie、API Key、数据库或 Vault。
 
 开发时请使用独立的测试数据目录，不要把个人 SQLite、Obsidian Vault、浏览器资料、模型缓存或凭据复制到仓库。提交 Issue 或日志前，也请先移除来源文本、账号标识、Cookie、路径和其他私人信息。安全问题请参阅 [SECURITY.md](SECURITY.md)。
 

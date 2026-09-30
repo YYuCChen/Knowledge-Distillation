@@ -22,6 +22,7 @@
 | 为什么分开管理 | [治理决策](decisions/0001-project-authority.md) |
 | **二期现在按什么做（现行依据）** | [决策0004 三方对齐](decisions/0004-phase2-alignment.md) |
 | 二期怎么施工、先做什么 | [二期施工计划](roadmap/phase2-plan.md) |
+| 二期交付了什么、回来后要验收什么 | [二期交付报告](releases/phase2/delivery.md) |
 | 应用与知识库之间的接口 | [raw 接口规格](engineering/raw-interface.md) |
 | wiki 侧的完整设计 | [个人知识系统方案](product/phase2-knowledge-system.md)、[vault-kit](../vault-kit/README.md) |
 | 飞书随手记的需求 | [飞书随手记需求说明](roadmap/handoff-feishu-capture.md) |
