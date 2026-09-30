@@ -46,7 +46,7 @@
 ### 3. 从第一次讨论保留的要求
 
 - **最高工作原则**：已写入仓库 [AGENTS.md](../../AGENTS.md)。
-- **协作方式**：在 Chat 里谈需求，在 Claude Code 里落地；二期由 Claude 开发。
+- **协作方式**：在 Chat 里谈需求，在 Claude Code 里落地；二期由 Claude 开发。这一条记录二期当时的分工，不限制 V2.0 之后的 Agent 选择；后续使用工具中立的[需求讨论、归档与开发交接流程](../engineering/agent-collaboration.md)。
 - **分工**：读在 Obsidian，做在 Local Web，随手记在飞书。
 - **随手记**：
   - 同一个窗口收发；捕捉时零摩擦，只回"已记录"。
