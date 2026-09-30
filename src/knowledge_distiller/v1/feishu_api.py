@@ -86,16 +86,23 @@ class FeishuAPI:
         return result['data']['message_id']
 
     def download_message_image(self, message_id, image_key):
+        return self._resource(message_id, image_key, 'image', 20*1024*1024, 'image_too_large')
+
+    def download_message_file(self, message_id, file_key):
+        """A voice message's audio (im:resource, type=file), same bound bot identity."""
+        return self._resource(message_id, file_key, 'file', 50*1024*1024, 'file_too_large')
+
+    def _resource(self, message_id, key, kind, limit, too_large):
         import re
-        if not re.fullmatch(r'om_[A-Za-z0-9_-]+',message_id) or not re.fullmatch(r'[A-Za-z0-9_-]+',image_key):
+        if not re.fullmatch(r'om_[A-Za-z0-9_-]+',message_id) or not re.fullmatch(r'[A-Za-z0-9_-]+',key):
             raise ValueError('invalid Feishu resource identity')
-        url='https://open.feishu.cn/open-apis/im/v1/messages/'+message_id+'/resources/'+image_key
-        with self.client.stream('GET',url,headers=self._authorization(),params={'type':'image'}) as response:
+        url='https://open.feishu.cn/open-apis/im/v1/messages/'+message_id+'/resources/'+key
+        with self.client.stream('GET',url,headers=self._authorization(),params={'type':kind}) as response:
             if response.status_code>=400:raise FeishuAPIError(f'http_{response.status_code}')
             content=bytearray()
             for chunk in response.iter_bytes():
                 content.extend(chunk)
-                if len(content)>20*1024*1024:raise FeishuAPIError('image_too_large')
+                if len(content)>limit:raise FeishuAPIError(too_large)
             return bytes(content)
 
     def upload_image(self, content):

@@ -13,9 +13,10 @@ from .feishu_runtime import FeishuRuntime
 
 
 class FeishuService:
-    def __init__(self,store,links,distiller,runtime_root,*,wake=None):
+    def __init__(self,store,links,distiller,runtime_root,*,wake=None,client_factory=None):
         self.store,self.links,self.distiller=store,links,distiller
         self.root,self.wake=runtime_root,wake
+        self.client_factory=client_factory
         self.runtime=None
         self.api=None
         self.error=None
@@ -67,7 +68,7 @@ class FeishuService:
         from .local_secrets import LocalSecrets
         credential=LocalSecrets(self.store.path.parent / 'credentials')('feishu-app-'+inbox.app_id)
         self.api=FeishuAPI(inbox.app_id, secret_loader=credential.load)
-        intake=FeishuIntake(inbox,self.links,wake=self.wake,api=self.api)
+        intake=FeishuIntake(inbox,self.links,wake=self.wake,api=self.api,client_factory=self.client_factory)
         actions=FeishuActions(inbox,intake,self.distiller,wake=self.wake)
         cards=FeishuCards(inbox,self.distiller,FeishuMedia(self.api,self.root/'feishu-media'),self.links.collections)
         receipts=FeishuReceipts(inbox,self.api)

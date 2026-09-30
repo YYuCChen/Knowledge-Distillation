@@ -12,7 +12,7 @@ PLATFORM_HOSTS = {
     'x': {'x.com', 'www.x.com', 'twitter.com', 'www.twitter.com', 'mobile.twitter.com'},
     'bilibili': {'bilibili.com', 'www.bilibili.com', 'm.bilibili.com', 'space.bilibili.com', 'www.b23.tv', 'b23.tv'},
 }
-LABELS = {'image': '飞书图片', 'douyin': '抖音', 'youtube': 'YouTube', 'xiaohongshu': '小红书',
+LABELS = {'image': '飞书图片', 'feishu_voice': '飞书语音', 'douyin': '抖音', 'youtube': 'YouTube', 'xiaohongshu': '小红书',
           'weibo': '微博', 'zhihu': '知乎', 'x': 'X', 'bilibili': 'B 站',
           'direct_text': '直接文本', 'markdown': 'Markdown', 'pdf': 'PDF', 'epub': 'EPUB'}
 

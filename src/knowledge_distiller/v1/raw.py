@@ -411,24 +411,32 @@ class RawLedger:
                 AND NOT EXISTS (SELECT 1 FROM raw_records n WHERE n.supersedes=r.raw_id)
                 ORDER BY raw_id DESC LIMIT 1''', (subject_kind, subject_id)).fetchone()
 
-    def ensure_material(self, material_id: int, *, adjacency=None):
-        """Assign the material's raw once; a repeated delivery reuses it."""
+    def ensure_material(self, material_id: int, *, adjacency=None, reserved=None, collected_ms=None,
+                        supersedes=None):
+        """Assign the material's raw once; a repeated delivery reuses it.
+
+        A third-party quick note keeps the id reserved when it was captured and
+        its capture time (captures.Captures.material_hints)."""
         vault = self.vault()
         with connect(self.store.path) as db:
             db.execute('BEGIN IMMEDIATE')
             existing = db.execute("SELECT raw_id FROM raw_records WHERE subject_kind='material' AND subject_id=? LIMIT 1",
                                   (material_id,)).fetchone()
-            if existing is not None:
-                raw_id = existing['raw_id']
-            else:
+            if existing is None:
                 row = material_row(db, material_id)
                 if row is None:
                     raise RawError('raw_material_has_no_source_fact')
-                day = _local(row['created_at']).strftime('%Y%m%d')
-                raw_id = allocate(db, day, vault if vault and vault.is_dir() else None)
+                if collected_ms is not None:
+                    row['created_at'] = datetime.fromtimestamp(collected_ms / 1000, UTC).isoformat()
+                if reserved and not db.execute('SELECT 1 FROM raw_records WHERE raw_id=?', (reserved,)).fetchone():
+                    raw_id = reserved
+                else:
+                    raw_id = allocate(db, _local(row['created_at']).strftime('%Y%m%d'),
+                                      vault if vault and vault.is_dir() else None)
                 document = render_material(row, media(db, material_id), raw_id, app_version=self.version,
-                                           migrated=False, current_asr=_asr_label(db), adjacency=adjacency)
-                insert(db, raw_id, 'material', material_id, '第三方', document, origin='app')
+                                           migrated=False, current_asr=_asr_label(db), adjacency=adjacency,
+                                           supersedes=supersedes)
+                insert(db, raw_id, 'material', material_id, '第三方', document, origin='app', supersedes=supersedes)
         return self.current('material', material_id)
 
     def supersede(self, old_raw_id: str, document_for, *, identity: str):

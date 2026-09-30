@@ -76,7 +76,12 @@ def test_history_outage_does_not_block_committed_live_message(inbox):
     runtime=FeishuRuntime(inbox,api,intake,None,synchronize)
     runtime._intake_loop()
     assert inbox.pending()==[]
-    assert inbox.store.item_bundle(1)['input_kind']=='direct_text'
+    # Assertion update (phase 2, 2026-09-29): short plain text is now a quick-note
+    # capture judged for identity, not a direct-text material; it was still processed.
+    from knowledge_distiller.v1.captures import Captures
+    captures=Captures(inbox.store)
+    capture=captures.for_message(inbox.app_id,'om_1')
+    assert capture is not None and captures.identity(capture['capture_id'])['result']=='pending'
     assert runtime.error=='feishu_history_failed'
 
 

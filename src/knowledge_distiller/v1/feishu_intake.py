@@ -9,9 +9,10 @@ from .intake import needs_content_choice, links_in, platform_for_url
 
 
 class FeishuIntake:
-    def __init__(self, inbox, links, *, wake=None, api=None):
+    def __init__(self, inbox, links, *, wake=None, api=None, client_factory=None):
         self.inbox, self.links, self.wake = inbox, links, wake
         self.api = api
+        self.client_factory = client_factory
 
     def choose(self,message_id,content_kind):
         if content_kind not in {'links','text'}:
@@ -42,6 +43,11 @@ class FeishuIntake:
             raise ValueError('这条飞书投递不存在。')
         if row['state'] not in {'received','waiting_input'}:
             return row['state']
+        from .captures import Captures
+        captures = Captures(self.inbox.store, client_factory=self.client_factory, api=self.api)
+        capture = captures.for_message(self.inbox.app_id, message_id)
+        if capture is not None:
+            return self._capture(key, captures, capture)
         raw=json.loads(row['raw_json'])
         from .feishu_inbox import event_message, history_message
         message=event_message(raw) if 'event' in raw else history_message(raw)
@@ -120,6 +126,25 @@ class FeishuIntake:
         if self.wake and items(self.inbox,message_id):
             self.wake()
         return state
+
+    def _capture(self, key, captures, capture):
+        """A quick note: only "已记录" back to the chat; no questions at capture time."""
+        from .feishu_api import FeishuAPIError
+        import httpx
+        captures.judge(capture)
+        try:
+            captures.advance(captures.get(capture['capture_id']))
+        except (FeishuAPIError, httpx.HTTPError, OSError, ValueError):
+            return self._state(key, 'needs_desktop', '语音下载未完成，原消息已保留，可重试下载。')
+        self._state(key, 'accepted')
+        try:
+            captures.write_ready()
+        except Exception as error:
+            import logging
+            logging.getLogger(__name__).warning('capture raw deferred (%s)', type(error).__name__)
+        if self.wake:
+            self.wake()
+        return 'accepted'
 
     def _part(self,key,position):
         with connect(self.inbox.store.path) as db:

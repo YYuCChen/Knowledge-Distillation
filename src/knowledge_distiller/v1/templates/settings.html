@@ -245,6 +245,16 @@
           <span class="row-actions"><button class="secondary-button">{{ '关闭此排版' if reading_style_state == 'enabled' else '更新此排版' if reading_style_state == 'update_available' else '启用此排版' }}</button></span>
         </form>
       </div>
+      <div class="capture-judgment-configuration">
+        <form class="setting-row vault-row" action="{{ url_for('settings.capture_judgment') }}" method="post">
+          <input type="hidden" name="return_to" value="{{ return_to }}">
+          <input type="hidden" name="action" value="{{ 'disable' if capture_cloud == 'on' else 'enable' }}">
+          <span class="state-dot {{ 'configured' if capture_cloud == 'on' else 'unconfigured' }}" aria-hidden="true"></span>
+          <strong title="判断飞书随手记是你的想法、转来的内容还是附言。关闭时只用规则，判不了的进待处理，不会自动归为你的想法。">随手记云端判断</strong>
+          <span class="vault-path" role="status">{{ '已启用' if capture_cloud == 'on' else '已关闭' }}</span>
+          <span class="row-actions"><button class="secondary-button">{{ '关闭此判断' if capture_cloud == 'on' else '启用此判断' }}</button></span>
+        </form>
+      </div>
       <details class="feishu-configuration" {% if open_group == 'paths' and (request.args.get('message', '').startswith('feishu_') or request.args.get('setup') == 'feishu') %}open{% endif %}>
         <summary class="setting-row vault-row">
           <span class="state-dot {{ 'configured' if feishu and feishu.state == 'connected' else 'unconfigured' }}" aria-hidden="true"></span>

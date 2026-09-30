@@ -157,7 +157,7 @@
       </section>
     {% endif %}
 
-    {% if todo %}
+    {% if todo or pending_captures %}
       <section class="section" data-sync-key="todo" data-live-status>
         <h2>待处理</h2>
         {% set failed_count = todo | selectattr('state', 'equalto', 'failed') | list | length %}
@@ -171,7 +171,7 @@
               <img src="{{ url_for('static', filename='icons/state-yellow.svg') }}" alt="">
             </span>
             <span class="summary-text">
-              {% if confirmation_count %}{{ confirmation_count }} 处待确认{% endif %}{% if failed_count %}{% if confirmation_count %} · {% endif %}{{ failed_count }} 项需处理{% endif %}
+              {% if confirmation_count %}{{ confirmation_count }} 处待确认{% endif %}{% if failed_count %}{% if confirmation_count %} · {% endif %}{{ failed_count }} 项需处理{% endif %}{% if pending_captures %}{% if confirmation_count or failed_count %} · {% endif %}{{ pending_captures|length }} 条随手记待定身份{% endif %}
             </span>
             <span class="panel-chevron">
               <img class="closed-chevron" src="{{ url_for('static', filename='icons/chevron-up.svg') }}" alt="">
@@ -180,6 +180,21 @@
           </summary>
           <div class="todo-list">
             {% set cards = namespace(index=0) %}
+            {% for capture in pending_captures %}
+              {% set cards.index = cards.index + 1 %}
+              <div class="todo-card-shell" data-sync-key="capture-{{ capture.id }}"><article class="todo-card failure-card">
+                <span class="todo-index">{{ cards.index }}</span>
+                <div class="todo-content failure-content">
+                  <div class="failure-source"><strong title="{{ capture.text }}">{{ capture.excerpt }}</strong><span>飞书随手记 · {{ capture.received }}</span></div>
+                  <span class="failure-reason">身份待定：请选择这条消息是谁的话。</span>
+                  <span class="failure-actions">
+                    <form action="{{ url_for('capture_identity', capture_id=capture.id) }}" method="post"><button class="primary-small" name="identity" value="my_thought">我的想法</button></form>
+                    <form action="{{ url_for('capture_identity', capture_id=capture.id) }}" method="post"><button class="secondary-small" name="identity" value="third_party">第三方内容</button></form>
+                    {% if capture.annotation %}<form action="{{ url_for('capture_identity', capture_id=capture.id) }}" method="post"><button class="secondary-small" name="identity" value="annotation">附言</button></form>{% endif %}
+                  </span>
+                </div>
+              </article></div>
+            {% endfor %}
             {% for item in todo %}
               {% if item.state == 'waiting_user' %}
                 {% if confirmation_error and confirmation_error.id == item.id %}

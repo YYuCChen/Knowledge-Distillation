@@ -5,7 +5,7 @@ from .vault_access import publication_status, open_saved_location
 import json
 import re
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote, urlsplit
@@ -496,6 +496,19 @@ def create_app(
             return str(error), 409
         return redirect(url_for('home', item=item_id))
 
+    @app.post("/captures/<int:capture_id>/identity")
+    def capture_identity(capture_id: int):
+        from .captures import Captures
+        try:
+            captures = Captures(store)
+            captures.decide(capture_id, request.form.get("identity", ""))
+            captures.write_ready()
+        except (ValueError, LookupError) as error:
+            return str(error), 409, {'Content-Type': 'text/plain; charset=utf-8'}
+        if wake_worker is not None:
+            wake_worker()
+        return redirect(url_for("home"))
+
     @app.post("/items/<int:item_id>/continue")
     def continue_knowledge(item_id: int):
         try:
@@ -651,7 +664,23 @@ def _home_context(
         "draft": draft,
         "confirmation_error": confirmation_error,
         "confirmation_count": sum(max(1, len(item["confirmation"]["concerns"])) for item in todo if item["state"] == "waiting_user"),
+        "pending_captures": _pending_captures(store),
     }
+
+
+def _pending_captures(store):
+    """Quick notes whose identity only the user can decide (never assumed to be theirs)."""
+    from .captures import Captures
+    captures = Captures(store)
+    views = []
+    for capture in captures.pending():
+        received = datetime.fromtimestamp(capture['received_ms'] / 1000, UTC).astimezone()
+        text = ' '.join((capture['text'] or '').split())
+        views.append({'id': capture['capture_id'], 'text': capture['text'] or '',
+                      'excerpt': text[:60] + ('…' if len(text) > 60 else ''),
+                      'received': f'{received.month} 月 {received.day} 日  {received:%H:%M}',
+                      'annotation': captures.recent_delivery(capture) is not None})
+    return views
 
 
 def _item_view(row, vault_path: str | None, data_root=None) -> dict[str, object]:

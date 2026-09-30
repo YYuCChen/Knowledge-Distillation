@@ -81,13 +81,17 @@ def create_application(
 
     def maintenance():
         # Backfill raw/ first: a material's media is released only after its raw
-        # file was written (media_lifecycle.RELEASABLE).
+        # file was written (media_lifecycle.RELEASABLE). Quick notes waiting for
+        # earlier deliveries' raw ids are written once those settle.
         from .raw import RawLedger
-        try:
-            RawLedger(store).write_pending()
-        except Exception as error:
-            import logging
-            logging.getLogger(__name__).warning('raw backfill deferred (%s)', type(error).__name__)
+        from .captures import Captures
+        import logging
+        for step in (lambda: RawLedger(store).write_pending(),
+                     lambda: Captures(store, client_factory=settings_service.llm_client).write_ready()):
+            try:
+                step()
+            except Exception as error:
+                logging.getLogger(__name__).warning('raw backfill deferred (%s)', type(error).__name__)
         artifacts.sweep()
 
     worker = SingleWorker(store, build_distiller, organization=build_organization,
@@ -111,7 +115,8 @@ def create_application(
     from .desktop_pages import install as install_desktop_pages
     install_desktop_pages(app)
     from .feishu_service import FeishuService
-    feishu=FeishuService(store,app.extensions['link_intake'],build_distiller,selected_paths.runtime,wake=worker.wake)
+    feishu=FeishuService(store,app.extensions['link_intake'],build_distiller,selected_paths.runtime,wake=worker.wake,
+                         client_factory=settings_service.llm_client)
     app.extensions['feishu']=feishu
     app.extensions['qwen_component']=settings_service.qwen_component
     app.config['KNOWLEDGE_DISTILLER_CLOSE_FEISHU']=feishu.stop

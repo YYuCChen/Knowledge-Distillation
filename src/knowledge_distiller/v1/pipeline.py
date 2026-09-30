@@ -671,13 +671,15 @@ class Distiller:
         work_dir = self.runtime_root / "items" / str(item_id)
         captured = None
         from .intake import platform_for_url
-        kind = platform_for_url(row['submitted_url'])
+        from .captures import FeishuVoiceSource, is_voice_url
+        kind = 'feishu_voice' if is_voice_url(row['submitted_url']) else platform_for_url(row['submitted_url'])
         if kind is None:
             raise DistillError('source_platform_unsupported')
         source = {'douyin': self.source, 'youtube': self.youtube_source,
                   'xiaohongshu': self.xiaohongshu_source, 'x': self.xpost_source,
                   'zhihu': self.zhihu_source, 'weibo': self.weibo_source,
-                  'bilibili': self.bilibili_source}.get(kind)
+                  'bilibili': self.bilibili_source,
+                  'feishu_voice': FeishuVoiceSource(self.store) if kind == 'feishu_voice' else None}.get(kind)
         if source is None:
             raise DistillError(kind + '_runtime_unavailable')
         source_options = {'expected_authority': json.loads(row['platform_authority_json'])} if kind in {'youtube', 'xiaohongshu', 'x', 'zhihu', 'weibo'} else {}
@@ -755,8 +757,23 @@ class Distiller:
         if kind == 'xiaohongshu':
             self.store.record_video_transcript(material_id, recognition.recovery.chunks)
         review_revision = self._item(item_id)['review_revision']
-        review = (self.reviewer.review_in_directory(recognition.recovery, work_dir)
-            if isinstance(self.reviewer, RecordedReviewer) else self.reviewer.review(recognition.recovery))
+        if kind == 'feishu_voice':
+            # The ASR original is part of the immutable capture record (4.1).
+            from .captures import Captures, CLOUD_SETTING, asr_identity
+            engine, model, version = asr_identity(self.store)
+            captures = Captures(self.store)
+            voice = captures.for_item(item_id)
+            if voice is not None:
+                captures.record_transcript(voice['capture_id'], recognition.recovery,
+                                           engine=engine, model=model, version=version)
+        if kind == 'feishu_voice' and self.store.setting(CLOUD_SETTING) != 'on':
+            # Private words are sent to a cloud model only when the user enabled it;
+            # without review there are no model-flagged concerns to check.
+            from knowledge_distiller.faithful_review import FaithfulReview, FaithfulReviewCandidate
+            review = FaithfulReview.succeeded(FaithfulReviewCandidate(recognition.recovery.text, ()))
+        else:
+            review = (self.reviewer.review_in_directory(recognition.recovery, work_dir)
+                if isinstance(self.reviewer, RecordedReviewer) else self.reviewer.review(recognition.recovery))
         import hashlib
         review_identity = hashlib.sha256(recognition.recovery.text.encode()).hexdigest()
         stage_result = {'schema': 1, 'source_sha256': review_identity,
@@ -869,6 +886,16 @@ class Distiller:
         row = self._item(item_id)
         if row["source_fact_id"] is None:
             return DistillResult(item_id, "waiting_user")
+        if row["source_kind"] == "feishu_voice":
+            # A voice quick note ends as the user's own words in raw/自述, not as knowledge.
+            self.store.mark_succeeded(item_id)
+            try:
+                from .captures import Captures
+                Captures(self.store).write_ready()
+            except Exception as error:
+                import logging
+                logging.getLogger(__name__).warning('capture raw deferred (%s)', type(error).__name__)
+            return DistillResult(item_id, "succeeded")
         self._write_raw(row)
         if row["knowledge_result_id"] is None:
             if self.store.prepare_image_review(item_id):
@@ -904,8 +931,10 @@ class Distiller:
         is recorded for backfill and never blocks the V1 note."""
         try:
             from .raw import RawLedger
+            from .captures import Captures
             ledger = RawLedger(self.store)
-            record = ledger.ensure_material(int(row['material_id']))
+            record = ledger.ensure_material(int(row['material_id']),
+                                            **Captures(self.store).material_hints(row['item_id']))
             if record is not None and record['written_at'] is None:
                 ledger.write(record, self.vault)
         except Exception as error:

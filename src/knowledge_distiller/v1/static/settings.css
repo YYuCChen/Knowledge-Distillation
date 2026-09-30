@@ -300,10 +300,11 @@
 .feishu-fields input { width: 100%; min-width: 0; box-sizing: border-box; }
 .feishu-fields a { display: inline-block; margin-top: 0; }
 
-.reading-style-configuration > .setting-row { border-bottom: 0; }
+.reading-style-configuration > .setting-row, .capture-judgment-configuration > .setting-row { border-bottom: 0; }
 .reading-style-configuration > summary { cursor: pointer; list-style: none; }
 .reading-style-configuration > summary::-webkit-details-marker { display: none; }
-.feishu-configuration .secondary-button, .reading-style-configuration .secondary-button { justify-self: end; width: max-content; }
+.feishu-configuration .secondary-button, .reading-style-configuration .secondary-button,
+.capture-judgment-configuration .secondary-button { justify-self: end; width: max-content; }
 .feishu-fields label { font-size: 11px; color: var(--ink); }
 .feishu-fields input { height: 24px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--card); color: var(--ink); font-size: 11px; }
 .feishu-fields input::placeholder { color: #737b83; }

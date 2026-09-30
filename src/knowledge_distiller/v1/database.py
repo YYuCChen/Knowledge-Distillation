@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 TOPIC_STATEMENTS = (
     """CREATE TABLE topic_entries (
         topic_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -213,7 +213,7 @@ def initialize(path: Path) -> None:
             connection.execute(SUBMITTED_SCHEMA)
             connection.execute("ALTER TABLE source_facts ADD COLUMN lineage_json TEXT NOT NULL DEFAULT '{}'")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, SCHEMA_VERSION):
+        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, SCHEMA_VERSION):
             raise RuntimeError(f"unsupported database version: {version}")
 
         if version < 6:
@@ -387,4 +387,14 @@ def initialize(path: Path) -> None:
                 connection.execute(statement)
             from .media_lifecycle import require_raw
             require_raw(connection)
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+        if version < 21:
+            # Feishu quick notes: append-only captures, transcripts, adjacency and
+            # identity events (docs/roadmap/handoff-feishu-capture.md).
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+            from .capture_schema import STATEMENTS as CAPTURE_STATEMENTS
+            for statement in CAPTURE_STATEMENTS:
+                connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
