@@ -8,7 +8,7 @@
   function syncDocumentComponent(component) {
     if (!notice || !component?.state) return;
     notice.dataset.documentComponent = component.state;
-    notice.hidden = !['checking', 'unavailable'].includes(component.state);
+    notice.hidden = component.state !== 'unavailable';
     if (!notice.hidden && component.message) notice.textContent = component.message;
   }
   if (state.manual_download_url) {

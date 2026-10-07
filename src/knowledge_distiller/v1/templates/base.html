@@ -21,7 +21,7 @@
   <body>
     {% block topbar %}{% endblock %}
     {% if document_component is defined %}
-    <p role="status" data-document-component="{{ document_component.state }}" style="margin:16px 24px;padding:12px;border:1px solid currentColor;border-radius:8px" {% if document_component.state not in ['checking', 'unavailable'] %}hidden{% endif %}>{{ document_component.message }}</p>
+    <p role="status" data-document-component="{{ document_component.state }}" style="margin:16px 24px;padding:12px;border:1px solid currentColor;border-radius:8px" {% if document_component.state != 'unavailable' %}hidden{% endif %}>{{ document_component.message }}</p>
     {% endif %}
     {% block content %}{% endblock %}
     {% block scripts %}{% endblock %}
