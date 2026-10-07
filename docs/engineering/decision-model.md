@@ -2,6 +2,8 @@
 
 状态：2026-10-08 第一批实现候选。仅新增客户端、profile 服务及合成测试；未接 settings、UI、captures、recall、schema、app 或功能 flag，未部署／启动 Clef，也未访问正式数据或权重。测试执行和最终验收分别交 Luna/max、主控。
 
+2026-10-08 主控内部验收补记：已实际审阅客户端、profile、并发修复及测试。首次并发失败保留；定向修复后独立 Luna/max 回归为 133 passed、无失败／错误／跳过，pytest 与包装命令均退出 0。证据 `/tmp/kd-v3-r17-fix-tests-20261008.md`，可丢弃目录 `/private/tmp/kd-v3-r17-fix-tests-20261008.zvyJ6h`，JUnit SHA256 `0cd117d0e35f35b934707ac780d0e8fc95a2bc8bc95a6b52575fbcbce990f911`。主控另读实际 JUnit、核对源码与测试 SHA；源码初次内部提交为 `2afc96bd77c3db88a8c97f0aa8abd6922e0cddfe`。该结论只覆盖合成内部合同，不代表真实 Jev／Clef、设置交互、业务接线或发布已验收。
+
 ## 调用合同
 
 `DecisionProfile(provider, endpoint, model, auth_ref, protocol, timeout_seconds, token_budget)` 为不可变配置。provider 仅 `jev`／`clef`，协议固定 `systemone-text-v1`。当前预算限制为 1–16384，默认 16384，超时 0–600 秒（不含 0）。

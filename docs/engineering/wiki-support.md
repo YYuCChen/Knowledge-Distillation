@@ -2,6 +2,8 @@
 
 2026-10-08，Asia/Taipei。实现为 `src/knowledge_distiller/v1/wiki_support.py`，尚未生产接线或主控语义验收；旧候选已有 73 pass fake 测试证据，本次审阅修复的新测试尚未执行。它不调用旧 SQL 知识主链，不修改旧候选／支持／恢复模块、worker、runner、publish、kit、UI 或数据库。
 
+2026-10-08 主控内部验收补记（取代上段的当时待验状态）：主控已读完整初稿与修复差异，确认多跳引用经过变更页时重新核对、私有 checkpoint 及持有验证 fd 的锁边界。独立 Luna/max 修复回归为 95 passed、无失败／错误／跳过，pytest 退出 0；测试结束后的 zsh 包装命令因误用只读变量 status 退出 1，保留此包装失败，不重跑已通过测试。证据 `/tmp/kd-v3-wiki-support-fix-tests-20261008.md`，目录 `/private/tmp/kd-v3-wiki-support-fix-tests-20261008.ci0bQz`，JUnit SHA256 `b04a683eca5bf8671e60a881bb2e885de7f9ac3f9248f0e7026352bf65299d7b`。主控另读实际 JUnit 与 SHA；初次内部提交 `ce1cca0dd67c51c3c113eb8aed078ace8e59939f`。只确认合成候选支持合同；真实模型、wiki worker 接线、Vault 发布和正式资料均未验收。
+
 ## 输入与 API
 
 `DocumentChange(path,before,before_sha256,after,after_sha256)` 保存完整 bytes 和明确 SHA256。新建的 before 两值均为 None；删除不属于本合同。调用方在独立 staging 完成候选后调用 `build_registry(staging_root, changes, raws, pages=(), generated=(), max_depth=4)`。所有 after、raw 及依赖页都必须与 staging 常规文件逐字一致；before 必须为冻结基线 bytes，调用方负责基线来源。程序检查 UTF-8、摘要、路径及符号链接，绝不写 raw。
