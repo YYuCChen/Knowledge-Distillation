@@ -24,6 +24,7 @@ _ID = re.compile(r'[a-f0-9]{32}')
 _NAME = 'decision-profiles.json'
 _LOCK = '.decision-profiles.lock'
 _MAX_STORE_BYTES = 1024 * 1024
+_UNSPECIFIED_ACTIVE = object()
 
 
 class DecisionProfileError(RuntimeError):
@@ -227,6 +228,13 @@ class DecisionProfiles:
     def client(self, identity: str) -> DecisionClient:
         return DecisionClient(self.get(identity), secret=self._secret, post=self._post, get=self._get)
 
+    def qualification(self, identity: str) -> dict:
+        """Read this immutable draft's eligibility without checking any service."""
+        with self._locked() as directory:
+            state = self._read(directory)
+            row = self._row(state, identity)
+            return {'checked': row['validation'] is not None, 'active': state['active'] == identity}
+
     def validate_draft(self, identity: str):
         """Explicit served-name check plus synthetic typed inference. Never activates.
 
@@ -259,9 +267,11 @@ class DecisionProfiles:
             self._write(directory, state)
         return result
 
-    def activate(self, identity: str) -> None:
+    def activate(self, identity: str, *, expected_active_id=_UNSPECIFIED_ACTIVE) -> None:
         with self._locked() as directory:
             state = self._read(directory)
+            if expected_active_id is not _UNSPECIFIED_ACTIVE and state['active'] != expected_active_id:
+                raise DecisionProfileError('decision_active_conflict')
             row = self._row(state, identity)
             if row['validation'] is None:
                 raise DecisionProfileError('decision_profile_unvalidated')

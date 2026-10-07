@@ -83,6 +83,46 @@ def test_successful_probe_does_not_activate_and_restart_preserves_active(service
     assert restarted.client(identity).profile == profile()
 
 
+def test_qualification_is_read_only_and_checked_draft_remains_inactive(service):
+    store, fake = service
+    identity = store.add_draft(profile())
+    assert store.qualification(identity) == {'checked': False, 'active': False}
+    assert fake.events == []
+    store.validate_draft(identity)
+    assert store.qualification(identity) == {'checked': True, 'active': False}
+    store.activate(identity, expected_active_id=None)
+    assert store.qualification(identity) == {'checked': True, 'active': True}
+
+
+def test_concurrent_cas_from_same_active_allows_only_one_writer(service):
+    store, fake = service
+    old = store.add_draft(profile())
+    store.validate_draft(old)
+    store.activate(old)
+    drafts = [store.add_draft(replace(profile(), token_budget=1000 + n)) for n in range(2)]
+    for identity in drafts:
+        store.validate_draft(identity)
+    barrier = Barrier(2)
+
+    def activate(identity):
+        independent = DecisionProfiles(store.root)
+        barrier.wait()
+        try:
+            independent.activate(identity, expected_active_id=old)
+            return identity, 'activated'
+        except DecisionProfileError as error:
+            return identity, str(error)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(activate, drafts))
+    assert sorted(status for _, status in outcomes) == ['activated', 'decision_active_conflict']
+    winner = next(identity for identity, status in outcomes if status == 'activated')
+    assert store.active()[0] == winner
+    with pytest.raises(DecisionProfileError, match='decision_active_conflict'):
+        store.activate(old, expected_active_id=None)
+    assert store.active()[0] == winner
+
+
 def test_new_draft_failure_preserves_old_active_and_success_still_requires_activation(service):
     store, fake = service
     old = store.add_draft(profile('jev'))

@@ -61,3 +61,23 @@ Luna 仅执行 `tests/v1/test_decision_client.py`、`tests/v1/test_decision_prof
 补充回归设计：屏障同步的首次／既存锁并发多实例；确定性注入竞争创建EEXIST并断言NOFOLLOW／EXCL未弱化；等待锁期间被替换为symlink或新普通文件均拒绝且不写状态；三个独立合成子进程共同写24个draft，不丢更新。网络侧以真实httpx.post helper＋MockTransport和合成HTTP_PROXY／HTTPS_PROXY验证trust_env=false传到其Client，redirect=false传到request，整个测试无真实网络。原Jev alias→resolved model、原生概率语义和20秒默认保持；未来settings候选120秒应显式配置。
 
 本轮只改原五文件。未运行pytest、未触及真实服务／资料／其他人文件；由主控审新字节后交Luna仅重跑两decision测试。
+
+## 2026-10-08 SettingsService延迟后台桥接（未接产品入口）
+
+主控裁决：本批仅mac/POSIX私有profile配置；Windows新profile方法返回`decision_profiles_unsupported`，不切旧Jev、不实现Windows锁。凭据沿现LocalSecrets合同：Mac是0700目录、0600文件中的明文受权限保护（非加密），Windows是当前用户DPAPI；profile/Store/日志/响应只存引用，不存或回显API Key。没有改Keychain策略、迁旧key或读取实际凭据。本期JSON无明文限制不指现专用凭据文件。
+
+SettingsService构造新增`decision_root/decision_profiles_factory/decision_secret_factory/decision_post/decision_get`注入，仅记录参数；不读profile、凭据或新目录，不check、不启服务。明确后台操作才延迟创建DecisionProfiles；默认根为`store.path.parent / 'decision-profiles'`，沿其安全目录/锁/原子写入检查，不追随别名回退。构建检查仍不实例化SettingsService或调用state/secret方法；原有service构造平台/组件行为未变，不能声称整个旧Settings构造是纯对象。
+
+- `save_decision_draft(profile_fields, api_key=None)`：真实字段为DecisionProfile的`auth_ref`，只保存新immutable draft；API Key编辑总是保存到新`decision-key-<uuidhex>`账户（现凭据save，pending_validation），不覆盖旧ref/active，不自动GC失败留下的孤立key。缺key/非法引用/非法profile固定失败；无网络检查，返回draft ID。传入引用限定此账户格式，加载仍由后端检查真实存在/权限；不会自动复用jev-api-key。
+- `check_decision_draft(draft_id)`：唯一显式配置检查，经原validate_draft先失效旧资格，再合成choice+noul；Clef先served model GET。post/get均需显式注入，缺失注入拒绝transport，绝不默认发检查网络。失败资格清空、旧active保留；成功返回draft/provider/requested model和固定合成contract，不回显原服务response。配置资格是检查时的事实，不是永久健康承诺。
+- `activate_decision_profile(draft_id, expected_active_id=...)`：先读不可变draft descriptor，明确内部activate在锁内CAS要求当前active等于expected，再检查draft资格并写入；成功返回committed activation snapshot（提交时配置快照），不是永久当前active。另一合法activate可随后改变当前状态，不能据锁外读回把已成功提交误报conflict；当前状态另由decision_state读取。replace/fsync持久性错误照实报错，不能承诺旧active未变。无consumer registry、用户bool或featureflag。产品没有新activate route，不能称业务已切换。
+- `decision_state(draft_id=None)`：只读非敏感active descriptor及可选draft资格，不check/加载key。该组合展示不是消费提交CAS；提交必须用当前版本/expected_active重新核验。
+- `decision_client()`：仅当前active返回`(profile_id, DecisionClient)`，客户端构造不加载key/ask；无active返回None，不调旧jev_client。损坏/不安全配置返回固定错误，不伪装无配置；后续consumer无新active必须pending。secret resolver延迟加载且异常固定`decision_secret_unavailable`，provider失败不换本地/云/历史Jev。
+
+DecisionProfiles新增`qualification(id)`只读checked/active（不返回validation原响应）；`activate(id, expected_active_id=...)`在同一原文件锁内CAS。旧内部`activate(id)`省略参数仍兼容原测试，无新增格式版本。draft不可编辑，修改model/endpoint/预算/超时/key均新ID未检查；原active及旧检查记录保持其原版本，不复制到新draft。
+
+旧jev_state/jev_client/save_jev_key、原settings view、LLM/ASR/平台、app/Feishu/Captures/wiki、模板/routes/static全部未接线。旧已有消费者继续原Jev语义，新typed client不适配成旧choose/raw ask；Clef confidence不能冒充Jev或照搬身份0.9/0.8阈值。R16/wiki typed消费者及真实版本/CAS接线经验收后，才由主控授U06具体demo/启用route及发布；本批内部activate合成成功不等于产品启用。
+
+新增合成test_settings_decision_profiles.py：内存凭据、store facade（无DB）、显式可丢弃根、fake HTTP；构造零新增IO、草稿与key编辑失效、显式检查/启用、重启active、坏配置不fallback、固定secret错误、旧Jev兼容、缺transport检查失效、provider失败及Windows拒绝。test_decision_profiles.py追加资格只读与多实例并发CAS一胜一冲突。编码阶段仅AST/diff/static QA，未运行pytest、未读取真实profile/key、未调用网络/模型；验收由主控/Luna一次运行冻结文件。
+
+后台桥接限定回归已执行一次：Luna/max、CPython3.11.16/pytest8.4.2、fresh159工具环境、env-i与独立0700根 `/private/tmp/kd-v3-r17-settings-tests-20261008.xgUQrA`，两文件67 passed（profiles39/settings28），无failure/error/skip，pytest/外层exit0。JUnit SHA `d86ce49174b926673479e4edb58463e370302d652b4b8dd35c85504f23c4df00`；五文件及Store/database依赖测试前后SHA无漂移。主控实际读代码diff、完整新测试及JUnit67节点，核固定提交回执/并发CAS。全部fakeHTTP/memorysecret/StoreFacade，未初始化DB或读取真实配置、密钥、Vault、模型、网络；不证明U06/R16/wiki接线、Windows持久层、真实模型或完整发行通过。
