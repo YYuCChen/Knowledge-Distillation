@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from knowledge_distiller.v1 import wiki_schema
-from knowledge_distiller.v1.database import SCHEMA_VERSION, connect, initialize
+from knowledge_distiller.v1.database import SCHEMA_VERSION, INGESTION_COLUMNS, connect, initialize
 
 
 SCHEMA_21_FIXTURE = Path(__file__).with_name("fixtures") / "wiki-schema21.sql"
@@ -48,7 +48,7 @@ def _schema21_binary_version_gate(path: Path) -> None:
             raise RuntimeError(f"unsupported database version: {version}")
 
 
-def _legacy_snapshot(path: Path) -> tuple[dict[str, str], dict[str, list[tuple]]]:
+def _legacy_snapshot(path: Path, *, normalize_v24=False) -> tuple[dict[str, str], dict[str, list[tuple]]]:
     with sqlite3.connect(path) as connection:
         objects = dict(
             connection.execute(
@@ -71,6 +71,25 @@ def _legacy_snapshot(path: Path) -> tuple[dict[str, str], dict[str, list[tuple]]
             name: [tuple(row) for row in connection.execute(f'SELECT * FROM "{name}" ORDER BY rowid')]
             for name in tables
         }
+        if normalize_v24:
+            # Only the explicitly added A1 objects/columns are projected away.
+            # All pre-existing SQL and every original value still compare exact.
+            additions = {'ingestion_events', 'ingestion_events_subject',
+                         'collection_members_ingestion_contract_match'}
+            prefixes = ('ingestion_events_', 'distill_items_ingestion_',
+                        'collection_operations_ingestion_', 'source_media_ingestion_',
+                        'submitted_sources_ingestion_')
+            objects = {name: sql for name, sql in objects.items()
+                       if name not in additions and not name.startswith(prefixes)}
+            contents.pop('ingestion_events', None)
+            for table in ('distill_items', 'collection_operations'):
+                for definition in INGESTION_COLUMNS:
+                    objects[table] = objects[table].replace(', ' + definition, '')
+                added = {definition.split()[0] for definition in INGESTION_COLUMNS}
+                columns = [row[1] for row in connection.execute(f'PRAGMA table_info({table})')
+                           if row[1] not in added]
+                selected = ','.join('"' + name + '"' for name in columns)
+                contents[table] = list(connection.execute(f'SELECT {selected} FROM {table} ORDER BY rowid'))
     return objects, contents
 
 
@@ -153,15 +172,15 @@ def test_real_schema21_upgrade_is_additive_and_preserves_legacy_database(tmp_pat
     initialize(database)
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 23
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 24
         assert {
             row[0]
             for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'wiki_%'"
             )
-        } == {"wiki_tasks", "wiki_task_batches", "wiki_task_raw", "wiki_observations"}
+        } == {"wiki_tasks", "wiki_task_batches", "wiki_task_raw", "wiki_observations", "wiki_outcome_receipts"}
         _assert_healthy(connection)
-    assert _legacy_snapshot(database) == before
+    assert _legacy_snapshot(database, normalize_v24=True) == before
 
 
 def test_schema22_to_23_preserves_frozen_task_rows_and_adds_observation(tmp_path):
@@ -183,10 +202,12 @@ def test_schema22_to_23_preserves_frozen_task_rows_and_adds_observation(tmp_path
     initialize(database)
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 23
-        assert connection.execute(
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        after_task = connection.execute(
             "SELECT * FROM wiki_tasks WHERE task_id=?", (task_id,)
-        ).fetchone() == before_task
+        ).fetchone()
+        assert after_task[:len(before_task)] == before_task
+        assert after_task[len(before_task):] == ('legacy', '{}', None)
         assert connection.execute(
             "SELECT * FROM wiki_task_batches WHERE task_id=?", (task_id,)
         ).fetchone() == before_batch
@@ -300,7 +321,7 @@ def test_schema21_binary_rejects_schema22_and_opens_restored_backup(tmp_path):
         source.backup(target)
 
     initialize(database)
-    with pytest.raises(RuntimeError, match="unsupported database version: 23"):
+    with pytest.raises(RuntimeError, match="unsupported database version: 24"):
         _schema21_binary_version_gate(database)
 
     shutil.copy2(backup, restored)
@@ -319,13 +340,13 @@ def test_future_schema_is_rejected_without_downgrade(tmp_path):
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE sentinel(value TEXT)")
         connection.execute("INSERT INTO sentinel VALUES ('keep')")
-        connection.execute("PRAGMA user_version=24")
+        connection.execute("PRAGMA user_version=25")
 
-    with pytest.raises(RuntimeError, match="unsupported database version: 24"):
+    with pytest.raises(RuntimeError, match="unsupported database version: 25"):
         initialize(database)
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 24
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 25
         assert connection.execute("SELECT value FROM sentinel").fetchone()[0] == "keep"
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE name LIKE 'wiki_%'"

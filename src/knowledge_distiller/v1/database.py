@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
+INGESTION_CONTRACT = 'raw-verified-v1'
+# These are process bindings, not filesystem verification certificates.
+INGESTION_COLUMNS = (
+    "ingestion_contract TEXT NOT NULL DEFAULT 'legacy' CHECK (ingestion_contract IN ('legacy','raw-verified-v1'))",
+    "source_binding_sha256 TEXT CHECK (source_binding_sha256 IS NULL OR (length(source_binding_sha256)=64 AND source_binding_sha256 NOT GLOB '*[^0-9a-f]*'))",
+    "relation_binding_sha256 TEXT CHECK (relation_binding_sha256 IS NULL OR (length(relation_binding_sha256)=64 AND relation_binding_sha256 NOT GLOB '*[^0-9a-f]*'))",
+)
 TOPIC_STATEMENTS = (
     """CREATE TABLE topic_entries (
         topic_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -213,7 +220,7 @@ def initialize(path: Path) -> None:
             connection.execute(SUBMITTED_SCHEMA)
             connection.execute("ALTER TABLE source_facts ADD COLUMN lineage_json TEXT NOT NULL DEFAULT '{}'")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, SCHEMA_VERSION):
+        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, SCHEMA_VERSION):
             raise RuntimeError(f"unsupported database version: {version}")
 
         if version < 6:
@@ -421,3 +428,100 @@ def initialize(path: Path) -> None:
             else:
                 migrate_observations(connection)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+        if version < 24:
+            if not connection.in_transaction:
+                connection.execute('BEGIN IMMEDIATE')
+            migrate_v24(connection)
+            if connection.execute('PRAGMA foreign_key_check').fetchone() is not None:
+                raise RuntimeError('database migration found broken ingestion references')
+            connection.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
+
+
+def migrate_v24(connection: sqlite3.Connection) -> None:
+    """Add inert process storage; do not backfill proof or touch original bytes."""
+    for table in ('distill_items', 'collection_operations'):
+        columns = {row[1] for row in connection.execute(f'PRAGMA table_info({table})')}
+        for definition in INGESTION_COLUMNS:
+            if definition.split()[0] not in columns:
+                connection.execute(f'ALTER TABLE {table} ADD COLUMN {definition}')
+        connection.execute(f"""CREATE TRIGGER IF NOT EXISTS {table}_ingestion_binding_immutable
+            BEFORE UPDATE OF ingestion_contract,source_binding_sha256,relation_binding_sha256 ON {table}
+            WHEN NEW.ingestion_contract IS NOT OLD.ingestion_contract
+              OR NEW.source_binding_sha256 IS NOT OLD.source_binding_sha256
+              OR NEW.relation_binding_sha256 IS NOT OLD.relation_binding_sha256
+            BEGIN SELECT RAISE(ABORT,'ingestion binding is immutable'); END""")
+        connection.execute(f"""CREATE TRIGGER IF NOT EXISTS {table}_ingestion_binding_required
+            BEFORE INSERT ON {table} WHEN NEW.ingestion_contract!='legacy'
+              AND (NEW.source_binding_sha256 IS NULL OR NEW.relation_binding_sha256 IS NULL)
+            BEGIN SELECT RAISE(ABORT,'ingestion binding required'); END""")
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS distill_items_ingestion_owner_immutable
+        BEFORE UPDATE OF material_id ON distill_items
+        WHEN OLD.ingestion_contract!='legacy' AND OLD.material_id IS NOT NULL
+          AND NEW.material_id IS NOT OLD.material_id
+        BEGIN SELECT RAISE(ABORT,'ingestion owner is immutable'); END""")
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS distill_items_ingestion_no_delete
+        BEFORE DELETE ON distill_items WHEN OLD.ingestion_contract!='legacy'
+        BEGIN SELECT RAISE(ABORT,'ingestion owner is durable'); END""")
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS collection_members_ingestion_contract_match
+        BEFORE INSERT ON collection_members
+        WHEN (SELECT ingestion_contract FROM collection_operations WHERE operation_id=NEW.operation_id)
+          IS NOT (SELECT ingestion_contract FROM distill_items WHERE item_id=NEW.item_id)
+        BEGIN SELECT RAISE(ABORT,'collection ingestion contract mismatch'); END""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS ingestion_events (
+        event_id INTEGER PRIMARY KEY,
+        event_key TEXT NOT NULL UNIQUE CHECK(length(event_key)=64 AND event_key NOT GLOB '*[^0-9a-f]*'),
+        contract TEXT NOT NULL CHECK(contract='raw-verified-v1'),
+        subject_kind TEXT NOT NULL CHECK(subject_kind IN ('item','material','capture')),
+        subject_id INTEGER NOT NULL CHECK(subject_id>0),
+        item_id INTEGER REFERENCES distill_items(item_id),
+        kind TEXT NOT NULL CHECK(kind IN ('source_ready','raw_pending','raw_verified','release_authorized','media_released')),
+        binding_sha256 TEXT NOT NULL CHECK(length(binding_sha256)=64 AND binding_sha256 NOT GLOB '*[^0-9a-f]*'),
+        detail_json TEXT NOT NULL CHECK(json_valid(detail_json) AND json_type(detail_json)='object'),
+        created_at TEXT NOT NULL CHECK(trim(created_at)!='')
+    )""")
+    connection.execute('CREATE INDEX IF NOT EXISTS ingestion_events_subject ON ingestion_events(subject_kind,subject_id,event_id)')
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS ingestion_events_observation_typed
+        BEFORE INSERT ON ingestion_events WHEN NEW.kind IN ('source_ready','raw_pending')
+          AND COALESCE(NOT (
+            NEW.subject_kind='item' AND NEW.subject_id=NEW.item_id
+            AND EXISTS (SELECT 1 FROM distill_items i WHERE i.item_id=NEW.item_id
+                        AND i.ingestion_contract=NEW.contract
+                        AND i.source_binding_sha256=json_extract(NEW.detail_json,'$.source_binding_sha256')
+                        AND i.relation_binding_sha256=json_extract(NEW.detail_json,'$.relation_binding_sha256'))
+            AND (SELECT count(*) FROM json_each(NEW.detail_json))=4
+            AND (SELECT count(DISTINCT key) FROM json_each(NEW.detail_json))=4
+            AND NOT EXISTS (SELECT 1 FROM json_each(NEW.detail_json)
+                            WHERE key NOT IN ('code','manifest','source_binding_sha256','relation_binding_sha256'))
+            AND json_type(NEW.detail_json,'$.manifest')='object'
+            AND (SELECT count(*) FROM json_each(NEW.detail_json,'$.manifest'))=2
+            AND (SELECT count(DISTINCT key) FROM json_each(NEW.detail_json,'$.manifest'))=2
+            AND NOT EXISTS (SELECT 1 FROM json_each(NEW.detail_json,'$.manifest')
+                            WHERE key NOT IN ('source_fact_id','snapshot_sha256'))
+            AND ((NEW.kind='source_ready' AND json_extract(NEW.detail_json,'$.code')='source_fact_ready')
+                 OR (NEW.kind='raw_pending' AND json_extract(NEW.detail_json,'$.code')
+                     IN ('context_pending','readback_pending','writer_pending')))
+            AND ((json_type(NEW.detail_json,'$.manifest.source_fact_id')='null'
+                  AND json_type(NEW.detail_json,'$.manifest.snapshot_sha256')='null'
+                  AND NEW.kind='raw_pending')
+                 OR (json_type(NEW.detail_json,'$.manifest.source_fact_id')='integer'
+                     AND json_extract(NEW.detail_json,'$.manifest.source_fact_id')>0
+                     AND json_type(NEW.detail_json,'$.manifest.snapshot_sha256')='text'
+                     AND length(json_extract(NEW.detail_json,'$.manifest.snapshot_sha256'))=64
+                     AND json_extract(NEW.detail_json,'$.manifest.snapshot_sha256') NOT GLOB '*[^0-9a-f]*'))
+          ),1)
+        BEGIN SELECT RAISE(ABORT,'ingestion observation invalid'); END""")
+    for action in ('UPDATE', 'DELETE'):
+        connection.execute(f"""CREATE TRIGGER IF NOT EXISTS ingestion_events_no_{action.lower()}
+            BEFORE {action} ON ingestion_events
+            BEGIN SELECT RAISE(ABORT,'ingestion event is immutable'); END""")
+    # A1 has no filesystem-proof producer. Neither an API nor direct SQL can
+    # manufacture a verified/release event until the reviewed A2 boundary exists.
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS ingestion_events_proof_unavailable
+        BEFORE INSERT ON ingestion_events
+        WHEN NEW.kind IN ('raw_verified','release_authorized','media_released')
+        BEGIN SELECT RAISE(ABORT,'filesystem proof unavailable'); END""")
+    from .wiki_schema import migrate_outcome_storage
+    migrate_outcome_storage(connection)
+    from .media_lifecycle import protect_ingestion
+    protect_ingestion(connection)

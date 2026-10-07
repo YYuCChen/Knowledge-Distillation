@@ -227,3 +227,48 @@ def migrate_v23(connection: sqlite3.Connection) -> None:
     for name in ("wiki_task_raw_v22", "wiki_task_batches_v22", "wiki_tasks_v22"):
         connection.execute(f"DROP TABLE {name}")
     migrate_observations(connection)
+
+
+OUTCOME_COLUMNS = (
+    "outcome_contract TEXT NOT NULL DEFAULT 'legacy' CHECK(outcome_contract IN ('legacy','r08-wiki-outcomes-v1'))",
+    "plan_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(plan_json) AND json_type(plan_json)='object')",
+    "plan_sha256 TEXT CHECK(plan_sha256 IS NULL OR (length(plan_sha256)=64 AND plan_sha256 NOT GLOB '*[^0-9a-f]*'))",
+)
+
+
+def migrate_outcome_storage(connection: sqlite3.Connection) -> None:
+    """Reserve outcome storage without changing claims, scheduling or dedup."""
+    columns = {row[1] for row in connection.execute('PRAGMA table_info(wiki_tasks)')}
+    for definition in OUTCOME_COLUMNS:
+        if definition.split()[0] not in columns:
+            connection.execute(f'ALTER TABLE wiki_tasks ADD COLUMN {definition}')
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS wiki_task_outcome_binding_immutable
+        BEFORE UPDATE OF outcome_contract,plan_json,plan_sha256 ON wiki_tasks
+        WHEN NEW.outcome_contract IS NOT OLD.outcome_contract OR NEW.plan_json IS NOT OLD.plan_json
+          OR NEW.plan_sha256 IS NOT OLD.plan_sha256
+        BEGIN SELECT RAISE(ABORT,'wiki outcome binding is immutable'); END""")
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS wiki_task_outcome_binding_required
+        BEFORE INSERT ON wiki_tasks WHEN NEW.outcome_contract!='legacy' AND NEW.plan_sha256 IS NULL
+        BEGIN SELECT RAISE(ABORT,'wiki outcome binding required'); END""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS wiki_outcome_receipts (
+        receipt_id TEXT NOT NULL CHECK(length(receipt_id)=64 AND receipt_id NOT GLOB '*[^0-9a-f]*'),
+        task_id TEXT NOT NULL,
+        batch_no INTEGER NOT NULL CHECK(batch_no>0),
+        phase TEXT NOT NULL CHECK(phase IN ('validated','accepted')),
+        contract TEXT NOT NULL CHECK(contract='r08-wiki-outcomes-v1'),
+        boundary_sha256 TEXT NOT NULL CHECK(length(boundary_sha256)=64 AND boundary_sha256 NOT GLOB '*[^0-9a-f]*'),
+        plan_sha256 TEXT NOT NULL CHECK(length(plan_sha256)=64 AND plan_sha256 NOT GLOB '*[^0-9a-f]*'),
+        payload_json TEXT NOT NULL CHECK(json_valid(payload_json) AND json_type(payload_json)='object'),
+        created_at TEXT NOT NULL CHECK(trim(created_at)!=''),
+        PRIMARY KEY(receipt_id,phase),
+        FOREIGN KEY(task_id,batch_no) REFERENCES wiki_task_batches(task_id,batch_no)
+    )""")
+    connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS wiki_outcome_one_accepted_batch
+        ON wiki_outcome_receipts(task_id,batch_no) WHERE phase='accepted'""")
+    for action in ('UPDATE', 'DELETE'):
+        connection.execute(f"""CREATE TRIGGER IF NOT EXISTS wiki_outcome_receipts_no_{action.lower()}
+            BEFORE {action} ON wiki_outcome_receipts
+            BEGIN SELECT RAISE(ABORT,'wiki outcome receipt is immutable'); END""")
+    connection.execute("""CREATE TRIGGER IF NOT EXISTS wiki_outcome_receipts_publish_unavailable
+        BEFORE INSERT ON wiki_outcome_receipts WHEN NEW.phase='accepted'
+        BEGIN SELECT RAISE(ABORT,'publish proof unavailable'); END""")

@@ -59,6 +59,42 @@ def require_raw(db):
     _release_trigger(db, RELEASABLE)
 
 
+def _legacy_owners(db):
+    # Read-only previews also support older schema without these columns.
+    columns = {row[1] for row in db.execute('PRAGMA table_info(distill_items)')}
+    if 'ingestion_contract' not in columns:
+        return '1'
+    return """NOT EXISTS (SELECT 1 FROM distill_items owner
+        WHERE owner.material_id=m.material_id AND owner.ingestion_contract!='legacy')"""
+
+
+def protect_ingestion(db):
+    """A1 never releases new-contract bytes, even with alleged proof events."""
+    for action in ('UPDATE', 'DELETE'):
+        db.execute(f"""CREATE TRIGGER IF NOT EXISTS source_media_ingestion_no_{action.lower()}
+            BEFORE {action} ON source_media
+            WHEN EXISTS (SELECT 1 FROM distill_items i WHERE i.material_id=OLD.material_id
+                         AND i.ingestion_contract!='legacy')
+            BEGIN SELECT RAISE(ABORT,'ingestion media is retained'); END""")
+    db.execute("""CREATE TRIGGER IF NOT EXISTS submitted_sources_ingestion_no_release
+        BEFORE UPDATE OF content,input_metadata ON submitted_sources
+        WHEN EXISTS (SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id
+                     AND i.ingestion_contract!='legacy')
+          AND (NEW.content IS NOT OLD.content OR NEW.input_metadata IS NOT OLD.input_metadata)
+        BEGIN SELECT RAISE(ABORT,'ingestion input is retained'); END""")
+    db.execute("""CREATE TRIGGER IF NOT EXISTS submitted_sources_ingestion_no_delete
+        BEFORE DELETE ON submitted_sources
+        WHEN EXISTS (SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id
+                     AND i.ingestion_contract!='legacy')
+        BEGIN SELECT RAISE(ABORT,'ingestion input is retained'); END""")
+    db.execute("""CREATE TRIGGER IF NOT EXISTS submitted_sources_ingestion_owner_immutable
+        BEFORE UPDATE OF item_id ON submitted_sources
+        WHEN NEW.item_id IS NOT OLD.item_id AND EXISTS (
+            SELECT 1 FROM distill_items i WHERE i.item_id IN (OLD.item_id,NEW.item_id)
+            AND i.ingestion_contract!='legacy')
+        BEGIN SELECT RAISE(ABORT,'ingestion input owner is immutable'); END""")
+
+
 def preview(path):
     """Read-only inventory works on pre-migration databases too; never initializes."""
     db = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True)
@@ -66,7 +102,7 @@ def preview(path):
     try:
         rows = db.execute(f"""SELECT m.material_id,m.source_kind,m.source_key,
             sm.member_id,sm.sha256,length(sm.content) AS bytes,
-            CASE WHEN {ELIGIBLE} THEN 'eligible' ELSE 'protected' END AS disposition,
+            CASE WHEN {ELIGIBLE} AND {_legacy_owners(db)} THEN 'eligible' ELSE 'protected' END AS disposition,
             (SELECT group_concat(item_id) FROM distill_items i WHERE i.material_id=m.material_id) AS item_ids
             FROM source_media sm JOIN materials m USING(material_id)
             WHERE length(sm.content)>0 ORDER BY m.material_id,sm.position""").fetchall()
@@ -82,7 +118,7 @@ def release_completed(path):
         rows = db.execute(f"""SELECT m.material_id,SUM(length(sm.content)) AS bytes
             FROM materials m JOIN source_media sm USING(material_id)
             WHERE m.material_id>(SELECT legacy_material_id FROM media_lifecycle WHERE singleton=1)
-            AND {RELEASABLE} AND length(sm.content)>0 GROUP BY m.material_id""").fetchall()
+            AND {RELEASABLE} AND {_legacy_owners(db)} AND length(sm.content)>0 GROUP BY m.material_id""").fetchall()
         released = sum(row['bytes'] for row in rows)
         for row in rows:
             db.execute("UPDATE source_media SET content=X'' WHERE material_id=? AND length(content)>0", (row['material_id'],))

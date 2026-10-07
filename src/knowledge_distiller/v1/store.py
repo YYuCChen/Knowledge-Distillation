@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Mapping
 from uuid import uuid4
 
-from .database import connect, initialize
+from .database import connect, initialize, INGESTION_CONTRACT
 from .confirmation_schema import sync as _sync_manual_cards
 from .domain import CapturedMaterial, Knowledge, SourceFact, knowledge_to_dict
 from .source_files import FILE_KINDS, copy_path, read_copy, retain_copy, open_copy, SourceCopyError
@@ -15,6 +17,23 @@ from .source_files import FILE_KINDS, copy_path, read_copy, retain_copy, open_co
 
 class SourceReviewConflict(ValueError):
     """A newer source/user state superseded this asynchronous judgment."""
+
+
+def _ingestion_binding(contract, source_sha256, relation_sha256):
+    if contract == 'legacy' and source_sha256 is None and relation_sha256 is None:
+        return contract, None, None
+    if (contract != INGESTION_CONTRACT or any(
+            not isinstance(value, str) or re.fullmatch('[0-9a-f]{64}', value) is None
+            for value in (source_sha256, relation_sha256))):
+        raise ValueError('ingestion_binding_invalid')
+    return contract, source_sha256, relation_sha256
+
+
+def _same_ingestion_binding(db, item_id, binding):
+    row = db.execute('''SELECT ingestion_contract,source_binding_sha256,relation_binding_sha256
+        FROM distill_items WHERE item_id=?''', (item_id,)).fetchone()
+    if row is None or tuple(row) != binding:
+        raise ValueError('ingestion_binding_conflict')
 
 
 class Store:
@@ -35,6 +54,8 @@ class Store:
                 WHERE m.source_kind IN ('douyin','youtube','xiaohongshu','x','zhihu','weibo','bilibili')
                 AND julianday(COALESCE(json_extract(m.metadata_json,'$.captured_at'),m.created_at)) < julianday(?)
                 AND NOT EXISTS (SELECT 1 FROM source_facts sf WHERE sf.material_id=m.material_id)
+                AND NOT EXISTS (SELECT 1 FROM distill_items owner WHERE owner.material_id=m.material_id
+                                AND owner.ingestion_contract!='legacy')
                 AND NOT EXISTS (SELECT 1 FROM distill_items i WHERE i.material_id=m.material_id
                                 AND (i.confirmation_json IS NOT NULL OR i.state='working'
                                      OR (i.dismissed_at IS NULL AND substr(COALESCE(i.error_code,''),-length('_input_unsupported')) != '_input_unsupported')))""",(cutoff,)).fetchall()
@@ -45,9 +66,11 @@ class Store:
     def _retain_available_files(self) -> None:
         # Upgrade only still-owned bytes, never reconstruct a file from SourceFact.
         with connect(self.path) as connection:
-            rows = connection.execute("SELECT * FROM submitted_sources WHERE input_kind IN ('markdown','pdf','epub') AND content IS NOT NULL").fetchall()
+            rows = connection.execute("""SELECT ss.*,i.ingestion_contract FROM submitted_sources ss
+                JOIN distill_items i USING(item_id)
+                WHERE input_kind IN ('markdown','pdf','epub') AND content IS NOT NULL""").fetchall()
         for row in rows:
-            if row['retain_until'] is not None and row['retain_until'] <= _now():
+            if row['ingestion_contract'] == 'legacy' and row['retain_until'] is not None and row['retain_until'] <= _now():
                 continue
             target = copy_path(self.path.parent, row['input_kind'], row['input_key'], row['input_label'])
             if not target.exists():
@@ -60,19 +83,24 @@ class Store:
             raise SourceCopyError('这条来源没有上传文件副本。')
         open_copy(self.path.parent, row['input_kind'], row['input_key'], row['input_label'])
 
-    def submit_source(self, source, *, receipt_key=None) -> int:
+    def submit_source(self, source, *, receipt_key=None, ingestion_contract='legacy',
+                      source_binding_sha256=None, relation_binding_sha256=None) -> int:
         """Persist exact intake and FIFO item together; replay never refreshes it."""
         now = _now()
+        binding = _ingestion_binding(ingestion_contract, source_binding_sha256, relation_binding_sha256)
         with connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             from .feishu_inbox import prior_item, bind_item
             prior = prior_item(connection, receipt_key)
             if prior is not None:
+                _same_ingestion_binding(connection, prior, binding)
                 return prior
             existing = connection.execute(
                 "SELECT item_id, input_label FROM submitted_sources WHERE input_kind = ? AND input_key = ?",
                 (source.source_kind, source.source_key),
             ).fetchone()
+            if existing is not None:
+                _same_ingestion_binding(connection, existing['item_id'], binding)
             if source.source_kind in FILE_KINDS:
                 label = existing['input_label'] if existing is not None else source.label
                 retain_copy(self.path.parent, source.source_kind, source.source_key, label, source.content)
@@ -81,9 +109,10 @@ class Store:
                 return int(existing["item_id"])
             cursor = connection.execute(
                 """INSERT INTO distill_items
-                   (submitted_url, state, phase, queued_at, created_at, updated_at)
-                   VALUES (?, 'queued', 'collecting', ?, ?, ?)""",
-                (source.label, now, now, now),
+                   (submitted_url, state, phase, queued_at, created_at, updated_at,
+                    ingestion_contract,source_binding_sha256,relation_binding_sha256)
+                   VALUES (?, 'queued', 'collecting', ?, ?, ?, ?, ?, ?)""",
+                (source.label, now, now, now, *binding),
             )
             item_id = int(cursor.lastrowid)
             connection.execute(
@@ -146,7 +175,9 @@ class Store:
             else:
                 fact_id = _establish_source_fact(connection, material_id, fact, lineage=parsed.lineage)
             connection.execute("UPDATE distill_items SET material_id = ? WHERE item_id = ?", (material_id, item_id))
-            connection.execute("UPDATE submitted_sources SET content = NULL, input_metadata = '{}', retain_until = NULL WHERE item_id = ?", (item_id,))
+            connection.execute("""UPDATE submitted_sources SET content = NULL, input_metadata = '{}', retain_until = NULL
+                WHERE item_id = ? AND EXISTS (SELECT 1 FROM distill_items i
+                    WHERE i.item_id=submitted_sources.item_id AND i.ingestion_contract='legacy')""", (item_id,))
             _sync_manual_cards(connection, item_id)
             return fact_id
 
@@ -154,25 +185,33 @@ class Store:
         with connect(self.path) as connection:
             connection.execute(
                 """UPDATE submitted_sources SET content = NULL, input_metadata = '{}'
-                   WHERE retain_until IS NOT NULL AND retain_until <= ?""", (_now(),)
+                   WHERE retain_until IS NOT NULL AND retain_until <= ?
+                     AND EXISTS (SELECT 1 FROM distill_items i WHERE i.item_id=submitted_sources.item_id
+                                 AND i.ingestion_contract='legacy')""", (_now(),)
             )
 
     def reject_submitted_source(self, item_id: int, code: str) -> None:
         with connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("UPDATE distill_items SET state = 'failed', error_code = ?, updated_at = ? WHERE item_id = ?", (code, _now(), item_id))
-            connection.execute("UPDATE submitted_sources SET retryable = 0, content = NULL, input_metadata = '{}', retain_until = NULL WHERE item_id = ?", (item_id,))
+            connection.execute("""UPDATE submitted_sources SET retryable=0 WHERE item_id=?""", (item_id,))
+            connection.execute("""UPDATE submitted_sources SET content=NULL,input_metadata='{}',retain_until=NULL
+                WHERE item_id=? AND EXISTS (SELECT 1 FROM distill_items i
+                    WHERE i.item_id=submitted_sources.item_id AND i.ingestion_contract='legacy')""", (item_id,))
 
-    def create_item(self, submitted_url: str, *, title: str = '', expected_authority=None, receipt_key=None) -> int:
+    def create_item(self, submitted_url: str, *, title: str = '', expected_authority=None, receipt_key=None,
+                    ingestion_contract='legacy', source_binding_sha256=None, relation_binding_sha256=None) -> int:
         submitted_url = submitted_url.strip()
         if not submitted_url:
             raise ValueError("submission is empty")
         now = _now()
+        binding = _ingestion_binding(ingestion_contract, source_binding_sha256, relation_binding_sha256)
         with connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             from .feishu_inbox import prior_item, bind_item
             prior = prior_item(connection, receipt_key)
             if prior is not None:
+                _same_ingestion_binding(connection, prior, binding)
                 return prior
             authority = {}
             from .youtube import youtube_identity, connection_authority
@@ -225,14 +264,58 @@ class Store:
             cursor = connection.execute(
                 """
                 INSERT INTO distill_items (
-                    submitted_url, state, phase, queued_at, created_at, updated_at, platform_authority_json, submitted_title
-                ) VALUES (?, 'queued', 'collecting', ?, ?, ?, ?, ?)
+                    submitted_url, state, phase, queued_at, created_at, updated_at, platform_authority_json, submitted_title,
+                    ingestion_contract,source_binding_sha256,relation_binding_sha256
+                ) VALUES (?, 'queued', 'collecting', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (submitted_url, now, now, now, _json(authority), title),
+                (submitted_url, now, now, now, _json(authority), title, *binding),
             )
             item_id = int(cursor.lastrowid)
             bind_item(connection, receipt_key, item_id)
             return item_id
+
+    def append_ingestion_event(self, item_id: int, *, kind: str, code: str) -> int:
+        """Persist only derived process observations, never a caller's proof.
+
+        A1 deliberately provides no raw_verified/release API or manifest input.
+        A2 must supply a reviewed read-only filesystem verifier before any such
+        event or bytes release can become available.
+        """
+        codes = {'source_ready': {'source_fact_ready'},
+                 'raw_pending': {'context_pending', 'readback_pending', 'writer_pending'}}
+        if (type(item_id) is not int or item_id <= 0 or not isinstance(kind, str)
+                or kind not in codes or not isinstance(code, str) or code not in codes[kind]):
+            raise ValueError('ingestion_event_invalid')
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('''SELECT i.*,sf.source_fact_id,sf.snapshot FROM distill_items i
+                LEFT JOIN source_facts sf USING(material_id) WHERE i.item_id=?''', (item_id,)).fetchone()
+            if row is None or row['ingestion_contract'] != INGESTION_CONTRACT:
+                raise ValueError('ingestion_contract_required')
+            if kind == 'source_ready' and row['source_fact_id'] is None:
+                raise ValueError('source_fact_required')
+            manifest = {'source_fact_id': row['source_fact_id'],
+                        'snapshot_sha256': hashlib.sha256(row['snapshot'].encode('utf-8')).hexdigest()
+                        if row['snapshot'] is not None else None}
+            detail = {'code': code, 'manifest': manifest,
+                      'source_binding_sha256': row['source_binding_sha256'],
+                      'relation_binding_sha256': row['relation_binding_sha256']}
+            serialized = _json(detail)
+            binding_hash = hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+            key = hashlib.sha256(_json([INGESTION_CONTRACT, item_id, kind, binding_hash]).encode('utf-8')).hexdigest()
+            db.execute('''INSERT INTO ingestion_events
+                (event_key,contract,subject_kind,subject_id,item_id,kind,binding_sha256,detail_json,created_at)
+                VALUES (?,?,'item',?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING''',
+                (key, INGESTION_CONTRACT, item_id, item_id, kind, binding_hash, serialized, _now()))
+            saved = db.execute('SELECT * FROM ingestion_events WHERE event_key=?', (key,)).fetchone()
+            if (saved['subject_id'], saved['item_id'], saved['kind'], saved['binding_sha256'], saved['detail_json']) != (
+                    item_id, item_id, kind, binding_hash, serialized):
+                raise ValueError('ingestion_event_conflict')
+            return saved['event_id']
+
+    def ingestion_events(self, item_id: int):
+        with connect(self.path) as db:
+            return tuple(db.execute('SELECT * FROM ingestion_events WHERE item_id=? ORDER BY event_id', (item_id,)))
 
     def claim_next_work(self):
         with connect(self.path) as db:

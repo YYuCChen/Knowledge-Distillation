@@ -116,3 +116,43 @@ PYTHONPATH='/Users/chen./Documents/知识蒸馏器/V3.0开发/source/src' TZ=Asi
 两次业务源码均保持：ingestion SHA256 `a83a9686ee4d69b78735746e20eaa2cbd260ea4b30ebe86f7e45572e5536c853`，wiki_outcomes `7f393d01169b942bab2ac99c3f7bcd14d6cd09dbbfe3fb42d113e2477018c7ac`。修后 test_ingestion `7be6d0a2974b4ea470c87e7ca1fd9b756f4b1a787b7831ff827f588324e31bab`，test_wiki_outcomes `e4c440334eef4fe6e52fd67a82635c07afd1817b9a7940fb0e362a5045103879`。所有材料、RawLedger、publisher、子进程与崩溃点仅独立临时合成目录；未接正式 DB/Vault/profile/凭据、网络、模型、应用或 UI。
 
 这些证据只验内部完整性、拒绝、幂等和出版回执合同，fakechecker不证明真实无知识／关系语义。精确 capture 分配、生产媒体保留门槛、同题冻结关系、wiki worker 接线与可重建正式投影仍未完成；有嵌套依赖仍保守待确认，不能把本模块提交称为主链已上线或正式发行。
+
+## 2026-10-08 A1：过程存储与保守保留候选（未运行测试）
+
+主控只授权 database/wiki_schema/Store/media_lifecycle/TemporaryArtifacts 及对应测试、本文 QA 追加。自身 session JSONL 最新启动记录为 gpt-6.1-sol/medium，未用父 session ID。没有修改 app/worker/pipeline/collections/Captures/raw/wiki 两候选/kit/模板/静态/路由/飞书，没有接真实数据或运行迁移。
+
+- schema24 在原22→23之后追加：items/collection_operations 的 ingestion_contract/source_binding_sha256/relation_binding_sha256，wiki_tasks 的 outcome_contract/plan_json/plan_sha256，append-only ingestion_events/wiki_outcome_receipts 与最少唯一/FK索引。23 显式保留为允许版本；新库/升级共用同一事务，末尾 FK 检查，旧内容、状态、ID、媒体历史水位不重写。
+- 创建与提交默认 legacy；claim/requeue/retry/state/phase 没有新合同排除分支。新增显式参数仅供后续新合同调用和本次合成夹具，不是产品 feature flag。contract/来源/关系绑定不可改写，已关联新 owner 不可脱离或删除；集合成员与 operation 合同匹配，防止借 legacy owner 绕过保留。
+- `Store.append_ingestion_event(item_id, kind, code)` 只接受 source_ready/source_fact_ready 和 raw_pending 的 context_pending/readback_pending/writer_pending；自身从 DB 读 SourceFact 生成 ID/hash manifest，无 caller manifest/正文/异常字符串/布尔成功参数。BEGIN IMMEDIATE + deterministic event_key 幂等，detail exact typed keys/固定码由 SQL trigger 再检查；事件无 update/delete。
+- A1 不提供 filesystem proof producer。API 拒绝 raw_verified/release_authorized/media_released，SQL trigger 也拒绝这些 kind；wiki accepted 同样拒绝。validated receipt 只是预留候选存储，不能从其 JSON 推出支持通过或出版成功。
+- 新合同所有 submitted bytes、source_media 和恢复工作目录保守留存：SourceFact、written_at、旧 kr、succeeded、dismissal、TTL、过程事件都不能释放。legacy-only 材料沿原策略，旧 source_media immutable trigger 原文不改、历史水位不扩大；新保护使用额外 veto trigger，并禁止 submitted owner 搬到 legacy。
+
+未来 A2 的具体 proof 边界：持实际 VaultWriteLock，从权威当前 SourceFact/latest capture decision/current raw/完整关系取快照，再使用原 writer 与只读 bytes/hash/ID/身份/格式/附件核验；事务内重读这些绑定后提交不可伪造的过程证明。RawReceipt 不是可由 caller 任意构造即信任的证书，也不能写 published=True。A1 没有实现此接口；启用生产证明/释放前，主控必须重新串行锁 database/media_lifecycle/Store，并审阅替换当前 fail-closed trigger 的真实实现和候选 schema 升级路径，不能直接删 trigger 放行。现 schema24 候选库 reinitialize 不会暗中更换门槛，旧记录不回填。
+
+新增 test_ingestion_storage.py 设计覆盖：全新默认 legacy；真实合成22/23升级全原列/字节与水位保留、22原FK路径、末尾FK失败、24完整DDL之后失败回滚/重新初始化；绑定/owner/集合不可绕过；新来源在Fact/TTL/reject、共享owner各状态、written raw情况下保媒体/目录；typed事件拒绝正文、proof kind与直接SQL伪成功；事务中断和两进程幂等；预留receipt append-only/FK与accept拒绝。现 test_wiki_schema.py 的版本期待更新到24，旧schema21/22全部原字段仍比较，仅精确新增列/对象投影掉；未来版本拒绝改为25，旧失败证据不删。
+
+本 worker 仅 AST 解析七个 Python 文件和 git diff --check，未 import 业务/执行SQL/pytest/模型/网络/真实DB/Vault/部署。运行时SQL、触发器、迁移和文件保留效果尚未实测；Luna须经主控读实际diff后在CPython3.11.16/freshroot/env -i执行限定七测试文件：test_ingestion_storage、test_wiki_schema、test_store、test_media_lifecycle、test_temporary_artifacts、test_confirmation_schema，以及原test_ingestion（新字段兼容）。不能把原78 distinct候选通过作为A1通过。
+
+精确变更、SHA、未验项和待执行命令归入 `/tmp/kd-v3-r01-a1-handoff-20261008.md`。A1完成后冻结，不继续A2/A3/B，不提交或安装正式产品。
+
+### A1 初始绑定与未发行 schema24 策略澄清
+
+`create_item/submit_source` 的 `source_binding_sha256` 绑定的是**创建时可获得的不可变投递命名空间/输入快照**（例如入口、消息/提交身份、输入版本与确切输入摘要），不是尚不存在的 material/最终 SourceFact。`relation_binding_sha256` 绑定的是**同次投递的冻结关系计划**（有序对象选择器/消息引用、范围及明确的待解析状态），不是尚未分配的最终 raw ID 或完成证明。未知关系可以在计划中明确 pending；不得把它假称已完成，也不得后来改写初始 hash 迁就解析结果。
+
+实际 A1 `_ingestion_binding` 只检查合同与两个 hash 的格式，创建时不读取或要求最终 Fact；`source_ready` 才单独要求已有 Fact，`raw_pending` 在无 Fact 时允许 manifest 两项为 null。因此当前代码没有“先有最终 Fact 才能创建”的要求。A1 也尚未计算/验证投递 manifest 的规范序列化或真实性，合成夹具的 a/b hash 只是占位；产品不能据此声称已有输入绑定证明。A2 的最终 SourceFact ID/hash、capture 最新完整 decision/revision、当前原件/附件与解析后完整关系 manifest，必须由独立 verified 证据绑定到这个初始投递对象；初始两 hash 与 source_ready 观察不能代替它。初始计划不能支持合法解析时保持 pending/交主控裁决，不自行改合同。
+
+本次 schema24 **只是未发行候选**。主控可在后续 A2 串行授权并审阅后扩充同一候选迁移，不要求为了候选阶段的继续开发立即升25。扩充后的全新合成根或22/23→候选24路径应完整验收；已经初始化的旧候选24合成库，须明确重建可丢弃夹具或另审显式候选升级办法，不能靠 `reinitialize(24)` 静默移除 proof/保留 guard。正式发行后再按已发布版本兼容合同制定升级，不把候选策略用于真实库。A2继续暂停，等待主控实际diff/tests审阅与后续授权；本澄清仅修改文档。
+
+### A1 首测失败与水位夹具修复（未复验）
+
+主控已读取 Luna 首测实际栈：123 collected、121 passed、2 failed。两个失败为 `test_upgrade_preserves_every_original_column_and_immutable_byte[22]` / `[23]`，在原新测试第83行读取 `media_lifecycle` 水位时没有 singleton row。`_create_schema22` 是空 schema fixture；原 `_prior` 只 UPDATE 空表，不会造出 singleton。生产 `media_lifecycle.migrate` 则明确 INSERT singleton，因此这是合成前置状态遗漏，不是授权删除生产保留门槛或修改业务迁移的理由。原首测失败、栈和运行证据保留；本 worker 没有读取或改写其 JUnit/原栈文件，不虚构运行路径或摘要。
+
+本次仅将 `_prior` 的 UPDATE 改为显式 INSERT `(singleton,legacy_material_id,released_bytes,compacted_bytes)=(1,40,128,64)`；两个非零计数表示合成的已有生命周期状态，既有“所有原列逐值保留”断言一起检验它们。原水位40断言、全部immutable/业务trigger、旧schema fixture、五业务文件和test_wiki_schema均不改。只做AST/实际diff与SHA读回，不运行pytest/SQL/模型/网络/真实数据或A2；修复尚未验证通过。
+
+修复交接为 `/tmp/kd-v3-r01-a1-fixture-fix-20261008.md`。主控审此具体diff后，仅授权Luna在freshroot定向运行上述测试的22/23两个参数；不重跑七文件，不将定向复验包装为一次新的123全测，也不删除原121/2失败记录。
+
+### A1 主控定向复验验收
+
+首测根 `/tmp/kd-v3-r01-a1-tests-20261008.k6xU15`、JUnit SHA `9829dc2946898410c068df42b6a589a946f5b024d90b32bc4813ad5bf34b328e`，123项中121通过2夹具失败。只修水位夹具后，Luna/max 在新0700根 `/tmp/kd-v3-r01-a1-fixture-tests-20261008.9M3hUa`、env-i、CPython3.11.16测试工具及SQLite3.53.1下唯一一次定向复验22/23两个节点，2 passed、无失败/错误/跳过，pytest/外层均退出0。JUnit SHA `ccd9bf0438c2276b30abf96a7363e000b2b21a0011ac473577a874176872f417`；主控独立解析两份实际JUnit并核五业务/既有wiki_schema测试前后SHA不变，修后新测试SHA `3e113797e32e7135d373c64368b4164a16519ed95595e7d6eb90bd2bf265ebd9`。
+
+全部123个不同节点已覆盖通过，不冒称修后重跑七文件全套。主控已审实际五业务diff、全部新测试和既有测试diff：schema22/23迁移事务、旧列/字节/ID/水位、默认legacy、不可变绑定、保守保留、typed观察及并发幂等在限定合成范围内成立。A1仍无filesystem proof producer、产品接线、真实资料迁移或Vault写入；本验收不把typed事件或预留receipt当原件/出版成功，也不证明正式应用升级。
