@@ -3,18 +3,6 @@ let polling = false;
 let actionGeneration = 0;
 const drafts = new Map();
 let lastServerHTML = document.querySelector('#home-results')?.innerHTML;
-// The organization event this tab saw when it loaded. A failure recorded before
-// then is history, not feedback for this page (BUG-20260916-02); a refresh or a
-// new tab starts from a new baseline, and each tab keeps its own.
-const organizationBaseline = (node => node && {
-  event: node.dataset.organizationEvent || '',
-  failed: node.dataset.organizationFailed === 'true',
-})(document.querySelector('.organization-feedback'));
-
-function observedOrganizationFailure(node) {
-  return node.dataset.organizationFailed === 'true' && !(organizationBaseline?.failed &&
-    node.dataset.organizationEvent === organizationBaseline.event);
-}
 
 document.addEventListener('change', event => {
   if (!event.target.matches('[data-source-file]')) return;
@@ -135,14 +123,6 @@ function applyPage(html, submittedForm, submittedCard) {
   const current = document.querySelector('#home-results');
   const next = page.querySelector('#home-results');
   if (!current || !next) throw new Error('没有收到完整页面，请稍后再试。');
-  const feedback = document.querySelector('.organization-feedback');
-  const nextFeedback = page.querySelector('.organization-feedback');
-  if (feedback && nextFeedback) {
-    feedback.textContent = nextFeedback.textContent;
-    feedback.dataset.organizationEvent = nextFeedback.dataset.organizationEvent || '';
-    feedback.dataset.organizationFailed = nextFeedback.dataset.organizationFailed || 'false';
-    feedback.hidden = nextFeedback.hidden && !observedOrganizationFailure(nextFeedback);
-  }
   const status = page.querySelector('.topbar-status');
   if (status) reconcile(document.querySelector('.topbar-status'), status);
   if (next.innerHTML === lastServerHTML && !submittedForm) return;

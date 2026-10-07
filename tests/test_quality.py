@@ -15,6 +15,33 @@ def test_registry_has_real_runners_and_visible_native_gaps():
     assert q.scenario_gaps(native)==['missing runner: '+native['id']]
 
 
+def test_v3_wiki_registry_maps_owned_inputs_to_synthetic_evidence_only():
+    requirements,scenarios,impact,_=q.registry()
+    wiki=impact['components']['wiki']
+    scenario=next(s for s in scenarios if s['id']=='SC-WIKI-WORKFLOW--synthetic')
+    assert requirements['requirements']['V3-UNIFIED-WIKI']['status']=='regression'
+    assert wiki['depends_on']==['storage'] and not wiki['artifact']
+    assert impact['components']['main']['depends_on'].count('wiki')==1
+    assert {'src/knowledge_distiller/v1/wiki_worker.py','tests/v1/test_wiki_worker.py',
+        'vault-kit/kit-manifest.json','vault-kit/tools/kb.py'} <= set(wiki['paths'])
+    assert scenario['level']=='synthetic' and scenario['platform']=='host'
+    assert scenario['runner']['adapter']=='pytest' and not q.scenario_gaps(scenario)
+    assert 'real Codex model, account, and network behavior' in scenario['not_proven']
+
+
+def test_group_module_excludes_real_browser_and_contract_keeps_gap_visible():
+    _,scenarios,_,_=q.registry()
+    node='tests/v1/test_pipeline.py::test_browser_confirmation_keeps_other_drafts_and_does_not_reload'
+    synthetic=next(s for s in scenarios if s['id']=='SC-GROUP-ATOMIC--synthetic')
+    browser=next(s for s in scenarios if s['id']=='SC-GROUP-ATOMIC--browser-contract')
+    assert synthetic['runner']['deselect']==[node]
+    assert 'the excluded real-browser group mutation, draft retention, and no-reload flow' in synthetic['not_proven']
+    assert browser['gate']=='contract' and browser['level']=='integration'
+    assert browser['runner'] is None
+    assert q.scenario_gaps(browser)==['missing runner: SC-GROUP-ATOMIC--browser-contract']
+    assert 'SC-MANUAL-RECONCILER--browser explicitly does not prove an actual mutation' in browser['not_proven']
+
+
 def test_unmapped_and_severe_defects_block():
     with pytest.raises(q.Blocked,match='unmapped'):
         q.check_promotion({'unmapped_paths':['unknown.py']},'module')
@@ -324,6 +351,34 @@ def test_candidate_adapter_checks_actual_identity_and_required_files(tmp_path,mo
     assert q.validate_result(scenario,tmp_path,0,plan)==('failed','candidate_identity_mismatch')
     report['platform']='mac';q.atomic(tmp_path/'verification/result.json',report)
     with pytest.raises(OSError):q.validate_result(scenario,tmp_path,0,plan)
+
+
+def test_candidate_adapter_requires_exact_mac_wiki_evidence_and_keeps_windows_scope(tmp_path,monkeypatch):
+    monkeypatch.setattr(q,"candidate_source",lambda *args:"current")
+    version=q.read(q.ROOT/'src/knowledge_distiller/v1/adapters/python-runtime.json')['version']
+    plan={'source_root':str(q.ROOT),'head_commit':'current','release_input':{'version':'candidate'}}
+    verification=tmp_path/'verification';verification.mkdir()
+    runtime={'ok':True,'frozen':True,'python_inventory':['python'],'python':{'version':version}}
+    helper={'frozen':True,'python':{'version':version}}
+    q.atomic(verification/'runtime.json',runtime);q.atomic(verification/'helper-runtime.json',helper)
+    for name in ('runtime.log','launch.log','support.md'):(verification/name).write_text('synthetic evidence')
+    base={'ok':True,'source_commit':'current','version':'candidate','disposable_data':True,
+        'runtime':runtime,'update_helper_runtime':helper,'launches':2,'pages':4,'fixed_port':57740}
+    windows=dict(base,platform='windows');q.atomic(verification/'result.json',windows)
+    assert q.validate_result({'runner':{'adapter':'verify_candidate'},'platform':'windows-x64'},tmp_path,0,plan)==('passed',None)
+    mac=dict(base,platform='mac',wiki_workflow_entry=True,wiki_helpers={
+        'synthetic_vault':True,
+        'protocol_scan':{'protocol_version':2,'structure_valid':True},
+        'display_plan':{'state':'planned','page_count':1,'structure_valid':True},
+        'app_database_started':False,
+    })
+    q.atomic(verification/'result.json',mac)
+    scenario={'runner':{'adapter':'verify_candidate'},'platform':'macos-arm64'}
+    assert q.validate_result(scenario,tmp_path,0,plan)==('passed',None)
+    mac['wiki_helpers']['display_plan']['page_count']=0;q.atomic(verification/'result.json',mac)
+    assert q.validate_result(scenario,tmp_path,0,plan)==('failed','candidate_wiki_workflow_mismatch')
+    windows['wiki_helpers']={};q.atomic(verification/'result.json',windows)
+    assert q.validate_result({'runner':{'adapter':'verify_candidate'},'platform':'windows-x64'},tmp_path,0,plan)==('failed','candidate_wiki_workflow_mismatch')
 
 
 def test_browser_cannot_be_promoted_to_native_by_registry(repository):

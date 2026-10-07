@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import quote, urlsplit
 
-from flask import Flask, abort, redirect, render_template, request, send_file, url_for
+from flask import Flask, abort, g, redirect, render_template, request, send_file, url_for
 from .file_sources import prepare_direct_text, prepare_file
 
 from .confirmation_display import english_assistance, local_choices
@@ -23,6 +23,130 @@ from .store import Store
 
 
 from .intake import URL_RE, LABELS, links_in, platform_for_url, needs_content_choice
+
+
+_PHASE4_MESSAGES = {
+    "wiki_kit_installed": "知识库工具已安装。",
+    "wiki_kit_repaired": "知识库工具已修复。",
+    "wiki_kit_recovered": "知识库工具安装恢复已完成，请重新核对状态。",
+    "wiki_style_installed": "知识库页面样式已安装，尚未启用。",
+    "wiki_style_updated": "知识库页面样式已更新，当前启用状态保持不变。",
+    "wiki_style_enabled": "知识库页面样式设置已保存。重新打开这个 Obsidian 库后生效。",
+    "wiki_style_disabled": "知识库页面样式的关闭设置已保存。重新打开这个 Obsidian 库后生效；正文和链接保持不变。",
+    "wiki_style_recovered": "知识库页面样式恢复已完成，请重新核对状态。",
+    "wiki_settings_vault_required": "请先选择可用的 Obsidian 库位置。",
+    "wiki_settings_action_invalid": "这个知识库设置动作不可用，请刷新后重试。",
+    "wiki_settings_update_reserved": "应用正在准备更新，暂时不能更改知识库设置。",
+    "wiki_settings_operation_busy": "任务或组件操作正在进行，暂时不能更改知识库设置。",
+    "wiki_settings_vault_busy": "知识库正在被其他整理会话使用，请完成后重试。",
+    "wiki_kit_conflict": "检测到工具文件修改，现有内容已保留。",
+    "wiki_style_conflict": "检测到现有样式或设置修改，现有内容已保留。",
+    "wiki_kit_action_failed": "知识库工具操作未完成，现有内容已保留。",
+    "wiki_style_action_failed": "知识库页面样式操作未完成，现有内容已保留。",
+}
+_PHASE4_SUCCESS_MESSAGES = {
+    "wiki_kit_installed", "wiki_kit_repaired", "wiki_kit_recovered",
+    "wiki_style_installed", "wiki_style_updated", "wiki_style_enabled",
+    "wiki_style_disabled", "wiki_style_recovered",
+}
+
+
+def _phase4_status_record(status) -> dict:
+    """Copy the small public status contract without exposing service internals."""
+    from dataclasses import asdict, is_dataclass
+
+    if is_dataclass(status):
+        return asdict(status)
+    if isinstance(status, dict):
+        return dict(status)
+    return {
+        name: getattr(status, name, None)
+        for name in ("state", "kit_version", "action", "error_code")
+    }
+
+
+def _wiki_kit_settings_view(status=None, *, vault_configured: bool = True) -> dict:
+    if not vault_configured:
+        return {
+            "state": "unavailable",
+            "dot": "unconfigured",
+            "text": "请先选择 Obsidian 库",
+            "action": None,
+            "action_label": None,
+            "stopped_label": "等待库位置",
+        }
+    record = _phase4_status_record(status) if status is not None else {}
+    state = record.get("state")
+    if state == "missing":
+        return {"state": state, "dot": "unconfigured", "text": "尚未安装",
+                "action": "install", "action_label": "安装工具", "stopped_label": None}
+    if state == "update_available":
+        return {"state": state, "dot": "problem", "text": "需要修复",
+                "action": "repair", "action_label": "修复工具", "stopped_label": None}
+    if state == "ready":
+        version = record.get("kit_version")
+        text = f"已安装 · 版本 {version}" if isinstance(version, str) and version else "已安装"
+        return {"state": state, "dot": "configured", "text": text,
+                "action": None, "action_label": None, "stopped_label": "无需操作"}
+    if state == "recovery_required":
+        return {"state": state, "dot": "problem", "text": "安装未完成，需要恢复",
+                "action": "recover", "action_label": "恢复工具", "stopped_label": None}
+    if state == "conflict":
+        return {"state": state, "dot": "problem", "text": "检测到修改，未覆盖",
+                "action": None, "action_label": None, "stopped_label": "已停止"}
+    return {"state": "unavailable", "dot": "problem", "text": "暂时无法读取状态",
+            "action": None, "action_label": None, "stopped_label": "已停止"}
+
+
+def _wiki_style_settings_view(status=None, *, vault_configured: bool = True) -> dict:
+    if not vault_configured:
+        return {
+            "state": "unavailable",
+            "dot": "unconfigured",
+            "text": "请先选择 Obsidian 库",
+            "action": None,
+            "action_label": None,
+            "stopped_label": "等待库位置",
+        }
+    record = _phase4_status_record(status) if status is not None else {}
+    state = record.get("state")
+    rows = {
+        "missing": ("unconfigured", "尚未安装", "install", "安装样式", None),
+        "installed": ("unconfigured", "已安装，未启用", "enable", "启用样式", None),
+        "enabled": ("configured", "已启用", "disable", "关闭此样式", None),
+        "update_available": ("problem", "有新版样式", "update", "更新样式", None),
+        "conflict": ("problem", "检测到现有样式，未覆盖", None, None, "已停止"),
+        "recovery_required": ("problem", "安装未完成，需要恢复", "recover", "恢复样式", None),
+        "asset_unavailable": ("unconfigured", "请先安装知识库工具", None, None, "等待工具"),
+    }
+    if state not in rows:
+        return {"state": "unavailable", "dot": "problem", "text": "暂时无法读取状态",
+                "action": None, "action_label": None, "stopped_label": "已停止"}
+    dot, text, action, action_label, stopped_label = rows[state]
+    return {"state": state, "dot": dot, "text": text, "action": action,
+            "action_label": action_label, "stopped_label": stopped_label}
+
+
+def _phase4_error_message(kind: str, error: Exception) -> str:
+    code = getattr(error, "code", None)
+    if code == "update_reserved":
+        return "wiki_settings_update_reserved"
+    if code == "operation_busy":
+        return "wiki_settings_operation_busy"
+    if code == "vault_busy":
+        return "wiki_settings_vault_busy"
+    conflicts = {
+        "install_conflict", "install_symlink", "install_target_invalid",
+        "kit_unmanaged_target", "kit_drift", "kit_receipt_invalid",
+        "kit_symlink",
+        "recovery_conflict", "style_unmanaged_target", "style_drift",
+        "style_receipt_invalid", "appearance_invalid",
+    }
+    if code in conflicts:
+        return f"{kind}_conflict"
+    return f"{kind}_action_failed"
+
+
 ERROR_TEXT = {
     "bilibili_scope_changed": "B 站范围或分段内容已变化，请重新核对范围。已有结果保留。",
     "bilibili_range_too_large": "这个 B 站范围超过本次可完整核对的 200 条上限，请选择更小范围或分段链接。未提交部分范围。",
@@ -207,17 +331,177 @@ ERROR_TEXT = {
 }
 
 
+_WIKI_RESULT_PATHS = frozenset({"wiki/index.md", "wiki/待确认.md"})
+_WIKI_ACTIONS = frozenset({
+    "submit", "retry", "settings", "open_index", "open_pending", "refresh",
+})
+
+
+def _wiki_count(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _wiki_status_view(snapshot: object, vault_path: str | None) -> dict[str, object]:
+    """Turn the durable workflow snapshot into the approved seven UI states.
+
+    Missing or malformed evidence stays unknown.  This layer never infers a
+    percentage, queue position, task result or Vault URL.
+    """
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    state = snapshot.get("state") if isinstance(snapshot.get("state"), str) else "unknown"
+    error_code = snapshot.get("error_code") if isinstance(snapshot.get("error_code"), str) else None
+    task_id = snapshot.get("task_id")
+    if not isinstance(task_id, str) or re.fullmatch(r"[0-9a-f]{32}", task_id) is None:
+        task_id = None
+    raw_count = _wiki_count(snapshot.get("raw_count"))
+    batch_count = _wiki_count(snapshot.get("batch_count"))
+    completed = _wiki_count(snapshot.get("completed_batch_count"))
+    candidate_count = _wiki_count(snapshot.get("candidate_count"))
+    actions = {
+        action for action in snapshot.get("actions", ())
+        if isinstance(action, str) and action in _WIKI_ACTIONS
+    } if isinstance(snapshot.get("actions", ()), (list, tuple, set, frozenset)) else set()
+    result_paths = {
+        value for value in snapshot.get("result_relpaths", ())
+        if isinstance(value, str) and value in _WIKI_RESULT_PATHS
+    } if isinstance(snapshot.get("result_relpaths", ()), (list, tuple, set, frozenset)) else set()
+
+    view: dict[str, object] = {
+        "state": state,
+        "visible": state != "idle",
+        "running": state in {"preparing", "running", "validating", "publishing"},
+        "queued": state == "queued",
+        "tone": None,
+        "title": "整理状态暂不可用",
+        "detail": "正在重新读取知识库状态",
+        "action": None,
+        "button_label": None,
+        "task_id": task_id,
+        "index_url": None,
+        "pending_url": None,
+        "show_index": False,
+        "show_pending": False,
+    }
+
+    if error_code == "vault_busy":
+        view.update(
+            state="conflict", tone="attention",
+            title="知识库正在由另一个整理任务维护",
+            detail="当前任务结束后可以再次开始；本次没有创建重复任务",
+            button_label="暂时不可开始",
+        )
+    elif "settings" in actions:
+        settings_detail = {
+            "config_required": "请先在设置中连接 Codex；连接后回到这里开始",
+            "runner_unavailable": "请先在设置中检查 Codex；可用后回到这里开始",
+            "model_unavailable": "请先在设置中选择可用的 Codex 模型；完成后回到这里开始",
+            "kit_missing": "知识库工具尚未安装；请先在设置中检查知识库",
+            "kit_drift": "知识库工具需要修复；请先在设置中检查知识库",
+            "kit_incompatible": "知识库工具需要更新；请先在设置中检查知识库",
+        }.get(error_code, "请先在设置中检查知识整理配置；完成后回到这里开始")
+        view.update(
+            state="settings", tone="attention", title="还不能开始整理",
+            detail=settings_detail,
+            action="settings", button_label="打开设置",
+        )
+    elif state == "ready":
+        title = f"{raw_count} 份素材待整理" if raw_count is not None else "素材待整理"
+        view.update(
+            title=title, detail="会整理本次开始前已经收到的全部素材",
+            action="submit" if "submit" in actions else None,
+            button_label="开始整理" if "submit" in actions else None,
+        )
+    elif state == "queued":
+        detail = f"本次 {raw_count} 份素材 · 等待开始" if raw_count is not None else "等待开始"
+        view.update(tone="attention", title="知识整理已排队", detail=detail,
+                    button_label="已在等待")
+    elif state in {"preparing", "running", "validating", "publishing"}:
+        title = "正在整理"
+        if completed is not None and batch_count is not None:
+            title += f" · 已完成 {completed} / {batch_count} 批"
+        detail = f"本次 {raw_count} 份素材；完成后可以继续在 Obsidian 阅读" if raw_count is not None else "完成后可以继续在 Obsidian 阅读"
+        view.update(title=title, detail=detail, button_label="正在整理")
+    elif state == "succeeded":
+        title = f"知识整理完成 · {batch_count} 批" if batch_count is not None else "知识整理完成"
+        detail = "已保存到知识库"
+        if candidate_count is not None and candidate_count > 0:
+            detail += f"；还有 {candidate_count} 条待确认"
+        view.update(state="succeeded", tone="complete", title=title, detail=detail)
+        view["show_index"] = "open_index" in actions and "wiki/index.md" in result_paths
+        view["show_pending"] = (candidate_count is not None and candidate_count > 0
+                                and "open_pending" in actions
+                                and "wiki/待确认.md" in result_paths)
+    elif state == "failed":
+        title = "本次知识整理未完成"
+        if (completed is not None and batch_count is not None
+                and completed < batch_count):
+            title = f"本次整理停在第 {completed + 1} 批"
+        can_retry = "retry" in actions and task_id is not None
+        if can_retry:
+            detail = "已完成批次并保留；可以从未完成批次继续"
+            if completed is not None:
+                detail = f"已完成 {completed} 批并保留；可以从未完成批次继续"
+        elif error_code == "publish_conflict":
+            title = "知识库内容已经变化"
+            detail = "为保护新的修改，本次没有覆盖；请刷新后查看当前状态"
+        elif error_code == "recovery_failed" or snapshot.get("recovery_state") in {"required", "failed"}:
+            title = "本次整理需要恢复"
+            detail = "已有结果保持不变；暂时不能继续，请刷新后查看当前状态"
+        else:
+            detail = "已完成批次保持不变；暂时不能继续，请刷新后查看当前状态"
+        view.update(tone="error", title=title, detail=detail,
+                    action="retry" if can_retry else None,
+                    button_label="继续整理" if can_retry else None)
+    elif state == "idle":
+        view["visible"] = False
+
+    if view["show_index"]:
+        view["index_url"] = _obsidian_url(vault_path, "wiki/index.md")
+    if view["show_pending"]:
+        view["pending_url"] = _obsidian_url(vault_path, "wiki/待确认.md")
+    return view
+
+
 def create_app(
     store: Store,
     distiller: Distiller | Callable[[], Distiller],
     settings_service: SettingsService | None = None,
     *,
     wake_worker: Callable[[], None] | None = None,
-    organization=None,
     collection_service=None,
+    wiki_workflow=None,
+    admission_gate=None,
+    wiki_kit_installer=None,
+    wiki_style_service=None,
 ) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     store.initialize()
+
+    @app.before_request
+    def enter_admission_gate():
+        if (admission_gate is None or request.method != "POST"
+                or request.endpoint == "insights.mutate"):
+            return None
+        try:
+            g.admission_lease = admission_gate.enter()
+        except Exception as error:
+            # Import lazily so source-level Web tests can still compose without
+            # the desktop lifecycle. Only the fixed lifecycle code crosses the
+            # boundary; arbitrary exceptions remain visible to the test/server.
+            from .worker_lifecycle import AdmissionError
+            if isinstance(error, AdmissionError) and str(error) == "update_reserved":
+                return ('应用正在准备更新，暂时不能开始新的操作。', 503,
+                        {'Content-Type': 'text/plain; charset=utf-8'})
+            raise
+        return None
+
+    @app.teardown_request
+    def leave_admission_gate(_error):
+        lease = getattr(g, "admission_lease", None)
+        if lease is not None:
+            lease.close()
+
     from werkzeug.exceptions import HTTPException
     @app.errorhandler(HTTPException)
     def http_error(error):
@@ -229,6 +513,103 @@ def create_app(
     # Starting the app must not mutate Keychain items. Label updates belong to
     # explicit configuration saves; a new app signature may require permission.
     app.register_blueprint(settings_blueprint(settings_service))
+    if wiki_kit_installer is not None:
+        app.extensions["wiki_kit_installer"] = wiki_kit_installer
+    if wiki_style_service is not None:
+        app.extensions["wiki_style_service"] = wiki_style_service
+
+    @app.context_processor
+    def phase4_settings_context():
+        if request.endpoint != "settings.page":
+            return {}
+        vault = store.setting("vault_path")
+        configured = isinstance(vault, str) and bool(vault.strip())
+        kit_status = style_status = None
+        if configured and wiki_kit_installer is not None:
+            try:
+                kit_status = wiki_kit_installer.status(vault)
+            except Exception:
+                kit_status = None
+        if configured and wiki_style_service is not None:
+            try:
+                style_status = wiki_style_service.status(vault)
+            except Exception:
+                style_status = None
+        message_key = request.args.get("message", "")
+        return {
+            "wiki_kit_status": _wiki_kit_settings_view(
+                kit_status,
+                vault_configured=configured,
+            ),
+            "wiki_style_status": _wiki_style_settings_view(
+                style_status,
+                vault_configured=configured,
+            ),
+            "phase4_message": _PHASE4_MESSAGES.get(message_key),
+            "phase4_message_error": (
+                message_key not in _PHASE4_SUCCESS_MESSAGES
+                if message_key in _PHASE4_MESSAGES else None
+            ),
+        }
+
+    def phase4_back(message: str):
+        return redirect(url_for("settings.page", open="paths", message=message))
+
+    def phase4_vault():
+        vault = store.setting("vault_path")
+        return vault if isinstance(vault, str) and vault.strip() else None
+
+    @app.post("/settings/wiki-kit")
+    def mutate_wiki_kit():
+        action = request.form.get("action", "")
+        methods = {
+            "install": getattr(wiki_kit_installer, "install", None),
+            "repair": getattr(wiki_kit_installer, "install", None),
+            "recover": getattr(wiki_kit_installer, "recover", None),
+        }
+        operation = methods.get(action)
+        if operation is None:
+            return phase4_back("wiki_settings_action_invalid")
+        vault = phase4_vault()
+        if vault is None:
+            return phase4_back("wiki_settings_vault_required")
+        try:
+            operation(vault)
+        except Exception as error:
+            return phase4_back(_phase4_error_message("wiki_kit", error))
+        return phase4_back({
+            "install": "wiki_kit_installed",
+            "repair": "wiki_kit_repaired",
+            "recover": "wiki_kit_recovered",
+        }[action])
+
+    @app.post("/settings/wiki-style")
+    def mutate_wiki_style():
+        action = request.form.get("action", "")
+        methods = {
+            "install": getattr(wiki_style_service, "install", None),
+            "update": getattr(wiki_style_service, "install", None),
+            "enable": getattr(wiki_style_service, "enable", None),
+            "disable": getattr(wiki_style_service, "disable", None),
+            "recover": getattr(wiki_style_service, "recover", None),
+        }
+        operation = methods.get(action)
+        if operation is None:
+            return phase4_back("wiki_settings_action_invalid")
+        vault = phase4_vault()
+        if vault is None:
+            return phase4_back("wiki_settings_vault_required")
+        try:
+            operation(vault)
+        except Exception as error:
+            return phase4_back(_phase4_error_message("wiki_style", error))
+        return phase4_back({
+            "install": "wiki_style_installed",
+            "update": "wiki_style_updated",
+            "enable": "wiki_style_enabled",
+            "disable": "wiki_style_disabled",
+            "recover": "wiki_style_recovered",
+        }[action])
     from .collections import Collections, CollectionDiscovery
     from .douyin_collections import DouyinCollections, CollectionError
     from .collection_web import collection_blueprint, MESSAGES
@@ -245,25 +626,42 @@ def create_app(
     app.register_blueprint(topic_blueprint(store, _obsidian_url))
 
     @app.context_processor
-    def organization_context():
-        from .organization import organization_status
-        try:
-            return {'organization_status': organization_status(store)}
-        except (ValueError, sqlite3.Error):
-            return {'organization_status': {'pending': 0, 'error': '暂时无法读取待整理知识。'}}
+    def wiki_context():
+        cached = getattr(g, "wiki_status", None)
+        if cached is None:
+            try:
+                snapshot = wiki_workflow.snapshot() if wiki_workflow is not None else {"state": "idle"}
+                cached = _wiki_status_view(snapshot, store.setting("vault_path"))
+            except (OSError, sqlite3.Error, ValueError, RuntimeError):
+                cached = _wiki_status_view({"state": "unknown"}, None)
+            g.wiki_status = cached
+        return {"wiki_status": cached}
 
     @app.post('/organization')
     def organize():
-        from knowledge_distiller.organization_service import OrganizationStartKind
-        if organization is None:
+        if wiki_workflow is None:
             return '整理服务尚未启动，请从日常启动入口打开程序。', 503, {'Content-Type': 'text/plain; charset=utf-8'}
-        engine = organization() if callable(organization) else organization
-        result = engine.start_or_reuse()
-        if result.kind is OrganizationStartKind.READ_FAILED:
-            return '暂时无法读取待整理知识，本次没有开始。', 503, {'Content-Type': 'text/plain; charset=utf-8'}
-        if wake_worker is not None:
-            wake_worker()
-        return redirect(url_for('home'))
+        try:
+            result = wiki_workflow.submit_all()
+        except (OSError, sqlite3.Error, ValueError, RuntimeError):
+            return ('暂时无法确认整理状态，请刷新后查看；已有记录保持不变。', 503,
+                    {'Content-Type': 'text/plain; charset=utf-8'})
+        g.wiki_status = _wiki_status_view(result, store.setting("vault_path"))
+        return render_template("home.html", **_home_context(store, None))
+
+    @app.post('/organization/<task_id>/retry')
+    def retry_organization(task_id: str):
+        if wiki_workflow is None:
+            return '整理服务尚未启动，请从日常启动入口打开程序。', 503, {'Content-Type': 'text/plain; charset=utf-8'}
+        if re.fullmatch(r"[0-9a-f]{32}", task_id) is None:
+            abort(404)
+        try:
+            result = wiki_workflow.retry(task_id)
+        except (OSError, sqlite3.Error, ValueError, RuntimeError):
+            return ('暂时无法确认整理状态，请刷新后查看；已有记录保持不变。', 503,
+                    {'Content-Type': 'text/plain; charset=utf-8'})
+        g.wiki_status = _wiki_status_view(result, store.setting("vault_path"))
+        return render_template("home.html", **_home_context(store, None))
 
     def service() -> Distiller:
         return distiller() if callable(distiller) else distiller
@@ -271,6 +669,11 @@ def create_app(
     @app.get("/")
     def home():
         store.expire_submitted_sources()
+        if wiki_workflow is not None:
+            try:
+                wiki_workflow.request_refresh(force=False)
+            except (OSError, sqlite3.Error, ValueError, RuntimeError):
+                pass
         selected = request.args.get("item", type=int)
         return render_template("home.html", **_home_context(store, selected))
 

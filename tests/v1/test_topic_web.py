@@ -12,8 +12,10 @@ def test_topic_pages_search_and_settings_return_are_pure_reads(tmp_path):
     index = client.get('/topics')
     assert index.status_code == 200
     assert '1 个主题、2 篇知识' in index.text
+    assert '历史内容只读保留' in index.text
     detail = client.get('/topics/1')
     assert detail.status_code == 200
+    assert '历史内容只读保留' in detail.text
     assert detail.text.count('data-point=') == 2
     assert '证据指向提交正文。' in detail.text
     assert '阅读原文' in detail.text

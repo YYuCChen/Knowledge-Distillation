@@ -164,6 +164,9 @@ def test_v7_upgrade_preserves_queue_and_connections(tmp_path):
     store.save_connection('douyin','显示名')
     before=dict(store.connection('douyin'))
     with connect(path) as db:
+        # V7 predates the schema-22/23 wiki workflow domain entirely.
+        for table in ('wiki_observations','wiki_task_raw','wiki_task_batches','wiki_tasks'):
+            db.execute('DROP TABLE '+table)
         for table in ('media_lifecycle','feishu_parts','feishu_receipts','feishu_binding','collection_previews','collection_confirmations','collection_events','collection_results','collection_members','collection_operations'):
             db.execute('DROP TABLE '+table)
         db.execute('DROP TABLE source_media')

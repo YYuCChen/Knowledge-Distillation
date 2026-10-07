@@ -1,6 +1,7 @@
 import argparse
 import os
 import socket
+import time
 from pathlib import Path
 
 from .v1.app import AppPaths, create_application
@@ -50,8 +51,9 @@ def main(argv: list[str] | None = None) -> None:
         try:
             app.run(host=DEFAULT_HOST, port=args.port, use_reloader=False)
         finally:
-            app.config['KNOWLEDGE_DISTILLER_CLOSE_FEISHU']()
-            app.config["KNOWLEDGE_DISTILLER_WORKER"].stop()
+            workers = app.config["KNOWLEDGE_DISTILLER_WORKERS"]
+            while not workers.stop():
+                time.sleep(.05)
             app.config["KNOWLEDGE_DISTILLER_CLOSE_BROWSERS"]()
 
 

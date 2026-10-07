@@ -16,10 +16,10 @@
   <header class="topbar page-width">
     {% set active_count = processing|length + collection_processing %}
     {% set queued_count = waiting|length + collection_waiting %}
-    <span class="topbar-status" role="status" aria-live="polite" {% if organization_status.running %}data-live-status{% endif %}>
+    <span class="topbar-status" role="status" aria-live="polite" {% if wiki_status.running %}data-live-status{% endif %}>
       <span class="app-state">
-        <span class="activity-dot {{ 'is-active' if organization_status.running or active_count else 'is-error' if organization_status.error and not queued_count else '' }}" aria-hidden="true"></span>
-        {% if organization_status.running and active_count %}正在整理 · 正在蒸馏{% elif organization_status.running %}正在整理{% elif active_count %}正在蒸馏{% elif queued_count %}队列等待{% elif organization_status.error %}状态暂不可用{% else %}正常{% endif %}
+        <span class="activity-dot {{ 'is-active' if wiki_status.running or active_count else 'is-error' if wiki_status.state in ['failed', 'unknown'] and not queued_count else '' }}" aria-hidden="true"></span>
+        {% if wiki_status.running and active_count %}正在整理 · 正在蒸馏{% elif wiki_status.running %}正在整理{% elif active_count %}正在蒸馏{% elif queued_count %}队列等待{% elif wiki_status.queued %}知识整理已排队{% elif wiki_status.state == 'unknown' %}状态暂不可用{% else %}正常{% endif %}
       </span>
       {% if active_count or queued_count %}<span class="queue-state">{{ active_count }} 批 · {{ queued_count }} 等待</span>{% endif %}
     </span>
@@ -49,7 +49,6 @@
           <input type="hidden" name="content_kind" value="{{ request.form.get('content_kind', '') if request.form.get('content_kind') in ['links', 'text'] else '' }}">
           <input type="hidden" name="processing_mode" value="">
           {% if form_error %}<p class="form-error" role="alert">{{ form_error }}</p>{% endif %}
-          <p class="organization-feedback" role="alert" data-organization-event="{{ organization_status.latest_event or '' }}" data-organization-failed="{{ 'true' if organization_status.failed else 'false' }}" {% if not organization_status.error %}hidden{% endif %}>{% if organization_status.error %}{{ organization_status.error }}{% elif organization_status.failed %}本次知识整理未完成，已有主题和新知保留，可以重试。{% endif %}</p>
           <span data-source-filename></span>
           <label class="upload" title="选择一个 PDF、EPUB 或 Markdown 文件">
             <img
@@ -456,10 +455,22 @@
         {% endfor %}
       </section>
     {% endif %}
-      {% if organization_status.pending and not organization_status.error %}
-      <section class="section organization-section" {% if organization_status.running %}data-live-status{% endif %}>
-        <span class="organization-description"><span class="organization-icon"><img src="{{ url_for('static', filename='icons/organize.svg') }}" alt=""></span>新增 {{ organization_status.pending }} 条知识待整理</span>
-        <form method="post" action="{{ url_for('organize') }}"><button type="submit" class="primary-button" {% if organization_status.running %}disabled{% endif %}>{{ '正在整理' if organization_status.running else '开始整理' }}</button></form>
+      {% if wiki_status.visible %}
+      <section class="section organization-section" data-sync-key="organization" {% if wiki_status.running %}data-live-status{% endif %} {% if wiki_status.tone %}data-tone="{{ wiki_status.tone }}"{% endif %}>
+        <span class="organization-description">
+          <span class="organization-icon"><img src="{{ url_for('static', filename='icons/organize.svg') }}" alt=""></span>
+          <span class="organization-copy"><strong>{{ wiki_status.title }}</strong><small>{{ wiki_status.detail }}</small></span>
+        </span>
+        <span class="organization-actions">
+          {% if wiki_status.action == 'submit' %}<form id="wiki-submit" method="post" action="{{ url_for('organize') }}"><button type="submit" class="primary-button">开始整理</button></form>
+          {% elif wiki_status.action == 'retry' %}<form id="wiki-retry" method="post" action="{{ url_for('retry_organization', task_id=wiki_status.task_id) }}"><button type="submit" class="secondary-button">继续整理</button></form>
+          {% elif wiki_status.action == 'settings' %}<a class="outline-button" href="{{ url_for('settings.page', return_to='/') }}">打开设置</a>
+          {% elif wiki_status.state == 'succeeded' %}
+            {% if wiki_status.show_pending %}{% if wiki_status.pending_url %}<a href="{{ wiki_status.pending_url }}">查看待确认</a>{% else %}<span class="is-disabled" aria-disabled="true" title="请先在 Obsidian 中打开当前知识库">查看待确认</span>{% endif %}{% endif %}
+            {% if wiki_status.show_index %}{% if wiki_status.index_url %}<a href="{{ wiki_status.index_url }}">打开知识库</a>{% else %}<span class="is-disabled" aria-disabled="true" title="请先在 Obsidian 中打开当前知识库">打开知识库</span>{% endif %}{% endif %}
+          {% elif wiki_status.button_label %}<button type="button" class="secondary-button" disabled>{{ wiki_status.button_label }}</button>
+          {% endif %}
+        </span>
       </section>
       {% endif %}
     </div>

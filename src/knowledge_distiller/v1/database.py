@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 23
 TOPIC_STATEMENTS = (
     """CREATE TABLE topic_entries (
         topic_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -181,7 +181,7 @@ def initialize(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as connection:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version < 10:
+        if version < 10 or version == 22:
             # A parent-table rebuild preserves all ids. Disable enforcement only
             # for this migration connection; check every FK before atomic commit.
             connection.execute("PRAGMA foreign_keys = OFF")
@@ -213,7 +213,7 @@ def initialize(path: Path) -> None:
             connection.execute(SUBMITTED_SCHEMA)
             connection.execute("ALTER TABLE source_facts ADD COLUMN lineage_json TEXT NOT NULL DEFAULT '{}'")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, SCHEMA_VERSION):
+        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, SCHEMA_VERSION):
             raise RuntimeError(f"unsupported database version: {version}")
 
         if version < 6:
@@ -397,4 +397,27 @@ def initialize(path: Path) -> None:
             from .capture_schema import STATEMENTS as CAPTURE_STATEMENTS
             for statement in CAPTURE_STATEMENTS:
                 connection.execute(statement)
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+        if version < 22:
+            # V3 wiki maintenance is a separate durable domain. It does not
+            # reuse or rewrite the legacy organization event tables.
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+            from .wiki_schema import migrate
+            migrate(connection)
+            connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+        if version < 23:
+            # Cheap Local Web status is a last explicit machine observation,
+            # not a replacement for the authoritative freeze at submission.
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+            from .wiki_schema import migrate_observations, migrate_v23
+            if version == 22:
+                migrate_v23(connection)
+                if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise RuntimeError("database migration found broken wiki task references")
+            else:
+                migrate_observations(connection)
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

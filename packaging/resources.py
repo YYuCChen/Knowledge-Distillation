@@ -1,5 +1,7 @@
 """Release data manifest. No imports of PyInstaller or application runtime."""
 from pathlib import Path
+import hashlib
+import json
 import tomllib
 
 
@@ -11,6 +13,32 @@ def application_datas(project: Path) -> list[tuple[str, str]]:
     files = {path for pattern in patterns for path in package.glob(pattern) if path.is_file()}
     return [(str(path), (Path('knowledge_distiller') / path.relative_to(package).parent).as_posix())
             for path in sorted(files)]
+
+
+def vault_kit_datas(project: Path) -> list[tuple[str, str]]:
+    """Bundle exactly the manifest-owned trusted kit plus its manifest."""
+    root = project / 'vault-kit'
+    manifest_path = root / 'kit-manifest.json'
+    data = json.loads(manifest_path.read_text(encoding='utf-8'))
+    if not isinstance(data, dict) or set(data) != {'kit_version', 'protocol_version', 'files'}:
+        raise RuntimeError('Vault kit manifest is invalid')
+    files = [manifest_path]
+    seen = set()
+    for item in data['files']:
+        if not isinstance(item, dict) or set(item) != {'source_path', 'install_path', 'sha256'}:
+            raise RuntimeError('Vault kit manifest file is invalid')
+        relative = Path(item['source_path'])
+        if relative.is_absolute() or '..' in relative.parts or relative.as_posix() in seen:
+            raise RuntimeError('Vault kit source path is invalid')
+        seen.add(relative.as_posix())
+        path = root / relative
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError('Vault kit release resource missing: ' + relative.as_posix())
+        if hashlib.sha256(path.read_bytes()).hexdigest() != item['sha256']:
+            raise RuntimeError('Vault kit release resource drift: ' + relative.as_posix())
+        files.append(path)
+    return [(str(path), (Path('vault-kit') / path.relative_to(root).parent).as_posix())
+            for path in files]
 
 
 def opencli_datas(root: Path) -> list[tuple[str, str]]:

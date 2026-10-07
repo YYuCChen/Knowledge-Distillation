@@ -276,6 +276,9 @@ def test_v8_migration_preserves_existing_facts_and_connections(tmp_path,image):
         'https://www.douyin.com/video/123',{},image,1))
     fact=store.establish_source_fact(material,SourceFact('原有来源正文'))
     with connect(path) as db:
+        # V8 predates the schema-22/23 wiki workflow domain entirely.
+        for table in ('wiki_observations','wiki_task_raw','wiki_task_batches','wiki_tasks'):
+            db.execute('DROP TABLE '+table)
         for table in ('media_lifecycle','feishu_parts','feishu_receipts','feishu_binding','collection_previews','collection_confirmations','collection_events','collection_results','collection_members','collection_operations'):
             db.execute('DROP TABLE '+table)
         db.execute('DROP TABLE source_media')

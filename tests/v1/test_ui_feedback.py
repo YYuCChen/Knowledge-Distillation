@@ -1,7 +1,6 @@
 """Regressions for the September 9 activity and reading-style feedback."""
 import hashlib
 import json
-import sqlite3
 import threading
 from pathlib import Path
 
@@ -11,7 +10,7 @@ from knowledge_distiller.v1 import reading_style
 from knowledge_distiller.v1.collections import Collections
 from knowledge_distiller.v1.web import create_app
 from .test_topics import library
-from .test_organization import organization
+from .test_home_organization_state import Workflow, snapshot
 
 
 @pytest.mark.parametrize('organizing,working,queued,label', [
@@ -21,13 +20,11 @@ from .test_organization import organization
 ])
 def test_activity_uses_persisted_work_and_keeps_zero_queue_hidden(tmp_path,organizing,working,queued,label):
     _,store,_=library(tmp_path)
-    if organizing:
-        service,_=organization(store)
-        service.start_or_reuse()
+    workflow = Workflow(snapshot('running' if organizing else 'idle'))
     if working or queued:
         store.create_item('https://www.douyin.com/video/999')
         if working:store.claim_next_item()
-    app=create_app(store,object(),collection_service=Collections(store))
+    app=create_app(store,object(),collection_service=Collections(store),wiki_workflow=workflow)
     status=app.test_client().get('/').text.split('<span class="topbar-status"',1)[1].split('</header>',1)[0]
     assert label in status
     assert ('is-active' in status)==bool(organizing or working)
@@ -64,20 +61,16 @@ def test_only_known_unmodified_reading_style_can_upgrade(tmp_path,monkeypatch):
     assert config.read_bytes()==before
 
 
-@pytest.mark.parametrize('failed', [False, True])
-def test_activity_after_organization_finishes_and_app_reopens(tmp_path, failed):
+@pytest.mark.parametrize('final_state', ['succeeded', 'failed'])
+def test_activity_after_wiki_task_finishes_and_app_reopens(tmp_path, final_state):
     _, store, _ = library(tmp_path)
-    def fail(point, connection):
-        if failed and point == 'after_topic_replace':
-            raise sqlite3.IntegrityError('isolated organization failure')
-    service, _ = organization(store, fail=fail)
-    event = service.start_or_reuse()
+    workflow = Workflow(snapshot('running'))
     def status():
         # Rebuild the application so the result cannot depend on frontend state.
-        page = create_app(store, object()).test_client().get('/').text
+        page = create_app(store, object(), wiki_workflow=workflow).test_client().get('/').text
         return page.split('<span class="topbar-status"', 1)[1].split('</header>', 1)[0]
     assert '正在整理' in status()
-    service.drive(event.event_id)
+    workflow.current = snapshot(final_state, actions=['retry'] if final_state == 'failed' else [])
     assert '正常' in status() and 'is-active' not in status()
     item = store.create_item('https://www.douyin.com/video/999')
     assert '队列等待' in status()
@@ -97,7 +90,9 @@ def feedback_app(tmp_path):
     vault = tmp_path / 'vault'
     vault.mkdir(exist_ok=True)
     store.set_setting('vault_path', str(vault))
-    server = make_server('127.0.0.1', 0, create_app(store, object()), threaded=True)
+    workflow = Workflow(snapshot('ready', actions=['submit']))
+    server = make_server('127.0.0.1', 0, create_app(
+        store, object(), wiki_workflow=workflow), threaded=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f'http://127.0.0.1:{server.server_port}'

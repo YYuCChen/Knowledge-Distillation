@@ -28,8 +28,11 @@
 
     <header class="settings-heading">
       <h1>设置</h1>
-      <p class="settings-message {% if message_error %}is-error{% endif %}">
-        {{ message or "连接来源、模型与知识保存位置。" }}
+      {% set page_message = phase4_message|default(None) or message %}
+      {% set phase4_error = phase4_message_error|default(None) %}
+      {% set page_message_error = message_error if phase4_error is none else phase4_error %}
+      <p class="settings-message {% if page_message_error %}is-error{% endif %}">
+        {{ page_message or "连接来源、模型与知识保存位置。" }}
       </p>
       {% if settings.cleanup_residue_count %}<p class="settings-message is-error">{{ settings.cleanup_residue_count }} 条临时素材尚未清理成功，程序会重试；已有来源和知识不受影响。</p>{% endif %}
     </header>
@@ -253,6 +256,27 @@
         </span>
       </div>
       {% endif %}
+      <section class="phase4-control" aria-labelledby="kit-label">
+        <div class="setting-row vault-row">
+          <span class="state-dot {{ wiki_kit_status.dot }}" aria-hidden="true"></span>
+          <strong id="kit-label">知识库工具</strong>
+          <span class="vault-path" role="status">{{ wiki_kit_status.text }}</span>
+          <span class="row-actions">
+            {% if wiki_kit_status.action %}
+            <form action="{{ url_for('mutate_wiki_kit') }}" method="post">
+              <input type="hidden" name="action" value="{{ wiki_kit_status.action }}">
+              <button class="secondary-button">{{ wiki_kit_status.action_label }}</button>
+            </form>
+            {% else %}
+            <span class="phase4-stopped">{{ wiki_kit_status.stopped_label }}</span>
+            {% endif %}
+          </span>
+        </div>
+        <div class="phase4-detail">
+          <p>安装知识库运行所需的工具文件，不会改写知识页面、原始素材或你自己的技能。</p>
+          <p>如果目标位置已有无法确认身份的同名文件，安装会停止并保留现有内容。</p>
+        </div>
+      </section>
       <div class="reading-style-configuration">
         <form class="setting-row vault-row" action="{{ url_for('settings.reading_style') }}" method="post">
           <input type="hidden" name="action" value="{{ 'disable' if reading_style_state == 'enabled' else 'enable' }}">
@@ -262,6 +286,27 @@
           <span class="row-actions"><button class="secondary-button">{{ '关闭此排版' if reading_style_state == 'enabled' else '更新此排版' if reading_style_state == 'update_available' else '启用此排版' }}</button></span>
         </form>
       </div>
+      <section class="phase4-control" aria-labelledby="wiki-style-label">
+        <div class="setting-row vault-row">
+          <span class="state-dot {{ wiki_style_status.dot }}" aria-hidden="true"></span>
+          <strong id="wiki-style-label">知识库页面样式</strong>
+          <span class="vault-path" role="status">{{ wiki_style_status.text }}</span>
+          <span class="row-actions">
+            {% if wiki_style_status.action %}
+            <form action="{{ url_for('mutate_wiki_style') }}" method="post">
+              <input type="hidden" name="action" value="{{ wiki_style_status.action }}">
+              <button class="secondary-button">{{ wiki_style_status.action_label }}</button>
+            </form>
+            {% else %}
+            <span class="phase4-stopped">{{ wiki_style_status.stopped_label }}</span>
+            {% endif %}
+          </span>
+        </div>
+        <div class="phase4-detail">
+          <p>安装只放置知识库页面样式，不会自动启用。安装完成后，再由你明确启用。</p>
+          <p>样式可以随时关闭；关闭只改变显示，不改变正文、证据、链接或编号。</p>
+        </div>
+      </section>
       <details class="feishu-configuration" {% if open_group == 'paths' and (request.args.get('message', '').startswith('feishu_') or request.args.get('setup') == 'feishu') %}open{% endif %}>
         <summary class="setting-row vault-row">
           <span class="state-dot {{ 'configured' if feishu and feishu.state == 'connected' else 'unconfigured' }}" aria-hidden="true"></span>

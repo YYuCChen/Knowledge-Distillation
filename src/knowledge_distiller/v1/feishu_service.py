@@ -13,7 +13,8 @@ from .feishu_runtime import FeishuRuntime
 
 
 class FeishuService:
-    def __init__(self,store,links,distiller,runtime_root,*,wake=None,jev=None):
+    def __init__(self,store,links,distiller,runtime_root,*,wake=None,jev=None,
+                 admission_gate=None):
         self.store,self.links,self.distiller=store,links,distiller
         self.root,self.wake=runtime_root,wake
         self.jev=jev
@@ -21,7 +22,9 @@ class FeishuService:
         self.api=None
         self.error=None
         self.delivery_errors={}
+        self.admission_gate=admission_gate
         self._configuration_lock=threading.Lock()
+        self._stop_generation=0
 
     def configure(self,app_id,secret=''):
         """Validate this binding's credentials before replacing or reconnecting."""
@@ -44,9 +47,12 @@ class FeishuService:
                     raise ValueError('feishu_configuration_failed')
             finally:
                 candidate.close()
+            if not self.stop():
+                # Keep the old runtime authoritative until its bounded stop
+                # has really completed; replacing it could double-ack intake.
+                raise ValueError('feishu_configuration_failed')
             if secret: credential.save_validated(secret)
             else: credentials.mark_validated('feishu-app-'+app_id)
-            self.stop()
             if not bindings:
                 from .feishu_pairing import begin
                 begin(self.store,app_id,bot['open_id'])
@@ -55,7 +61,9 @@ class FeishuService:
             self.start()
 
     def start(self):
-        if self.runtime is not None:return
+        if self.runtime is not None:return False
+        if self.admission_gate is not None and self.admission_gate.reserved:
+            return False
         with connect(self.store.path) as db:
             bindings=db.execute('SELECT app_id FROM feishu_binding').fetchall()
         from .feishu_pairing import pending
@@ -86,14 +94,48 @@ class FeishuService:
                 except Exception:
                     # One bad/expired card must not strand other receipts.
                     self.delivery_errors[message]='回执同步未完成，投递与确认记录已保留。'
-        self.runtime=FeishuRuntime(inbox,self.api,intake,actions,synchronize,allow_pairing=not bindings)
+        self.runtime=FeishuRuntime(
+            inbox,self.api,intake,actions,synchronize,allow_pairing=not bindings,
+            admission_gate=self.admission_gate)
         self.runtime.start()
+        return True
 
     def stop(self):
-        if self.runtime:self.runtime.stop()
+        self._stop_generation += 1
+        if self.runtime and not self.runtime.stop():
+            return False
         if self.api:self.api.close()
         self.runtime=None
         self.api=None
+        return True
+
+    def recover_after_failed_stop(self):
+        """Finish a timed-out stop, then restore intake after update rollback."""
+        runtime, api = self.runtime, self.api
+        generation = self._stop_generation
+        if runtime is None:
+            self.start()
+            return None
+
+        def recover():
+            while not runtime.stop(timeout=5):
+                pass
+            with self._configuration_lock:
+                if self.runtime is not runtime:
+                    return
+                if api is not None:
+                    api.close()
+                self.runtime = None
+                self.api = None
+                if (self._stop_generation == generation
+                        and (self.admission_gate is None
+                             or not self.admission_gate.reserved)):
+                    self.start()
+
+        thread = threading.Thread(
+            target=recover, name='feishu-stop-recovery', daemon=True)
+        thread.start()
+        return thread
 
     def status(self):
         with connect(self.store.path) as db:

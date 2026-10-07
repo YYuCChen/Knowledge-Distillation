@@ -6,6 +6,7 @@
   <header class="topbar"><span></span><a href="{{ url_for('settings.page', return_to=request.full_path) }}">设置{% if update is defined %}<img data-update-attention src="{{ url_for('static', filename='icons/update-attention.svg') }}" alt="有新版更新说明" {% if not update.attention %}hidden{% endif %}>{% endif %}</a></header>
   <nav class="main-nav" aria-label="主要页面"><a href="{{ url_for('topics.index') }}">主题</a><a href="{{ url_for('home') }}">首页</a><strong aria-current="page">新知</strong></nav>
   <header class="topic-heading"><h1>认知暗涌</h1><p data-insight-count>{% if not error %}{% if state=='interesting' %}回顾过去 {% elif state=='rethink' %}有 {% endif %}{{ items|length }} {{ '条值得看看' if state=='pending' else ('条灵感' if state=='interesting' else '条新知可以再琢磨一下') }}{% endif %}</p></header>
+  <p class="legacy-notice"><strong>历史内容只读保留</strong><span>新的整理结果进入 Obsidian 知识库；这里仍可搜索和阅读已有主题与新知。</span></p>
   <nav class="insight-filters" aria-label="新知筛选">{% for key,label in [('pending','新整理'),('interesting','有意思'),('rethink','再想想')] %}<a href="{{ url_for('insights.index', state=key) }}" {% if key==state %}aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}</nav>
   <div class="insight-scroll" data-scroll-area>
     {% if error %}<p role="alert">{{ error }}</p>{% endif %}

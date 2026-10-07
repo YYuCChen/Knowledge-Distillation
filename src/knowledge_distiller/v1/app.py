@@ -21,6 +21,15 @@ from .settings import AuthorizedDouyinSession, SettingsService
 from .store import Store
 from .web import create_app
 from .worker import SingleWorker
+from .worker_lifecycle import WorkAdmissionGate, WorkerCoordinator
+from .wiki_kit_runtime import WikiKitRuntime
+from .wiki_kit_install import WikiKitInstaller
+from .wiki_lock import canonical_vault
+from .wiki_runner import CodexWikiRunner
+from .wiki_style import WikiStyleService
+from .wiki_tasks import WikiTaskStore
+from .wiki_worker import WikiWorker
+from .wiki_workflow import WikiWorkflow
 from .youtube import YouTubeSource
 from .bilibili import BilibiliSource
 from .xiaohongshu import XiaohongshuSource
@@ -39,6 +48,9 @@ def create_application(
     start_workers: bool = True,
 ):
     selected_paths = paths or AppPaths.system_default()
+    selected_paths.runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+    canonical_vault(selected_paths.runtime)
+    selected_paths.runtime.chmod(0o700)
     store = Store(selected_paths.database)
     from .douyin_session import DouyinOwnedSession
     browser = chrome or DouyinOwnedSession(store, selected_paths.data_root / "browser-profiles" / "douyin")
@@ -72,12 +84,9 @@ def create_application(
             vault=Path(values["vault_path"]) if values.get("vault_path") else None,
         )
 
-    def build_organization():
-        from .organization import configured_organization
-        return configured_organization(store, settings_service.llm_client(), jev=settings_service.jev_client())
-
     from .temporary_artifacts import TemporaryArtifacts
     artifacts = TemporaryArtifacts(store, selected_paths.runtime)
+    workflow_holder = {}
 
     def maintenance():
         # Backfill raw/ first: a material's media is released only after its raw
@@ -93,15 +102,41 @@ def create_application(
             except Exception as error:
                 logging.getLogger(__name__).warning('raw backfill deferred (%s)', type(error).__name__)
         artifacts.sweep()
+        workflow = workflow_holder.get('workflow')
+        if workflow is not None:
+            workflow.request_refresh()
 
-    worker = SingleWorker(store, build_distiller, organization=build_organization,
-                          maintenance=maintenance)
+    worker = SingleWorker(store, build_distiller, maintenance=maintenance)
+    kit_runtime = WikiKitRuntime()
+    wiki_store = WikiTaskStore(
+        selected_paths.database, kit_root=kit_runtime.kit_root,
+        python_executable=kit_runtime.python_executable, runtime=kit_runtime)
+    wiki_runner = CodexWikiRunner(kit_runtime=kit_runtime)
+    wiki_worker = WikiWorker(wiki_store, selected_paths.runtime, wiki_runner)
+    admission_gate = WorkAdmissionGate()
+    coordinator = WorkerCoordinator(worker, wiki_worker, admission_gate)
+    wiki_kit_installer = WikiKitInstaller(
+        kit_runtime.kit_root,
+        selected_paths.runtime,
+        admission_gate,
+        coordinator,
+    )
+    wiki_style_service = WikiStyleService(
+        selected_paths.runtime,
+        admission_gate,
+        coordinator,
+    )
+    wiki_workflow = WikiWorkflow(wiki_store, wiki_worker, store.settings, admission_gate)
+    workflow_holder['workflow'] = wiki_workflow
     app = create_app(
         store,
         build_distiller,
         settings_service,
         wake_worker=worker.wake,
-        organization=build_organization,
+        wiki_workflow=wiki_workflow,
+        admission_gate=admission_gate,
+        wiki_kit_installer=wiki_kit_installer,
+        wiki_style_service=wiki_style_service,
     )
     import sys
     if getattr(sys, 'frozen', False):
@@ -115,14 +150,15 @@ def create_application(
     from .desktop_pages import install as install_desktop_pages
     install_desktop_pages(app)
     from .feishu_service import FeishuService
-    feishu=FeishuService(store,app.extensions['link_intake'],build_distiller,selected_paths.runtime,wake=worker.wake,
-                         jev=settings_service.jev_client)
+    feishu=FeishuService(
+        store,app.extensions['link_intake'],build_distiller,selected_paths.runtime,
+        wake=worker.wake,jev=settings_service.jev_client,admission_gate=admission_gate)
+    coordinator.attach_ingress(feishu)
     app.extensions['feishu']=feishu
     app.extensions['qwen_component']=settings_service.qwen_component
     app.config['KNOWLEDGE_DISTILLER_CLOSE_FEISHU']=feishu.stop
 
     def close_browsers():
-        feishu.stop()
         settings_service.qwen_component.close()
         for session in (browser, settings_service.youtube, settings_service.xiaohongshu,
                         settings_service.xpost, settings_service.zhihu, settings_service.weibo):
@@ -132,12 +168,16 @@ def create_application(
 
     app.config["KNOWLEDGE_DISTILLER_CLOSE_BROWSERS"] = close_browsers
     if start_workers:
-        worker.start()
-        feishu.start()
+        wiki_workflow.request_refresh(force=True)
+        coordinator.start()
     else:
         app.extensions['updates'].phase = 'installing'
     app.config["KNOWLEDGE_DISTILLER_STORE"] = store
     app.config["KNOWLEDGE_DISTILLER_WORKER"] = worker
+    app.config["KNOWLEDGE_DISTILLER_WIKI_WORKER"] = wiki_worker
+    app.config["KNOWLEDGE_DISTILLER_WORKERS"] = coordinator
+    app.extensions['wiki_workflow'] = wiki_workflow
+    app.extensions['admission_gate'] = admission_gate
     return app
 
 

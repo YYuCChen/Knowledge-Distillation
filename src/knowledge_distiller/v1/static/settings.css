@@ -310,6 +310,25 @@
 .reading-style-configuration > summary { cursor: pointer; list-style: none; }
 .reading-style-configuration > summary::-webkit-details-marker { display: none; }
 .feishu-configuration .secondary-button, .reading-style-configuration .secondary-button { justify-self: end; width: max-content; }
+
+.phase4-control { background: var(--card); }
+.phase4-detail {
+  padding: 10px 64px 12px;
+  border-top: 1px solid var(--line);
+  color: var(--secondary);
+  font-size: 11px;
+  line-height: 1.7;
+  letter-spacing: .2px;
+}
+.phase4-detail p { margin: 0; overflow-wrap: anywhere; }
+.phase4-detail p + p { margin-top: 5px; }
+.phase4-stopped {
+  color: var(--secondary);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: .5px;
+  white-space: nowrap;
+}
 .feishu-fields label { font-size: 11px; color: var(--ink); }
 .feishu-fields input { height: 24px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--card); color: var(--ink); font-size: 11px; }
 .feishu-fields input::placeholder { color: #737b83; }
@@ -400,7 +419,7 @@
 .connection-troubleshooting > summary { color: var(--secondary); }
 .doubao-guide-link { margin: 0 0 16px; }
 @media (max-width: 720px) {
-  .feishu-fields, .doubao-onboarding, .qwen-setup, .vault-help, .reading-style-fields, .connection-help { padding-inline: 32px; }
+  .feishu-fields, .doubao-onboarding, .qwen-setup, .vault-help, .reading-style-fields, .connection-help, .phase4-detail { padding-inline: 32px; }
   .settings-page .row-actions { padding-right: 32px; justify-content: flex-end; flex-wrap: wrap; }
   .vault-help .row-actions { padding-right: 0; }
   .feishu-form-actions { flex-wrap: wrap; }

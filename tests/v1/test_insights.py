@@ -61,17 +61,24 @@ def test_rethink_reconsideration_preserves_initial_judgment(tmp_path):
         insights.reconsider(version, 'reconsider-1', '改写认识')
 
 
-def test_page_mutations_and_current_only_search(tmp_path):
+def test_history_page_is_read_only_and_direct_posts_preserve_judgments(tmp_path):
     from knowledge_distiller.v1.web import create_app
     insights, version = prepared(tmp_path)
     client = create_app(insights.store, object()).test_client()
+    before = insights.store.path.read_bytes()
     pending = client.get('/insights')
     assert pending.status_code == 200
-    assert '来源核对' in pending.text
-    assert client.post(f'/insights/{version}/judge', data={'decision':'interesting','text':'保留批注'}, headers={'X-Requested-With':'insight'}).status_code == 204
-    assert client.post(f'/insights/{version}/idea', data={'operation_id':'web-idea','text':'新想法'}, headers={'X-Requested-With':'insight'}).status_code == 200
-    assert '新想法' in client.get('/insights?state=interesting').text
-    assert '保留批注' not in client.get('/insights').text
+    assert '来源核对' in pending.text and '历史内容只读保留' in pending.text
+    assert '<textarea' not in pending.text and 'data-insight-action' not in pending.text
+    for action in ('judge', 'idea', 'reconsider', 'unknown'):
+        response = client.post(f'/insights/{version}/{action}', data={
+            'decision': 'interesting', 'text': '不能写入', 'operation_id': 'stale-tab',
+        }, headers={'X-Requested-With': 'insight'})
+        assert response.status_code == 410
+        assert '只读' in response.text
+    assert len(insights.list('pending')) == 1
+    assert not insights.list('interesting')
+    assert insights.store.path.read_bytes() == before
 
 
 def successor(insights, version, tmp_path):
@@ -161,7 +168,7 @@ def test_malformed_scan_tags_fail_closed(tags):
         parse_insight_payload(payload)
 
 
-def test_browser_judgment_reconsideration_idea_and_draft_restore(tmp_path):
+def test_browser_history_is_readable_without_mutation_controls(tmp_path):
     import threading
     from pathlib import Path
     from playwright.sync_api import sync_playwright, expect
@@ -178,43 +185,18 @@ def test_browser_judgment_reconsideration_idea_and_draft_restore(tmp_path):
             browser = playwright.chromium.launch()
             page = browser.new_page(viewport={'width':1440,'height':1024})
             page.goto(f'http://127.0.0.1:{server.server_port}/insights')
-            assert page.locator('.insight-scroll').bounding_box()['y'] == 196
+            assert page.get_by_text('历史内容只读保留', exact=True).count() == 1
             page.locator('summary').click()
-            layout = page.evaluate('''() => {
-                const note = document.querySelector('.insight-note');
-                const label = note.querySelector('label').getBoundingClientRect();
-                const input = note.querySelector('textarea').getBoundingClientRect();
-                const discussion = document.querySelector('.insight-discussion');
-                const right = discussion.getBoundingClientRect().right - parseFloat(getComputedStyle(discussion).paddingRight);
-                return {sameLine: Math.abs(label.top-input.top)<1, afterColon: Math.abs(input.left-label.right)<1,
-                        aligned: Math.abs(input.right-right)<1, bottom: innerHeight-document.querySelector('.insight-scroll').getBoundingClientRect().bottom};
-            }''')
-            assert layout == dict(sameLine=True, afterColon=True, aligned=True, bottom=48)
-            page.get_by_role('textbox',name='批注',exact=True).fill('初次判断原文')
-            page.get_by_role('button',name='再想想',exact=True).click()
-            expect(page.locator('.insight-card')).to_have_count(0)
-            expect(page.locator('[data-empty]')).to_contain_text('已判断的内容')
-            page.get_by_role('link',name='再想想',exact=True).click()
-            page.locator('summary').click()
-            page.get_by_role('textbox',name='新看法',exact=True).fill('认识的变化')
-            page.get_by_role('button',name='改观',exact=True).click()
-            expect(page.locator('.insight-card')).to_have_count(0)
-            page.get_by_role('link',name='有意思',exact=True).click()
-            page.locator('summary').click()
-            idea = page.get_by_role('textbox',name='新想法',exact=True)
-            idea.fill('离开后应恢复的草稿')
-            page.get_by_role('link',name='设置',exact=True).click()
-            page.get_by_role('link',name='返回',exact=True).click()
-            expect(idea).to_have_value('离开后应恢复的草稿')
-            page.get_by_role('button',name='记录',exact=True).click()
-            expect(idea).to_have_value('')
-            expect(page.locator('.personal-history p')).to_have_count(3)
-            expect(page.locator('.personal-history time')).to_have_count(3)
-            assert page.get_by_role('button',name='记录',exact=True).bounding_box()['width'] == 60
-            assert len(insights.read(version)['notes']) == 2
-            idea.fill('刷新后丢弃')
+            expect(page.locator('.insight-discussion')).to_be_visible()
+            assert page.locator('textarea, form[data-insight-action], .insight-actions button').count() == 0
+            response = page.request.post(
+                f'http://127.0.0.1:{server.server_port}/insights/{version}/judge',
+                form={'decision': 'interesting', 'text': '不能写入'},
+            )
+            assert response.status == 410
             page.reload()
-            expect(idea).to_have_value('')
+            assert page.locator('.insight-card').count() == 1
+            assert len(insights.list('pending')) == 1
             # Native scrollbar gutters reserve space but must not shift the reading column.
             assert page.evaluate('document.documentElement.scrollWidth <= document.documentElement.clientWidth')
             assert page.locator('.insight-page').bounding_box()['x'] == 400

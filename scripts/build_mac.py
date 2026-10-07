@@ -43,7 +43,7 @@ work=Path(tempfile.mkdtemp(prefix='knowledge-distiller-build-'))
 
 def source_fingerprints():
     files = [project/'pyproject.toml', Path(__file__).resolve()]
-    for folder in ('src','packaging'):
+    for folder in ('src','packaging','vault-kit'):
         files.extend(p for p in (project/folder).rglob('*') if p.is_file()
                      and '__pycache__' not in p.parts and p.suffix != '.pyc')
     return {str(p.relative_to(project)): hashlib.sha256(p.read_bytes()).hexdigest()

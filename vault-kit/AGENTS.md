@@ -8,6 +8,10 @@
 
 ## 0. 十条铁律（任何情况下不得违反）
 
+开始任何会修改 Vault 的工作前，先运行 `python3 tools/wiki_session.py --root . status`。只有状态为成功时才能继续；失败表示本 Agent 没有处在覆盖完整编辑窗口的共享写锁会话中，应停止写入并从 `python3 tools/wiki_session.py --root . -- <agent-command>` 重新启动整个会话。不得先探测锁、释放后再写，也不得把环境变量本身当作持锁证明。产品自动任务使用同一目录 inode 锁协议。只读查看不要求写锁。
+
+产品自动任务会在本轮提示词中给出应用自有的可信 `wiki_session` 与 `kb` 完整命令；这些命令优先于本文面向人工会话的 `python` / `python3` 示例。自动任务不得改回示例命令，也不得执行 staging 内可被 Agent 修改的工具副本。
+
 1. **原始素材只读。** `raw/` 下的任何文件永不修改、移动或删除。唯一例外：按 7.3 把 AI 对话中用户本人的发言**新建**为 `raw/自述/` 文件（用 `python tools/kb.py raw-id` 取号），只新建，不改任何已有文件。
 2. **单向派生。** 素材 → wiki → 关系图谱。永远不从图谱反推修改 wiki，不从 wiki 反推修改素材。
 3. **他人与自己分开。** 他人观点一律写成"某某认为……"。外部素材永远不直接生成认知页。"用户怎么看"只能来自 `raw/自述/`。
@@ -55,6 +59,7 @@ wiki/
 
 skills/                   技能的 Skill 文件
 tools/kb.py               检查与关系图谱脚本
+.kd/wiki-kit.json         产品自有的工具包版本与拥有文件摘要收据（不存正文）
 .graph/                   派生数据，可随时删除重建
   graph.json              关系图谱（节点、带类型的边、演化事件、计算状态）
   检查结果.md             脚本每次运行的检查结果
@@ -121,6 +126,14 @@ tools/kb.py               检查与关系图谱脚本
 标有 `（自动）` 的小节由脚本生成。新建页面时照样写上这些标题，内容留空即可。
 
 ### 3.4 模板
+
+八类普通页与四类系统页的阅读样式由 `tools/kb.py` 统一补齐和刷新。普通页分别使用
+`kd-wiki-source`、`kd-wiki-concept`、`kd-wiki-cognition`、`kd-wiki-method`、
+`kd-wiki-skill`、`kd-wiki-practice`、`kd-wiki-synthesis`、`kd-wiki-topic`；
+`index.md`、`待确认.md`、`log.md`、`体检报告.md` 分别使用 `kd-wiki-index`、
+`kd-wiki-pending`、`kd-wiki-log`、`kd-wiki-health`。它们都同时保留 `kd-reading`、
+`kd-wiki`，系统页另有 `kd-wiki-system`。不要手写或修改
+`<!-- kd-wiki-display:… -->` 到 `<!-- /kd-wiki-display -->` 之间的展示块；照以下业务模板写完后运行脚本即可。展示块和由产品确证新增的 class 不属于知识正文，脚本不得因它们变化而改动“更新”日期。
 
 新建页面时，`编号`、`类型`、`创建`、`更新` 四个字段**可以不写**，脚本会补填。以下模板中省略了它们。
 

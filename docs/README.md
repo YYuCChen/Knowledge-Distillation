@@ -1,5 +1,7 @@
 # 项目文档入口
 
+2026-10-07 本轮 V3 开发的权威入口为父工程的 [施工包](../../README.md)、[需求 R01–R20](../../docs/requirements.md)、[阶段计划](../../docs/development-plan.md)、[UI 审批](../../docs/ui-approval-register.md) 和 [进度](../../docs/progress.md)。本文以下保留公开基线的产品／工程入口；旧 V3 roadmap 的模型编排和历史个案授权不覆盖父工程宪法。此处为本地施工源码，未安装或发布。
+
 本套文档区分当前能力、产品约定、未来探索和工程操作。编写核对基线是公开源码提交 `7f9c6a149e54b2e11ba1318a55a4efef185d9873`、公开 V1.1 构建 `2026.09.11.16`。后续任务应用前核对相关代码和发布状态。2026-09-12已合并Windows源码与治理文档；本次项目记忆归档核对起点为 `3d69b42d9b768ee559ec387faf149ef660adb53d`，不因此改写各历史资料的验证日期。
 
 当前正式版本为 [V2.0 raw 素材层、飞书随手记与 vault-kit（macOS 构建 2026.09.30.4）](releases/v2.0/release-20260930.md)。V2.0 只维护和验收 macOS；Windows 保留在 [V1.3](releases/v1.3/release-20260915.md)。上述历史核对起点及 [Python 3.11 重做](releases/v1.2/python311.md)保留追溯，不能代替最新交付范围。

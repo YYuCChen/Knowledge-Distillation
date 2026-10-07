@@ -1,9 +1,8 @@
 from datetime import datetime
 import sqlite3
-from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from flask import Blueprint, render_template, request, redirect, url_for
+from flask import Blueprint, render_template, request
 from .insights import InsightLibrary
 
 
@@ -12,7 +11,6 @@ def insight_blueprint(store, obsidian_url, publication_file=lambda *args: None):
     library = InsightLibrary(store)
 
     def view(item):
-        item['operation_id'] = uuid4().hex
         item['sources'] = list({p['knowledge_result_id']: dict(p,
             obsidian_url=obsidian_url(p['published_vault'], p['published_path']),
             publication_saved=publication_file(p['published_vault'], p['published_path']) is not None)
@@ -41,24 +39,9 @@ def insight_blueprint(store, obsidian_url, publication_file=lambda *args: None):
 
     @blueprint.post('/insights/<int:version_id>/<action>')
     def mutate(version_id, action):
-        try:
-            if action == 'judge':
-                library.judge(version_id, request.form.get('decision'), request.form.get('text'))
-                state = 'pending'
-            elif action == 'reconsider':
-                library.reconsider(version_id, request.form.get('operation_id'), request.form.get('text', ''))
-                state = 'rethink'
-            elif action == 'idea':
-                library.add_idea(version_id, request.form.get('operation_id'), request.form.get('text', ''))
-                state = 'interesting'
-            else:
-                return '这个操作不可用。', 404
-        except (ValueError, sqlite3.Error):
-            return '本次未能保存，请保留输入后重试；已有记录没有改变。', 409
-        if request.headers.get('X-Requested-With') == 'insight':
-            if action == 'idea':
-                return render_template('insight_card.html', item=view(library.read(version_id)), number=request.form.get('number', ''), expanded=True)
-            return '', 204
-        return redirect(url_for('insights.index', state=state))
+        # V3 keeps the complete V1 history available for reading while the
+        # user-confirmed migration is prepared separately. Keeping the old URL
+        # explicit prevents stale tabs and scripted clients from writing it.
+        return '历史新知已转为只读；已有判断和想法保持不变。', 410
 
     return blueprint

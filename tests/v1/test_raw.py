@@ -19,6 +19,12 @@ from knowledge_distiller.v1.store import Store
 PNG = b'\x89PNG\r\n\x1a\n' + b'synthetic image bytes' * 20
 
 
+def _drop_schema_22_wiki_tables(connection: sqlite3.Connection) -> None:
+    """Remove V3 tables when a latest-schema fixture is rewound to schema 19."""
+    for table in ("wiki_observations", "wiki_task_raw", "wiki_task_batches", "wiki_tasks"):
+        connection.execute(f"DROP TABLE {table}")
+
+
 @pytest.fixture
 def store(tmp_path):
     result = Store(tmp_path / 'isolated.sqlite3')
@@ -290,6 +296,7 @@ def legacy_database(tmp_path, count=3):
     with connect(store.path) as db:
         db.execute('DROP TABLE raw_records')
         db.execute('DROP TABLE raw_counters')
+        _drop_schema_22_wiki_tables(db)
         db.execute('PRAGMA user_version = 19')
     return store, ids
 

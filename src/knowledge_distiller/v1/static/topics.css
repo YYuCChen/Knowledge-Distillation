@@ -23,6 +23,18 @@
 .topic-note time { font-size: 10px; letter-spacing: .5px; }
 .topic-chevron { width: 8px; height: 8px; justify-self: center; margin-top: 24px; }
 .topic-empty { padding: 26px 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.legacy-notice {
+  margin: 0;
+  padding: 12px 16px;
+  display: grid;
+  gap: 3px;
+  border-block: 1px solid var(--soft);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.65;
+  letter-spacing: .45px;
+}
+.legacy-notice strong { color: var(--text); font-weight: 500; }
 .topic-back { display: flex; align-items: center; gap: 10px; }
 .topic-back img { width: 8px; height: 8px; }
 .topic-nav-space { height: 22px; }

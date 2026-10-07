@@ -41,6 +41,12 @@ def knowledge() -> Knowledge:
     )
 
 
+def _drop_schema_22_wiki_tables(connection: sqlite3.Connection) -> None:
+    """Remove V3 tables when a latest-schema fixture is rewound to an older release."""
+    for table in ("wiki_observations", "wiki_task_raw", "wiki_task_batches", "wiki_tasks"):
+        connection.execute(f"DROP TABLE {table}")
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> Store:
     result = Store(tmp_path / "knowledge.sqlite3")
@@ -274,6 +280,7 @@ def test_v11_migration_preserves_item_and_does_not_invent_rejection_reason(tmp_p
             db.execute(f'DROP TABLE {table}')
         db.execute("DROP TABLE IF EXISTS group_decisions")
         db.execute("DROP TABLE IF EXISTS manual_cards")
+        _drop_schema_22_wiki_tables(db)
         db.execute('PRAGMA user_version=11')
         before = dict(db.execute('SELECT * FROM distill_items').fetchone())
     store.initialize()
@@ -300,6 +307,7 @@ def test_v12_dismiss_migration_preserves_existing_failure(tmp_path):
             db.execute(f'DROP TABLE {table}')
         db.execute("DROP TABLE IF EXISTS group_decisions")
         db.execute("DROP TABLE IF EXISTS manual_cards")
+        _drop_schema_22_wiki_tables(db)
         db.execute('PRAGMA user_version=12')
         before = dict(db.execute('SELECT * FROM distill_items').fetchone())
     store.initialize()
@@ -321,6 +329,7 @@ def test_v13_title_migration_preserves_user_state_and_source_fact(tmp_path):
             db.execute(f'DROP TABLE {table}')
         db.execute("DROP TABLE IF EXISTS group_decisions")
         db.execute("DROP TABLE IF EXISTS manual_cards")
+        _drop_schema_22_wiki_tables(db)
         db.execute('PRAGMA user_version=13')
         before = dict(db.execute('SELECT * FROM distill_items').fetchone())
     store.initialize()
@@ -378,6 +387,7 @@ def test_previous_release_schema_16_upgrades_and_keeps_facts(store,tmp_path):
         db.execute('DROP TABLE feishu_action_queue')
         db.execute("DROP TABLE IF EXISTS group_decisions")
         db.execute("DROP TABLE IF EXISTS manual_cards")
+        _drop_schema_22_wiki_tables(db)
         db.execute('PRAGMA user_version=16')
     store.initialize()
     with connect(store.path) as db:
@@ -437,6 +447,7 @@ def test_schema_17_adds_review_state_without_inventing_completion(store, tmp_pat
         db.execute('ALTER TABLE distill_items DROP COLUMN review_revision')
         db.execute("DROP TABLE IF EXISTS group_decisions")
         db.execute("DROP TABLE IF EXISTS manual_cards")
+        _drop_schema_22_wiki_tables(db)
         db.execute('PRAGMA user_version=17')
     store.initialize()
     after = dict(store.item_bundle(item))
