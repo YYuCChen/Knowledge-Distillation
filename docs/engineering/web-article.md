@@ -125,3 +125,23 @@ Luna 真实库受控测试报告 `/tmp/kd-v3-r05-real-tests-20261008.md`，JUnit
 原用例仍保留两段各4次的 fixture，成功分支仍断言8，不改成4；新拒绝分支必须断言固定失败、原件8次、来源两段／抽取一段、明确范围、原件待确认及不 qualified。这是已授权的失败闭环，不是把少了一段的候选当作成功。独立真实库回归另验证表格/图片/元数据/去导航评论、段内重复20次、短相邻重复2次、长非相邻重复8次，以及明确 articleBody／歧义范围的拒绝。
 
 Sol 只在已准备3.11.16诊断 venv 做最窄离线语义诊断：原失败素材当前被拒绝；短相邻2、长非相邻8和段内20保留，表格/图片仍在、噪音不在。结果保存于临时根 `repetition-diagnosis.json`／`repetition-after-diagnosis.json`，不等于 pytest 通过。没有执行 pytest；Luna 下一次使用上述隔离命令，将末尾节点替换为 `tests/v1/test_web_article.py`，执行完整受影响 R05 文件并保留新 JUnit。依赖四文件保持本轮修复前 SHA256 不变。
+
+## R05 打包与合成运行检查（2026-10-08）
+
+两个主应用 spec 精确加入13份非递归 metadata、dateparser.data.date_translation_data 的206模块、jusText 的100 stoplist、tld的两份固定suffix数据及Trafilatura settings.cfg。Babel 数据与pickle依赖沿官方PyInstaller6.22.2 hook，不重复 collect_all；TEI validation DTD不属于当前reader使用范围，未额外打包。Windows独立update-helper和原模型块不变。静态构造这些新增块只验证采集清单，不能替代macOS/Windows原生冻结包验收。
+
+`packaging/r05-notices/manifest.json` 管理本地notice、原许可、Babel Unicode许可、MPL2全文及官方未修改tld源码档。spec先用新 `r05_runtime_probe.validated_notice_datas` 验清单、路径、hash并拒绝未知文件/目录与链接，再映射至包内 `licenses/r05/`；不从私人诊断目录取notice。tld代码选择上游MPL1.1 offer，保留其他offer原文；两份PSL数据另属MPL2。完整tld源码随包 `sources/tld-0.13.2.tar.gz`，SHA256 `d983fa92b9d717400742fca844e29d5e18271079c7bcfabf66d01b39b4a14345`；MPL2官方文本SHA256 `3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04`。所有来源URL与文件hash见manifest/NOTICE。Babel代码和Unicode数据许可均保留；既有字体SOURCES与SIL OFL继续沿原资源机制。
+
+现有 `runtime_probe.check` 仅新增 `r05_runtime` stage与合成检查调用。新probe导入相关依赖前临时拦DNS/socket/urllib/httpx，仅放行它登记的静态MockTransport；成功/异常均finally恢复原函数，不影响后续probe。检查三个gate真实版本、关键资源hash、Babel en/zh/root/global、tld两parser、dateparser中英动态加载、一正常来源与已知长重复拒绝。正文/图片/canonical只来自合成fixture，两个fakeHTTP请求、无真实GET/引用抓取/APP/设置/DB/Vault/模型操作。正常结果文章完整性仍unverified；长重复拒绝保留8次原文、两来源段/一抽取段与source_qualified=false，不把rawHTML当完整snapshot。
+
+冻结调用核对27个实际模块origin与三份metadata origin在包内，允许PyInstaller macOS BUNDLE在Frameworks与Resources间的受控数据布局，拒绝开发目录回退。非冻结调用明确 `scope=installed-dependencies-only`，不能声称产品已验收。完整probe只用于显式串行运行检查，临时网络拦截不适合作为在线业务的并发策略。
+
+Sol未运行pytest/冻结/build。已在fresh固定3.11.16诊断venv做静态语法/采集与一次修正后的真实库合成语义自检通过，network_attempts=[]；不是Luna的pytest结果或Windows原生实测。主控审代码后由Luna运行新 `tests/v1/test_r05_runtime_probe.py` 与现reader文件；冻结候选使用既有 `--data-dir <disposable> --check-runtime <report>`，报告应包含 `checks.r05_runtime`，Windows可附现有 `--check-offline`；R05自身断网不依赖该flag。测试失败与原重复丢失FAILED证据继续保留。静态内部reader尚未接router/intake/pipeline/UI，动态来源限制不变。
+
+### 2026-10-08 probe 独立复验
+
+以上“Sol未运行pytest”是编码阶段历史。主控完整审阅 probe、测试、两个 spec 差异和许可清单，指出 Windows drive 路径缺口后，修复版在路径资格中拒绝冒号与 NUL，加入 `C:/absolute`、`C:drive-relative`、NUL 负例。受控清单只检查 notice root 及其后代，不冒称核验 source 的全部祖先。
+
+Gibbs 自身 JSONL 核验 gpt-5.6-luna/max，使用受控 R05 CPython 3.11.16 venv、env -i、禁插件/缓存、新 source PYTHONPATH，在 `/private/tmp/kd-v3-r05-probe-tests-20261008.ILkR2Y` 仅运行 `tests/v1/test_r05_runtime_probe.py` 一次，exit 0、22 passed、0 failed/error/skipped；没有重复此前 reader 69 项。主控独立读回 22 个 JUnit testcase，SHA256 `88cba74bea438eefe07da73563f027cd00eb698eb604ceb7ab98e81c1d49519a`。
+
+probe 源 SHA256 `a357a3b06363c4a58b88947f3f49a8af0db469d3e0f51ee3535075af4db7e5e1`，测试 `487cf2a8dcfe896cb1d8a145e4194d8a828f44214463a5b04297c0596bf6a751`，执行前后相同。主控另逐字节核验 manifest 中全部 21 个对象、共 22 个真实文件，无缺项/多项/hash 错误。结果只证明真实固定依赖与合成 HTTP 的非冻结检查；未运行新冻结包或全应用 check-runtime，Windows 原生未验，未接产品路由、真实服务、DB/Vault/profile 或凭据，未替换应用或公开发布。
