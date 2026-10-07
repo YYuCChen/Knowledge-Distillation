@@ -269,7 +269,12 @@
                           {% endfor %}
                         </div>
                         {% endif %}
-                        {% if item.confirmation.english_assistance and (not concern.candidates or explanations|length < concern.candidates|length) %}
+                        {% set recovery_layout = item.confirmation.english_assistance and concern.audio_recovery_required|default(false) %}
+                        {% set needs_suggestions = item.confirmation.english_assistance and (not concern.candidates or explanations|length < concern.candidates|length) %}
+                        {% if item.confirmation.english_assistance %}
+                        <div id="operations-{{ key }}" class="confirmation-operations{{ ' has-audio-recovery' if recovery_layout else '' }}{{ ' without-suggestions' if not needs_suggestions else '' }}">
+                        {% endif %}
+                        {% if needs_suggestions %}
                         <form class="suggest-candidates" action="/items/{{ item.id }}/suggestions" method="post" data-suggest-candidates>
                           <input type="hidden" name="token" value="{{ item.confirmation.token }}">
                           <input type="hidden" name="concern_id" value="{{ concern.audio_name }}">
@@ -311,6 +316,7 @@
                           </form>
                           <button class="primary-small" type="submit" form="manual-{{ key }}">提交</button>
                         </span>
+                        {% if item.confirmation.english_assistance %}</div>{% endif %}
                       </div>
                     </div>
                     <button type="button" class="card-chevron" data-card-toggle aria-label="展开或收起疑点 {{ loop.index }}" aria-controls="actions-{{ key }}" aria-expanded="{{ 'true' if error else 'false' }}"><img src="{{ url_for('static', filename='icons/chevron-up.svg') }}" alt=""></button>
