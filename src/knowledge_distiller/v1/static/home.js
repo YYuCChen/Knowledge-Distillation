@@ -110,7 +110,9 @@ function reconcile(current, next) {
     else reconcile(match, incoming);
     used.add(match);
     if (match !== cursor) {
-      if (match.parentNode === current && typeof current.moveBefore === 'function') current.moveBefore(match, cursor);
+      const carriesAudio = match.nodeType === Node.ELEMENT_NODE &&
+        (match.matches('audio') || match.querySelector('audio'));
+      if (!carriesAudio && match.parentNode === current && typeof current.moveBefore === 'function') current.moveBefore(match, cursor);
       else current.insertBefore(match, cursor);
     }
     cursor = serverNode(match.nextSibling);
@@ -131,6 +133,9 @@ function applyPage(html, submittedForm, submittedCard) {
   const anchor = anchors.filter(node => !anchors.some(child => child !== node && node.contains(child))).find(node => page.querySelector(`[data-sync-key="${CSS.escape(node.dataset.syncKey)}"]`));
   const anchorTop = anchor?.getBoundingClientRect().top;
   const active = document.activeElement;
+  const editing = current.contains(active) && active?.matches?.('input:not([type="hidden"]), textarea');
+  const selection = editing && Number.isInteger(active.selectionStart) && Number.isInteger(active.selectionEnd)
+    ? {start: active.selectionStart, end: active.selectionEnd, direction: active.selectionDirection} : null;
   const activeCard = active?.closest?.('[data-sync-key]');
   const activeIndex = anchors.indexOf(activeCard);
   for (const form of current.querySelectorAll('form[id]')) {
@@ -151,6 +156,14 @@ function applyPage(html, submittedForm, submittedCard) {
   for (const form of current.querySelectorAll('[data-group-confirmation]')) {
     const count = form.querySelector('[data-selection-count]');
     if (count) count.textContent = form.querySelectorAll('[name="selected_member_uids"]:checked').length;
+  }
+  if (editing && active.isConnected && current.contains(active) && document.activeElement !== active) {
+    active.focus({preventScroll: true});
+    if (document.activeElement === active && selection &&
+        (active.matches('textarea') || ['text', 'search', 'tel', 'url', 'password'].includes(active.type)) &&
+        typeof active.setSelectionRange === 'function') {
+      active.setSelectionRange(selection.start, selection.end, selection.direction);
+    }
   }
   if (active && !active.isConnected && activeIndex >= 0) {
     const surviving = [...anchors.slice(activeIndex + 1), ...anchors.slice(0, activeIndex).reverse()].find(node => node.isConnected);

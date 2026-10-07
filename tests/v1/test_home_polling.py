@@ -55,6 +55,7 @@ class Element {
  get nextSibling(){if(!this.parentNode)return null;const at=this.parentNode.childNodes.indexOf(this);return this.parentNode.childNodes[at+1]||null}
  get innerHTML(){return 'same-state'} get disabled(){return this.hasAttribute('disabled')} set disabled(value){value?this.setAttribute('disabled',''):this.removeAttribute('disabled')}
  append(child){child.parentNode=this;this.childNodes.push(child)}
+ contains(node){return node===this||this.childNodes.some(child=>child.contains(node))}
  hasAttribute(name){return this._attrs.has(name)} getAttribute(name){return this._attrs.get(name)??null}
  setAttribute(name,value){this._attrs.set(name,String(value))} removeAttribute(name){this._attrs.delete(name)}
  matches(selector){return selector==='form' ? this.nodeName==='FORM' : selector==='audio' ? false : selector==='details' ? false : false}
