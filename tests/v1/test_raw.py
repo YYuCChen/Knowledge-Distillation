@@ -142,8 +142,10 @@ def test_released_image_is_named_not_invented(store):
     snapshot = '正文。'
     material_id = material(store, 'weibo', snapshot, media=[('image-1', PNG)])
     with connect(store.path) as db:
+        guard = db.execute("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='source_media_no_update'").fetchone()[0]
         db.execute('DROP TRIGGER source_media_no_update')
         db.execute("UPDATE source_media SET content=X'' WHERE material_id=?", (material_id,))
+        db.execute(guard)
     record, text, vault = written(store, material_id)
     envelope, body = split(text)
     assert envelope['未保留附件'] == ['image-1'] and '![[' not in body

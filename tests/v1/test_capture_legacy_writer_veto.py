@@ -25,7 +25,7 @@ from knowledge_distiller.v1.ingestion import (
 )
 from knowledge_distiller.v1.intake_binding import build_local_binding
 from knowledge_distiller.v1.store import Store
-from .test_legacy_source_scope import full_state
+from .test_legacy_source_scope import full_state, assert_read_only_catalog_queries
 from .test_source_schema26_compat import historical_module, material
 
 AT = 1790000000000
@@ -133,7 +133,7 @@ def test_real_roots_are_read_only_no_blob_and_check_all_parts(current, root):
             require_legacy_item_sources(db, legacy)
         assert db.total_changes == 0
     unchanged(current, before)
-    assert all(s.lstrip().upper().startswith(('SELECT ', 'PRAGMA USER_VERSION')) for s in statements)
+    assert_read_only_catalog_queries(statements)
     with connect(current[0].path) as db:
         bind_item(db, ('synthetic', 'delivery', 1), bound(current))
     before = checkpoint(current)
@@ -164,7 +164,12 @@ def test_raw_item_gate_reaches_bound_second_part_without_material(current):
 def test_missing_actual_graph_roots_fail_closed(current, entry):
     cid = receive(current, 'root')
     if entry == 'target':
-        current[2].decide(cid, 'annotation', target='missing-actual-message')
+        before = checkpoint(current)
+        with pytest.raises(ValueError, match='^这条随手记前面没有可附言的投递。$'):
+            current[2].decide(cid, 'annotation', target='missing-actual-message')
+        unchanged(current, before)
+        assert current[2].identity(cid) is None
+        return
     before = checkpoint(current)
     with connect(current[0].path) as db:
         with pytest.raises(IngestionError, match='^' + PENDING + '$'):
@@ -396,7 +401,10 @@ def historical_world(tmp_path, version):
     store.set_setting('vault_path', str(vault))
     item, _, _ = material((store, vault, Ingestion(store)), write_raw=False)
     if version == 26:
-        database.initialize(path)  # actual migration, never lowering a current DB
+        historical_module('database', '2fb751a17abb28620d2dee2ebe1086914675eb6a',
+            'e1fc6ae6cd0bfb90b56a4314a53e8c098947f53edef809647f3d03fad82eccf2').initialize(path)
+    with connect(path) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == version
     captures = Captures(store)
     return (store, vault, captures, raw.RawLedger(store)), item
 

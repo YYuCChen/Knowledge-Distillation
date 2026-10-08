@@ -91,15 +91,15 @@ Luna唯一首测报告 `/tmp/kd-v3-r01-tests-20261008.md`：固定3.11.16、fres
 后续限定命令（先由Luna确认自身JSONL配置，不使用父ID）：
 
 ```sh
-cd '/Users/chen./Documents/知识蒸馏器/V3.0开发/source'
+cd "$PROJECT_SOURCE"
 task_test_root=$(mktemp -d /tmp/kd-v3-r01-step1-20261008.XXXXXX)
-PYTHONPATH='/Users/chen./Documents/知识蒸馏器/V3.0开发/source/src' TZ=Asia/Taipei \
-  '/Users/chen./Documents/知识蒸馏器/V1.3开发-20260914/source/.venv/bin/python' \
+PYTHONPATH="$PWD/src" TZ=Asia/Taipei \
+  "$TEST_PYTHON" \
   -m pytest tests/v1/test_ingestion.py tests/v1/test_wiki_outcomes.py \
   --basetemp "$task_test_root/pytest" --junitxml "$task_test_root/results.xml"
 ```
 
-已只读执行该解释器 `-V`，确为Python 3.11.16；未安装依赖，未运行上述命令。root每轮新建，不复用旧证据。解释器在旧source但PYTHONPATH仅指新source；测试重用新source既有test_raw/test_wiki_worker/test_wiki_support的合成helper，不复制正式DB/Vault。不改HOME/CODEX_HOME，不用真实runner/网络/模型。缺依赖或helper接口变化原样报告，不自动安装或删断言。
+公开命令以 `PROJECT_SOURCE` 和 `TEST_PYTHON` 替代设备私有路径；运行前分别指定施工源码目录和已核验的解释器。原检查只读执行该解释器 `-V`，确为Python 3.11.16；未安装依赖，未运行上述命令。root每轮新建，不复用旧证据。解释器在旧source但PYTHONPATH仅指新source；测试重用新source既有test_raw/test_wiki_worker/test_wiki_support的合成helper，不复制正式DB/Vault。不改HOME/CODEX_HOME，不用真实runner/网络/模型。缺依赖或helper接口变化原样报告，不自动安装或删断言。
 
 ## 未接线与共享文件差异登记
 

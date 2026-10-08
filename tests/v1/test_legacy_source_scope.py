@@ -5,6 +5,7 @@ helpers. New bound owners always use the current P2 Store public API.
 """
 import hashlib
 import json
+import re
 import sqlite3
 
 import pytest
@@ -46,6 +47,15 @@ def full_state(store, vault):
     return version, catalog, rows, files
 
 
+def assert_read_only_catalog_queries(statements):
+    # Only the actual finite-catalog ABI reads, never an arbitrary PRAGMA or
+    # an assignment to user_version, are admitted by this query budget.
+    pragma = re.compile(r'PRAGMA\s+(?:USER_VERSION|(?:TABLE_XINFO|FOREIGN_KEY_LIST|'
+                        r'INDEX_LIST|INDEX_XINFO)\("(?:[^"]|"")*"\))\s*;?')
+    assert all(s.lstrip().upper().startswith('SELECT ') or
+               pragma.fullmatch(s.strip().upper()) is not None for s in statements)
+
+
 def read_scope(world, kind, subject, *, item_id=None, refs=(), error=None):
     store, vault = world[:2]
     before = full_state(store, vault)
@@ -67,7 +77,7 @@ def read_scope(world, kind, subject, *, item_id=None, refs=(), error=None):
         else:
             assert require_legacy_sources(db, kind, subject, item_id=item_id, referenced_raw_ids=refs) is None
         assert db.total_changes == 0
-    assert all(s.lstrip().upper().startswith(('SELECT ', 'PRAGMA USER_VERSION')) for s in statements)
+    assert_read_only_catalog_queries(statements)
     assert full_state(store, vault) == before
 
 
@@ -115,10 +125,12 @@ def test_historical_material_scope_and_delegates_preserve_all_state(tmp_path, ve
     world = store, vault, ingestion
     item, mid, record = material(world)
     if version == 26:
-        database.initialize(path)  # actual migration, no re-signing events
+        historical_module('database', '2fb751a17abb28620d2dee2ebe1086914675eb6a',
+            'e1fc6ae6cd0bfb90b56a4314a53e8c098947f53edef809647f3d03fad82eccf2').initialize(path)
     read_scope(world, 'material', mid, item_id=item, refs=(record['raw_id'],))
     before = full_state(store, vault)
     with connect(path) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == version
         assert require_legacy_item(db, item) is None
         assert ingestion._require_legacy_item(db, item) is None
         assert ingestion._require_legacy_sources(db, 'material', mid, item,
@@ -126,13 +138,14 @@ def test_historical_material_scope_and_delegates_preserve_all_state(tmp_path, ve
     assert full_state(store, vault) == before
 
 
-def test_current_capture_scope_is_independent_of_missing_proof_guard(current):
+def test_current27_capture_scope_requires_complete_proof_guard_catalog(current):
     cid = receive(current, 'literal')
     current[2].decide(cid, 'my_thought')
     record = literal_record(current, cid)
     with connect(current[0].path) as db:
         db.execute('DROP TRIGGER ingestion_events_proof_unavailable')
-    read_scope(current, 'capture', cid, refs=(record['raw_id'], record['raw_id']))
+    read_scope(current, 'capture', cid, refs=(record['raw_id'], record['raw_id']),
+               error='candidate_schema_rebuild_required')
     before = full_state(*current[:2])
     ingestion = Ingestion(current[0])
     with connect(current[0].path) as db:
@@ -141,11 +154,17 @@ def test_current_capture_scope_is_independent_of_missing_proof_guard(current):
     assert full_state(*current[:2]) == before
 
 
+@pytest.mark.parametrize('statement', ['PRAGMA user_version=27', 'PRAGMA journal_mode',
+                                      'PRAGMA writable_schema=ON', 'DELETE FROM raw_records'])
+def test_read_only_query_budget_rejects_mutation_and_unknown_pragmas(statement):
+    with pytest.raises(AssertionError):
+        assert_read_only_catalog_queries([statement])
+
+
 @pytest.mark.parametrize('route', ['owner', 'annotation', 'adjacency', 'parts', 'multi_step'])
 def test_actual_bound_owner_and_message_graph_is_pending_without_effects(current, route):
     owner = bound_owner(current)
     bound = receive(current, 'bound')
-    current[2]._link(bound, owner)  # first actual owner link before decision/raw
     current[2].decide(bound, 'my_thought')
     cid = bound
     if route != 'owner':
@@ -160,6 +179,9 @@ def test_actual_bound_owner_and_message_graph_is_pending_without_effects(current
         if route == 'multi_step':
             cid = receive(current, 'third', at=1790007200000)
             current[2].decide(cid, 'annotation', target='current')
+    # Form the actual historical graph before the root acquires a bound owner;
+    # current intake correctly refuses adding adjacency to an already bound root.
+    current[2]._link(bound, owner)
     read_scope(current, 'capture', cid, error='local_source_qualification_pending')
 
 

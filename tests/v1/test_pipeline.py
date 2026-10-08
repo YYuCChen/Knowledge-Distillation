@@ -32,6 +32,14 @@ from knowledge_distiller.v1.database import connect
 from knowledge_distiller.v1.store import Store
 from knowledge_distiller.v1.worker import SingleWorker
 from knowledge_distiller.v1.web import create_app
+from knowledge_distiller.v1.raw import RawLedger
+
+
+def retained_raw(store, item, vault):
+    with connect(store.path) as db:
+        receipt = RawLedger(store).read_item(db, item, vault)
+    assert (vault / receipt.relative_path).is_file()
+    return receipt
 
 
 def write_synthetic_wav(path: Path, seconds: float, *, phase: int = 0) -> Path:
@@ -225,6 +233,7 @@ def distiller(tmp_path: Path, *, concerns=(), reviewer=None):
     store.initialize()
     vault = tmp_path / "vault"
     vault.mkdir()
+    store.set_setting('vault_path', str(vault))
     source = Source(tmp_path)
     model = Model()
     service = Distiller(
@@ -250,17 +259,28 @@ def finish_transcript(service, store, item_id):
     return result
 
 
-def test_pipeline_completes_one_visible_knowledge_result(tmp_path: Path) -> None:
+def test_pipeline_completes_verified_raw_without_old_knowledge(tmp_path: Path, monkeypatch) -> None:
     service, store, _, _, vault = distiller(tmp_path)
     item_id = store.create_item("https://v.douyin.com/a/")
+    complete = store.complete_raw_item
+    observations = []
+    def save(item, target, *, expected_revision):
+        current = store.item_bundle(item)
+        assert current['state'] == 'working' and current['phase'] == 'publishing'
+        assert current['source_fact_id'] and current['confirmation_json'] is None
+        assert current['review_revision'] == expected_revision
+        observations.append(item)
+        return complete(item, target, expected_revision=expected_revision)
+    monkeypatch.setattr(store, 'complete_raw_item', save)
 
     result = service.run(item_id)
 
     row = store.item_bundle(item_id)
     assert result.state == "succeeded"
     assert row["source_fact_id"] is not None
-    assert row["knowledge_result_id"] is not None
-    assert (vault / row["published_path"]).is_file()
+    assert row["knowledge_result_id"] is None and row['published_path'] is None
+    retained_raw(store, item_id, vault)
+    assert observations == [item_id]
 
 
 def test_nonblocking_uncertainty_is_preserved_without_user_gate(tmp_path):
@@ -269,7 +289,8 @@ def test_nonblocking_uncertainty_is_preserved_without_user_gate(tmp_path):
     item = store.create_item('https://v.douyin.com/a/')
     assert service.run(item).state == 'succeeded'
     row = store.item_bundle(item)
-    assert row['confirmation_json'] is None and model.calls == 1
+    assert row['confirmation_json'] is None and model.calls == 0
+    retained_raw(store, item, service.vault)
     uncertainty, = json.loads(row['uncertainties_json'])
     assert uncertainty['text'] == '持续'
     assert row['snapshot'][uncertainty['start']:uncertainty['end']] == '持续'
@@ -297,7 +318,7 @@ def test_meaning_changing_concern_waits_for_exact_human_choice(
     assert queued.state == "queued"
     assert row["state"] == "succeeded"
     assert row["snapshot"].startswith("继续切换")
-    assert (vault / row["published_path"]).is_file()
+    retained_raw(store, item_id, vault)
 
 
 def test_unable_confirmation_records_unknown_without_guessing(tmp_path: Path) -> None:
@@ -363,7 +384,7 @@ def test_confirmation_audio_is_item_scoped_and_never_cached(tmp_path: Path) -> N
     assert client.get(f"/items/{item_id}/confirmation-audio").status_code == 404
 
 
-def test_duplicate_material_reuses_formal_result(tmp_path: Path) -> None:
+def test_duplicate_material_reuses_verified_raw_without_knowledge(tmp_path: Path) -> None:
     service, store, source, model, _ = distiller(tmp_path)
     first = store.create_item("https://v.douyin.com/a/")
     second = store.create_item("https://www.douyin.com/video/123")
@@ -372,21 +393,16 @@ def test_duplicate_material_reuses_formal_result(tmp_path: Path) -> None:
     assert service.run(second).state == "succeeded"
 
     assert source.calls == 2
-    assert model.calls == 1
+    assert model.calls == 0
     assert store.item_bundle(second)["knowledge_result_id"] == store.item_bundle(first)[
         "knowledge_result_id"
     ]
 
-    # The task history remains complete; Home consumes each knowledge only once.
-    from knowledge_distiller.v1.web import _home_context
-    for selected in (None, first, second):
-        context = _home_context(store, selected)
-        assert len(context['recent']) == 1
-        assert context['recent'][0]['id'] == first
-        if selected is not None:
-            assert context['selected']['id'] == first
-    client = create_app(store, service).test_client()
-    assert client.get(f'/?item={second}').text.count('class="knowledge-card"') == 1
+    assert store.item_bundle(first)['knowledge_result_id'] is None
+    assert retained_raw(store, first, service.vault).raw_id == retained_raw(store, second, service.vault).raw_id
+    with connect(store.path) as db:
+        assert db.execute('SELECT count(*) FROM raw_records').fetchone()[0] == 1
+        assert db.execute('SELECT count(*) FROM knowledge_results').fetchone()[0] == 0
 
 
 def test_retry_after_review_failure_reuses_retained_media(tmp_path: Path) -> None:
@@ -421,6 +437,9 @@ def test_worker_restart_resumes_existing_formal_objects_without_duplicates(
     snapshot = "持续切换会带来额外损耗。"
     fact_id = store.establish_source_fact(material_id, SourceFact(snapshot))
     result_id = store.establish_knowledge(fact_id, model.derive(snapshot))
+    # Explicit old publication fixture; restart must retain it byte-for-byte.
+    store.mark_published(result_id, 'historical.md', vault=vault)
+    (vault / 'historical.md').write_bytes(b'synthetic historical knowledge')
 
     restarted = SingleWorker(store, service, idle_seconds=10)
     restarted.start()
@@ -438,6 +457,8 @@ def test_worker_restart_resumes_existing_formal_objects_without_duplicates(
     assert source.calls == 1
     assert model.calls == 1
     assert (vault / row["published_path"]).is_file()
+    assert (vault / row['published_path']).read_bytes() == b'synthetic historical knowledge'
+    retained_raw(store, item_id, vault)
 
 
 def confirmation_token(store: Store, item_id: int) -> str:
@@ -655,14 +676,13 @@ def test_confirmation_failure_rolls_back_fact_and_pending_together(tmp_path: Pat
     item_id = store.create_item("https://v.douyin.com/a/")
     service.run(item_id)
     pending = store.item_bundle(item_id)["confirmation_json"]
+    app = create_app(store, service)
+    app.config["TESTING"] = True
     with connect(store.path) as connection:
         connection.execute("""CREATE TRIGGER reject_confirmation_queue
             BEFORE UPDATE ON distill_items
             WHEN OLD.state = 'waiting_user' AND NEW.state = 'queued'
             BEGIN SELECT RAISE(ABORT, 'simulated queue failure'); END""")
-    app = create_app(store, service)
-    app.config["TESTING"] = True
-
     with pytest.raises(sqlite3.IntegrityError, match="simulated queue failure"):
         app.test_client().post(f"/items/{item_id}/confirm", data={
             "action": "manual", "value": "继续", "token": confirmation_token(store, item_id),
@@ -720,7 +740,7 @@ def test_manual_error_is_local_to_its_card(tmp_path: Path):
     response = create_app(store, service).test_client().post('/items/1/confirm', data={
         'action': 'manual', 'value': ' ', 'token': pending['token'], 'concern_id': pending['concerns'][0]['audio_name']})
     assert response.status_code == 400
-    assert 'placeholder="请输入正确文字"' in response.text
+    assert 'placeholder="请输入确认文字"' in response.text
     assert 'class="form-error"' not in response.text
     assert 'aria-invalid="true"' in response.text
 
@@ -765,7 +785,7 @@ def test_browser_confirmation_keeps_other_drafts_and_does_not_reload(tmp_path: P
             third.locator('[data-card-toggle]').click()
             third.get_by_role('button', name='提交', exact=True).click()
             draft = third.locator('input[name="value"]')
-            expect(draft).to_have_attribute('placeholder', '请输入正确文字')
+            expect(draft).to_have_attribute('placeholder', '请输入确认文字')
             expect(page.locator('.intake .form-error')).to_have_count(0)
             draft.fill('另一疑点草稿')
             cards.nth(1).locator('[data-card-toggle]').click()
@@ -803,7 +823,7 @@ def test_browser_confirmation_keeps_other_drafts_and_does_not_reload(tmp_path: P
 
 
 @pytest.mark.parametrize("sufficient", [True, False])
-def test_unknown_only_publishes_when_remaining_content_is_usable(tmp_path: Path, sufficient: bool):
+def test_user_confirmed_unknown_is_retained_without_old_knowledge_judgment(tmp_path: Path, sufficient: bool):
     from dataclasses import replace
     from knowledge_distiller.v1.knowledge_model import KnowledgeModelError
 
@@ -826,35 +846,17 @@ def test_unknown_only_publishes_when_remaining_content_is_usable(tmp_path: Path,
     result = service.run(item)
     row = store.item_bundle(item)
     assert source.calls == 1
-    if sufficient:
-        assert result.state == 'succeeded'
-        payload = json.loads(row['payload_json'])
-        assert payload['core_points'] == []
-        assert len(payload['other_points']) == 1
-        published = (service.vault / row['published_path']).read_text()
-        assert '## 核心观点' not in published
-        assert '[听辨不清]' in published
-        page = create_app(store, service).test_client().get(f'/?item={item}').text
-        assert 'knowledge-points core-points' not in page
-        assert 'knowledge-points other-points' in page
-    else:
-        assert result.state == 'waiting_user'
-        assert row['source_fact_id'] is None
-        assert row['knowledge_result_id'] is None and row['published_path'] is None
-        prepare_current_confirmation(service, store, item)
-        row = store.item_bundle(item)
-        assert service.confirmation_audio(item).exists()
-        pending = json.loads(row['confirmation_json'])
-        assert '剩余明确内容不足' in pending['concerns'][0]['reason']
-        service.resolve(item, 'manual', '持续', token=pending['token'])
-        finish_transcript(service, store, item)
-        service.knowledge_model = Model()
-        assert service.run(item).state == 'succeeded'
-        assert store.item_bundle(item)['snapshot'] == '持续切换会带来额外损耗。'
-        assert source.calls == 1
+    assert result.state == 'succeeded'
+    assert row['source_fact_id'] and row['knowledge_result_id'] is None and row['published_path'] is None
+    assert service.knowledge_model.calls == 0
+    assert '[听辨不清]' in row['snapshot']
+    uncertainty, = json.loads(row['uncertainties_json'])
+    assert uncertainty['status'] == 'unresolved' and uncertainty['original_text'] == '持续'
+    receipt = retained_raw(store, item, service.vault)
+    assert '[听辨不清]' in (service.vault / receipt.relative_path).read_text()
 
 
-def test_partial_source_retry_preserves_review_without_recapturing(tmp_path: Path):
+def test_partial_source_raw_failure_retries_without_recapturing(tmp_path: Path, monkeypatch):
     from knowledge_distiller.v1.knowledge_model import KnowledgeModelError
 
     class OfflineModel:
@@ -870,13 +872,22 @@ def test_partial_source_retry_preserves_review_without_recapturing(tmp_path: Pat
     service.run(item)
     service.resolve(item, 'unable', token=confirmation_token(store, item))
     assert store.item_bundle(item)["state"] == "queued"
-    pending = store.item_bundle(item)['confirmation_json']
+    from knowledge_distiller.v1 import raw
+    original_place = raw.place
+    def unavailable(*args, **kwargs):
+        raise raw.RawError('raw_readback_missing')
+    monkeypatch.setattr(raw, 'place', unavailable)
     assert service.run(item).state == 'failed'
+    fact = store.item_bundle(item)['source_fact_id']
+    assert fact is not None
+    assert '[听辨不清]' in store.item_bundle(item)['snapshot']
     assert create_app(store, service).test_client().post(f'/items/{item}/retry').status_code == 302
-    assert store.item_bundle(item)['confirmation_json'] == pending
-    assert service.run(item).state == 'failed'
-    assert source.calls == 1 and service.knowledge_model.calls == 2
-    assert store.item_bundle(item)['source_fact_id'] is None
+    monkeypatch.setattr(raw, 'place', original_place)
+    assert service.run(item).state == 'succeeded'
+    assert source.calls == 1 and service.knowledge_model.calls == 0
+    assert store.item_bundle(item)['source_fact_id'] == fact
+    assert store.item_bundle(item)['knowledge_result_id'] is None
+    retained_raw(store, item, service.vault)
 
 
 def test_skipped_concern_tracks_earlier_manual_length_change(tmp_path: Path):
@@ -898,7 +909,7 @@ def test_skipped_concern_tracks_earlier_manual_length_change(tmp_path: Path):
         assert pending['snapshot'][entry['start']:entry['end']] == '[听辨不清]'
 
 
-def test_youtube_uses_same_worker_knowledge_and_source_publication(tmp_path):
+def test_youtube_uses_same_worker_and_verified_raw_without_knowledge(tmp_path):
     from dataclasses import replace
     from knowledge_distiller.v1.youtube import connection_authority
     service, store, _, model, vault = distiller(tmp_path)
@@ -916,8 +927,10 @@ def test_youtube_uses_same_worker_knowledge_and_source_publication(tmp_path):
     assert SingleWorker(store, lambda:service).run_one() == item
     row = store.item_bundle(item)
     assert row['state'] == 'succeeded' and row['source_kind'] == 'youtube'
-    assert row['source_fact_id'] and model.calls == 1
-    assert 'youtube.com/watch?v=aaaaaaaaaaa' in (vault/row['published_path']).read_text()
+    assert row['source_fact_id'] and model.calls == 0
+    receipt = retained_raw(store, item, vault)
+    assert row['knowledge_result_id'] is None and row['published_path'] is None
+    assert 'youtube.com/watch?v=aaaaaaaaaaa' in (vault/receipt.relative_path).read_text()
 
 
 def test_quality_rejection_reason_survives_restart_and_retry_preserves_source(tmp_path):
@@ -930,9 +943,11 @@ def test_quality_rejection_reason_survives_restart_and_retry_preserves_source(tm
             return parse_knowledge(snapshot, json.dumps({'qualified': False, 'rejection_reason': reason}))
 
     service, store, source, model, _ = distiller(tmp_path)
-    service.knowledge_model = Rejected()
     item = store.create_item('https://v.douyin.com/a/')
-    assert service.run(item).state == 'failed'
+    captured = source.capture('https://v.douyin.com/a/', tmp_path / 'historical-capture')
+    mid = store.attach_material(item, captured)
+    store.establish_source_fact(mid, SourceFact('持续切换会带来额外损耗。'))
+    store.mark_failed(item, 'distilling', 'knowledge_not_qualified', rejection_reason=reason)
     original = store.item_bundle(item)
     assert original['source_fact_id'] is not None
     assert original['knowledge_result_id'] is None
@@ -946,10 +961,11 @@ def test_quality_rejection_reason_survives_restart_and_retry_preserves_source(tm
     assert '重新提炼' in page
     reopened.retry_item(item)
     assert reopened.item_bundle(item)['rejection_reason'] is None
-    service.knowledge_model = model
+    service.knowledge_model = Rejected()
     assert service.run(item).state == 'succeeded'
     assert source.calls == 1
     assert reopened.item_bundle(item)['source_fact_id'] == original['source_fact_id']
+    retained_raw(store, item, service.vault)
 
 
 def test_dismiss_failed_item_hides_it_durably_without_deleting_source(tmp_path):
@@ -959,10 +975,12 @@ def test_dismiss_failed_item_hides_it_durably_without_deleting_source(tmp_path):
         def derive(self, snapshot, uncertainties=()):
             raise KnowledgeModelError('knowledge_not_qualified', rejection_reason='仅描述外观，缺少可提炼观点。')
 
-    service, store, _, _, _ = distiller(tmp_path)
-    service.knowledge_model = Rejected()
+    service, store, source, _, _ = distiller(tmp_path)
     item = store.create_item('https://v.douyin.com/a/')
-    assert service.run(item).state == 'failed'
+    captured = source.capture('https://v.douyin.com/a/', tmp_path / 'historical-capture')
+    mid = store.attach_material(item, captured)
+    store.establish_source_fact(mid, SourceFact('持续切换会带来额外损耗。'))
+    store.mark_failed(item, 'distilling', 'knowledge_not_qualified', rejection_reason='仅描述外观，缺少可提炼观点。')
     original = dict(store.item_bundle(item))
     client = create_app(store, service).test_client()
     assert '放弃' in client.get('/').text

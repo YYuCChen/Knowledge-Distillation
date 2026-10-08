@@ -749,7 +749,7 @@ class Store:
                       'attempt': marker['attempt'] + 1, 'outcome': 'queued'}
             _save_preparation(db, row, pending, 'queued', None, marker)
 
-    def claim_next_work(self, *, item_guard=None):
+    def claim_next_work(self, *, item_guard=None, deferred_items=()):
         from .raw import LegacySourceVeto
         if item_guard is not None and not callable(item_guard):
             raise TypeError('item_guard must be callable')
@@ -766,6 +766,14 @@ class Store:
                 SELECT 'collection',operation_id,queued_at FROM collection_operations WHERE state='queued'
                 ) ORDER BY queued_at,id,kind""")
             for row in rows:
+                if row['kind'] == 'item' and row['id'] in deferred_items:
+                    continue
+                if row['kind'] == 'collection' and deferred_items:
+                    pending = [r[0] for r in db.execute('''SELECT i.item_id FROM distill_items i
+                        JOIN collection_members cm USING(item_id)
+                        WHERE cm.operation_id=? AND i.state='queued' ''', (row['id'],))]
+                    if pending and all(item in deferred_items for item in pending):
+                        continue
                 if row['kind'] == 'item' and item_guard is not None:
                     try:
                         item_guard(db, row['id'])
@@ -1031,6 +1039,57 @@ class Store:
 
     def mark_succeeded(self, item_id: int) -> None:
         self._set_item(item_id, state="succeeded", phase="done", confirmation_json=None)
+
+    def complete_raw_item(self, item_id: int, vault=None, *, expected_revision=None):
+        """The raw writer owns proof and commit; callers cannot supply a receipt."""
+        from .raw import RawLedger
+        return RawLedger(self).complete_item(item_id, vault, expected_revision=expected_revision)
+
+    def retain_partial_source(self, item_id, expected_revision, expected_confirmation, fact):
+        """Consume only the exact legacy user-decided unknown-source revision."""
+        from .raw import _legacy_item_gate
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            _legacy_item_gate(db, item_id)
+            row = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+            if (row is None or row['state'] != 'working' or row['review_revision'] != expected_revision
+                    or row['confirmation_json'] != expected_confirmation or expected_confirmation is None):
+                raise SourceReviewConflict('source_review_revision_conflict')
+            pending = json.loads(expected_confirmation)
+            if (pending.get('group_confirmation_contract') or pending.get('concerns')
+                    or not pending.get('deferred_concerns') or pending['snapshot'] != fact.snapshot):
+                raise SourceReviewConflict('source_review_revision_conflict')
+            _establish_source_fact(db, row['material_id'], fact)
+            db.execute('''UPDATE distill_items SET confirmation_json=NULL,review_revision=review_revision+1,
+                updated_at=? WHERE item_id=?''', (_now(), item_id))
+            _sync_manual_cards(db, item_id)
+
+    def defer_raw_item(self, item_id: int):
+        """Retain the acquired source while a different Vault writer is active."""
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            changed = db.execute('''UPDATE distill_items SET state='queued',queued_at=?,updated_at=?
+                WHERE item_id=? AND state='working' AND confirmation_json IS NULL
+                AND dismissed_at IS NULL AND EXISTS(SELECT 1 FROM source_facts sf
+                    WHERE sf.material_id=distill_items.material_id)''', (_now(), _now(), item_id)).rowcount
+            return changed == 1
+
+    def _finish_raw_item(self, db, item_id, owner):
+        from .database import RAW_OWNER_COLUMNS
+        from .raw import RawError
+        if not db.in_transaction or owner['item_id'] != item_id:
+            raise RawError('raw_terminal_stale')
+        if owner['state'] == 'raw_saved':
+            return  # Existing durable terminals must never be reopened.
+        if owner['state'] == 'succeeded' and owner['phase'] == 'done':
+            return  # Proof was refreshed; the existing terminal is unchanged.
+        predicate = ' AND '.join(f'"{k}" IS ?' for k in RAW_OWNER_COLUMNS)
+        changed = db.execute(f'''UPDATE distill_items SET state='succeeded',phase='done',
+            error_code=NULL,rejection_reason=NULL,confirmation_json=NULL,updated_at=?
+            WHERE {predicate}''', (_now(), *(owner[k] for k in RAW_OWNER_COLUMNS))).rowcount
+        if changed != 1:
+            raise RawError('raw_terminal_stale')
+        _sync_manual_cards(db, item_id)
 
     def attach_material(self, item_id: int, material: CapturedMaterial) -> int:
         from .source_versions import snapshot_key, SourceVersionError

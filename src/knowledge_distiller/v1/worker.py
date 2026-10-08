@@ -37,6 +37,7 @@ class SingleWorker:
         self._thread: threading.Thread | None = None
         self._activity = threading.Lock()
         self._update_reserved = False
+        self._raw_deferred = {}
 
     def reserve_for_update(self) -> bool:
         """Close the claim race before permitting the desktop to quit for update."""
@@ -122,7 +123,10 @@ class SingleWorker:
         """Claim and finish while the caller holds the update activity lock."""
         if self._stopping.is_set():
             return None
-        work = self.store.claim_next_work(item_guard=raw._legacy_item_gate)
+        now = time.monotonic()
+        self._raw_deferred = {item: until for item, until in self._raw_deferred.items() if until > now}
+        work = self.store.claim_next_work(item_guard=raw._legacy_item_gate,
+                                          deferred_items=self._raw_deferred)
         if work is None:
             return None
         kind, item_id = work
@@ -162,7 +166,9 @@ class SingleWorker:
             from .database import connect
             try:
                 service = self.distiller() if callable(self.distiller) else self.distiller
-                Collections(self.store).run(item_id, service)
+                deferred = Collections(self.store).run(item_id, service, deferred_items=self._raw_deferred)
+                if deferred is not None:
+                    self._raw_deferred[deferred] = time.monotonic() + max(1.0, self.idle_seconds)
             except Exception as error:
                 with connect(self.store.path) as db:
                     db.execute("UPDATE collection_operations SET state='failed',error_code='collection_processing_failed' WHERE operation_id=?", (item_id,))
@@ -177,6 +183,10 @@ class SingleWorker:
             # A real owner change after claim does not undo that durable claim.
             logger.info('Item %s legacy qualification deferred', item_id)
         except Exception as error:
+            if isinstance(error, BlockingIOError) and error.args == ('vault_busy',):
+                if self.store.defer_raw_item(item_id):
+                    self._raw_deferred[item_id] = time.monotonic() + max(1.0, self.idle_seconds)
+                return item_id
             # Isolate one failed item, not a failed database or queue claim.
             # Do not log provider exception text, which may contain private data.
             row = self.store.item_bundle(item_id)

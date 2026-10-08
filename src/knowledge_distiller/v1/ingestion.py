@@ -13,7 +13,8 @@ import yaml
 from . import raw
 from .captures import Captures
 from .database import (connect, INGESTION_CONTRACT, RAW_OWNER_COLUMNS,
-                       SUBMITTED_BINDING_COLUMNS, source_schema_inventory)
+                       SUBMITTED_BINDING_COLUMNS, source_schema_inventory,
+                       _source_identity_schema_inventory)
 from .wiki_lock import VaultWriteLock, session_fd_holds_lock
 
 CONTRACT = INGESTION_CONTRACT
@@ -33,11 +34,21 @@ def encoded(value) -> str:
                       separators=(",", ":"), allow_nan=False)
 
 
-def require_legacy_item(db, item_id):
+def _legacy_schema_version(db):
     version = db.execute('PRAGMA user_version').fetchone()[0]
-    if version not in (25, 26):
+    if version not in (25, 26, 27):
         raise IngestionError('candidate_schema_rebuild_required')
-    if version == 26:
+    if version == 27:
+        try:
+            _source_identity_schema_inventory(db)
+        except ValueError:
+            raise IngestionError('candidate_schema_rebuild_required') from None
+    return version
+
+
+def require_legacy_item(db, item_id):
+    version = _legacy_schema_version(db)
+    if version in (26, 27):
         row = db.execute('SELECT binding_scope FROM submitted_sources WHERE item_id=?', (item_id,)).fetchone()
         frozen = db.execute("""SELECT 1 FROM ingestion_events WHERE item_id=? AND kind='raw_pending'
             AND json_extract(detail_json,'$.code')='intake_frozen' LIMIT 1""", (item_id,)).fetchone()
@@ -71,8 +82,7 @@ def require_legacy_item_sources(db, item_id, *, referenced_raw_ids=()):
 
 
 def _require_legacy_graph(db, *, subjects=(), messages=(), items=(), referenced_raw_ids=()):
-    if db.execute('PRAGMA user_version').fetchone()[0] not in (25, 26):
-        raise IngestionError('candidate_schema_rebuild_required')
+    _legacy_schema_version(db)
     if type(referenced_raw_ids) not in (tuple, list):
         raise IngestionError('local_source_qualification_pending')
     subjects, messages, items = list(subjects), list(messages), list(items)

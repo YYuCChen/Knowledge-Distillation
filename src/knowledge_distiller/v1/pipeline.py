@@ -21,7 +21,6 @@ from .source_files import SourceCopyError
 from .file_sources import parse_submitted_source
 from .source_parsing import SourceReadError
 from .knowledge_model import AnthropicKnowledgeModel, KnowledgeModelError
-from .publisher import PublicationState, publish
 from .reviewer import RecordedReviewer
 from .store import Store, SourceReviewConflict
 from .source_versions import SourceVersionError
@@ -33,7 +32,9 @@ from .zhihu import ZhihuSourceError, zhihu_identity
 from .weibo import WeiboSourceError, weibo_identity
 from .ocr import OcrError, default_ocr_runner
 from .image_source import image_source_fact
-from .raw import LegacySourceVeto
+from .raw import LegacySourceVeto, RawError
+from .ingestion import IngestionError
+from .web_article import WebArticleSource, WebReadError
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ class Distiller:
         weibo_source=None,
         ocr=None,
         documents=None,
+        web_article_source=None,
     ):
         self.store = store
         self.source = source
@@ -85,6 +87,7 @@ class Distiller:
         self.vault = vault
         self.ocr = ocr if ocr is not None else default_ocr_runner()
         self.documents = documents
+        self.web_article_source = web_article_source or WebArticleSource()
 
     def run(self, item_id: int) -> DistillResult:
         try:
@@ -92,9 +95,6 @@ class Distiller:
         except LegacySourceVeto:
             return DistillResult(item_id, self._item(item_id)['state'])
         row = self._item(item_id)
-        if row["published_path"] is not None:
-            self.store.mark_succeeded(item_id)
-            return DistillResult(item_id, "succeeded")
         try:
             if row["source_fact_id"] is None:
                 self._establish_source(item_id, row)
@@ -110,13 +110,15 @@ class Distiller:
                 return DistillResult(item_id, self._item(item_id)['state'])
             self.store.mark_failed(item_id, self._item(item_id)["phase"], "source_copy_unavailable")
             return DistillResult(item_id, "failed")
-        except (OcrError, SourceVersionError, ChromeSessionError, DouyinSourceError, YouTubeSourceError, BilibiliSourceError, XiaohongshuSourceError, XPostSourceError, ZhihuSourceError, WeiboSourceError, KnowledgeModelError, DistillError) as error:
+        except (OcrError, SourceVersionError, ChromeSessionError, DouyinSourceError, YouTubeSourceError, BilibiliSourceError, XiaohongshuSourceError, XPostSourceError, ZhihuSourceError, WeiboSourceError, WebReadError, KnowledgeModelError, DistillError, RawError, IngestionError) as error:
             try:
                 self._legacy_gate(item_id)
             except LegacySourceVeto:
                 return DistillResult(item_id, self._item(item_id)['state'])
             if self._item(item_id)["state"] == "waiting_user":
                 return DistillResult(item_id, "waiting_user")
+            if isinstance(error, RawError) and error.args == ('raw_terminal_stale',):
+                return DistillResult(item_id, self._item(item_id)['state'])
             if isinstance(error, OcrError) and hasattr(error, 'partial_review'):
                 from .local_records import write_record
                 directory = self.runtime_root / "items" / str(item_id)
@@ -912,15 +914,16 @@ class Distiller:
         self.store.mark_working(item_id, "collecting")
         work_dir = self.runtime_root / "items" / str(item_id)
         captured = None
-        from .intake import platform_for_url
+        from .intake import source_route
         from .captures import FeishuVoiceSource, is_voice_url
-        kind = 'feishu_voice' if is_voice_url(row['submitted_url']) else platform_for_url(row['submitted_url'])
+        kind = 'feishu_voice' if is_voice_url(row['submitted_url']) else source_route(row['submitted_url'])
         if kind is None:
             raise DistillError('source_platform_unsupported')
         source = {'douyin': self.source, 'youtube': self.youtube_source,
                   'xiaohongshu': self.xiaohongshu_source, 'x': self.xpost_source,
                   'zhihu': self.zhihu_source, 'weibo': self.weibo_source,
                   'bilibili': self.bilibili_source,
+                  'web_article': self.web_article_source,
                   'feishu_voice': FeishuVoiceSource(self.store) if kind == 'feishu_voice' else None}.get(kind)
         if source is None:
             raise DistillError(kind + '_runtime_unavailable')
@@ -936,6 +939,8 @@ class Distiller:
             metadata = json.loads(row["metadata_json"])
             if not isinstance(metadata, dict):
                 raise DistillError("material_metadata_invalid")
+            if kind == 'web_article':
+                source_options = {'members': self.store.media_members(row['material_id'])}
             captured = source.reuse_retained(
                 source_key=row["source_key"],
                 submitted_url=row["submitted_url"],
@@ -951,6 +956,15 @@ class Distiller:
         material_id = self.store.attach_material(item_id, captured)
         existing = self._item(item_id)
         if existing["source_fact_id"] is not None:
+            return
+
+        if kind == 'web_article':
+            review_revision = existing['review_revision']
+            fact = SourceFact(captured.metadata['original_description'])
+            lineage = captured.metadata['web_lineage']
+            self.store.commit_source_review(item_id, review_revision, captured.source_key,
+                {'schema': 1, 'snapshot': fact.snapshot, 'uncertainties': (), 'lineage': lineage},
+                fact=fact, lineage=lineage)
             return
 
         if kind in {'douyin', 'xiaohongshu', 'x', 'zhihu', 'weibo'} and captured.metadata.get('note_kind') == 'normal':
@@ -1098,24 +1112,16 @@ class Distiller:
         self._legacy_gate(item_id)
         if pending.get('group_confirmation_contract'):
             raise DistillError('group_unresolved_members_require_review')
-        # Judge the remaining clear content before freezing an incomplete SourceFact.
-        self.store.mark_working(item_id, "distilling")
-        candidate = SourceFact(pending['snapshot'], tuple(pending['uncertainties']))
+        expected_confirmation = row['confirmation_json']
+        self.store.mark_working(item_id, 'reviewing')
+        row = self._item(item_id)
+        # Explicit unable decisions retain their unknown spans; saving these
+        # source facts does not assert completeness or generate old knowledge.
+        fact = SourceFact(pending['snapshot'], tuple(pending['uncertainties'] + pending['resolved']))
         if row['source_kind'] == 'xiaohongshu':
             from .xiaohongshu import native_video_fact
-            candidate = native_video_fact(json.loads(row['metadata_json']), candidate)
-        try:
-            knowledge = self._knowledge_for_item(item_id).derive(candidate.snapshot, candidate.uncertainties)
-        except KnowledgeModelError as error:
-            if error.args != ("knowledge_not_qualified",):
-                raise
-            concerns = [{**c, "reason": "剩余明确内容不足以形成可靠知识，请补充此处文字或重新识别。"}
-                        for c in pending["deferred_concerns"]]
-            self.store.mark_waiting(item_id, {**pending, "concerns": concerns, "review_required": True})
-            return
-        fact = SourceFact(pending["snapshot"], tuple(pending["uncertainties"] + pending["resolved"]))
-        fact_id = self.store.establish_source_fact(row["material_id"], fact)
-        self.store.establish_knowledge(fact_id, knowledge)
+            fact = native_video_fact(json.loads(row['metadata_json']), fact)
+        self.store.retain_partial_source(item_id, row['review_revision'], expected_confirmation, fact)
         self._remove_confirmation_audio(item_id, pending["deferred_concerns"])
 
     def _finish(self, item_id: int) -> DistillResult:
@@ -1123,66 +1129,25 @@ class Distiller:
         row = self._item(item_id)
         if row["source_fact_id"] is None:
             return DistillResult(item_id, "waiting_user")
-        if row["source_kind"] == "feishu_voice":
-            # A voice quick note ends as the user's own words in raw/自述, not as knowledge.
-            self.store.mark_succeeded(item_id)
-            try:
-                from .captures import Captures
-                Captures(self.store).write_ready()
-            except LegacySourceVeto:
-                raise
-            except Exception as error:
-                import logging
-                logging.getLogger(__name__).warning('capture raw deferred (%s)', type(error).__name__)
-            return DistillResult(item_id, "succeeded")
-        self._write_raw(row)
         if row["knowledge_result_id"] is None:
             if self.store.prepare_image_review(item_id):
                 row = self._item(item_id)
                 if row['state'] == 'waiting_user':
                     return DistillResult(item_id, 'waiting_user')
-            self.store.mark_working(item_id, "distilling")
-            try:
-                members = self.store.media_members(row['material_id']) if row['source_kind'] in {'xiaohongshu', 'x', 'weibo'} else []
-                if any(m['mime_type'].startswith('image/') for m in members) and 'image_ocr' not in json.loads(row['lineage_json']):
-                    raise DistillError('ocr_legacy_source_requires_review')
-                knowledge = self._knowledge_for_item(item_id).derive(
-                    row["snapshot"], json.loads(row["uncertainties_json"])
-                )
-            except KnowledgeModelError:
-                raise
-            self.store.establish_knowledge(int(row["source_fact_id"]), knowledge)
-        self.store.mark_working(item_id, "publishing")
-        if self.vault is None:
-            raise DistillError("vault_not_configured")
-        try:
-            publication = publish(self.store, item_id, self.vault)
-        except ValueError as error:
-            raise DistillError(str(error)) from error
-        if publication.state is PublicationState.CONFLICT:
-            raise DistillError("obsidian_target_conflict")
-        self.store.mark_succeeded(item_id)
-        return DistillResult(item_id, "succeeded")
+            members = self.store.media_members(row['material_id']) if row['source_kind'] in {'xiaohongshu', 'x', 'weibo'} else []
+            if any(m['mime_type'].startswith('image/') for m in members) and 'image_ocr' not in json.loads(row['lineage_json']):
+                raise DistillError('ocr_legacy_source_requires_review')
+        if row['confirmation_json'] is not None:
+            return DistillResult(item_id, 'waiting_user')
+        if row['state'] in {'queued', 'working'}:
+            self.store.mark_working(item_id, 'publishing')
+            row = self._item(item_id)
+        self.store.complete_raw_item(item_id, self.vault, expected_revision=row['review_revision'])
+        return DistillResult(item_id, self._item(item_id)['state'])
 
     def _write_raw(self, row) -> None:
-        """The finished material goes to raw/ (raw-interface §5.1) before any
-        distillation, so a knowledge failure never keeps it out. A raw failure
-        is recorded for backfill and never blocks the V1 note."""
-        self._legacy_gate(row['item_id'])
-        try:
-            from .raw import RawLedger
-            from .captures import Captures
-            ledger = RawLedger(self.store)
-            record = ledger.ensure_material(int(row['material_id']),
-                                            **Captures(self.store).material_hints(row['item_id']))
-            if record is not None and record['written_at'] is None:
-                ledger.write(record, self.vault)
-        except LegacySourceVeto:
-            raise
-        except Exception as error:
-            import logging
-            logging.getLogger(__name__).warning('raw deferred for material %s (%s)',
-                                                row['material_id'], type(error).__name__)
+        """Compatibility entry point uses the same reliable raw-only terminal."""
+        self.store.complete_raw_item(row['item_id'], self.vault, expected_revision=row['review_revision'])
 
     def _knowledge_for_item(self, item_id):
         scope = getattr(self.knowledge_model, 'for_item', None)

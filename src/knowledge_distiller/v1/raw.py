@@ -37,6 +37,9 @@ CHANNELS = {
 }
 EXTENSIONS = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
               'image/bmp': '.bmp', 'image/tiff': '.tiff', 'image/heic': '.heic'}
+ORIGINAL_EXTENSIONS = {'text/html': '.html', 'application/xhtml+xml': '.xhtml',
+    'text/markdown': '.md', 'application/xml': '.xml', 'text/xml': '.xml',
+    'application/octet-stream': '.bin'}
 MIGRATION_ACQUISITION = 'V1 数据库存量导出'
 
 
@@ -255,6 +258,18 @@ def body(snapshot: str, lineage, raw_id: str, members) -> tuple[list[str], tuple
     for member in members:
         if member.startswith('image-') and member not in placed:
             image(member)
+        elif member not in placed:
+            # Original non-image members use the same immutable attachment
+            # manifest and byte readback. Never render HTML as raw Markdown.
+            media = members[member]
+            if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', member) is None:
+                raise RawError('raw_path_unsafe')
+            if not media['content_available']:
+                missing.append(member)
+                continue
+            suffix = ORIGINAL_EXTENSIONS.get(media['mime_type'],
+                                             EXTENSIONS.get(media['mime_type'], '.bin'))
+            attachments.append(Attachment(member, member + suffix, media['sha256'], media['mime_type']))
     return lines, tuple(attachments), missing
 
 
@@ -493,6 +508,38 @@ def app_version() -> str:
         return '未记录'
 
 
+def _item_ingestion(store):
+    """Reuse canonical proof for old owners without rewriting their contract."""
+    from .ingestion import Ingestion, IngestionError
+
+    class LegacyItemIngestion(Ingestion):
+        def _owner(self, material_id, item_id=None):
+            if item_id is None:
+                return super()._owner(material_id, item_id)
+            item = self.store.item_bundle(item_id)
+            if item is None or item['ingestion_contract'] != 'legacy':
+                return super()._owner(material_id, item_id)
+            with connect(self.path) as db:
+                self._require_writer_sources(db, 'material', material_id, item_id)
+            if (item['material_id'] != material_id or item['confirmation_json'] is not None
+                    or item['dismissed_at'] is not None or item['state'] == 'failed'):
+                raise IngestionError('source_not_ready')
+            return item_id
+
+        def _material_body(self, db, record, vault, adjacency):
+            if record['origin'] != 'migration':
+                return super()._material_body(db, record, vault, adjacency)
+            # Adoption validates the exact reviewed migration projection and
+            # retained bytes, not an app-rendered replacement of the old raw.
+            from .raw_migration import _render, _existing
+            if adjacency:
+                raise IngestionError('capture_adjacency_mismatch')
+            document = _render(db, record['subject_id'], record['raw_id'])
+            _existing(db, vault, record['subject_id'], record['raw_id'], document, record)
+
+    return LegacyItemIngestion(store)
+
+
 class RawLedger:
     def __init__(self, store, *, version: str | None = None):
         self.store = store
@@ -519,6 +566,84 @@ class RawLedger:
             return tuple(db.execute('''SELECT * FROM raw_records r WHERE subject_kind=? AND subject_id=?
                 AND NOT EXISTS(SELECT 1 FROM raw_records n WHERE n.supersedes=r.raw_id)
                 ORDER BY raw_id''', (subject_kind, subject_id)))
+
+    def _item_subject(self, db, item_id):
+        _legacy_item_gate(db, item_id)
+        item = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+        if (item['material_id'] is None or item['confirmation_json'] is not None
+                or item['dismissed_at'] is not None or item['state'] == 'failed'
+                or db.execute('SELECT 1 FROM source_facts WHERE material_id=?',
+                              (item['material_id'],)).fetchone() is None):
+            raise RawError('source_not_ready')
+        captures = db.execute('''SELECT c.capture_id,e.result FROM capture_state s
+            JOIN captures c USING(capture_id)
+            LEFT JOIN capture_identity_events e ON e.capture_id=c.capture_id
+              AND e.event_id=(SELECT MAX(n.event_id) FROM capture_identity_events n
+                              WHERE n.capture_id=c.capture_id)
+            WHERE s.item_id=?''', (item_id,)).fetchall()
+        if len(captures) > 1:
+            raise RawError('raw_terminal_owner_ambiguous')
+        if captures:
+            if captures[0]['result'] in {'my_thought', 'annotation'}:
+                return 'capture', captures[0]['capture_id']
+            if captures[0]['result'] != 'third_party':
+                raise RawError('capture_identity_pending')
+        return 'material', item['material_id']
+
+    def read_item(self, db, item_id, vault):
+        """Fresh source/context/body/attachment proof; no writes or repair."""
+        if vault is None or not Path(vault).is_dir():
+            raise RawError('vault_unavailable')
+        ingestion = _item_ingestion(self.store)
+        kind, subject_id = self._item_subject(db, item_id)
+        ingestion._require_writer_sources(db, kind, subject_id, item_id)
+        state = ingestion._source_state(db, kind, subject_id)
+        record = db.execute('SELECT * FROM raw_records WHERE raw_id=?',
+                            (state['heads'][0]['raw_id'],)).fetchone()
+        binding = ingestion._binding(db, record, item_id)
+        ingestion._validate_context(record, Path(vault), item_id)
+        # This result is an observation, never a caller-supplied completion token.
+        return ingestion._readback(db, record, Path(vault), binding)
+
+    def complete_item(self, item_id, vault=None, *, expected_revision=None):
+        """Write/read back under the Vault lock, then atomically finish this owner."""
+        from .database import RAW_OWNER_COLUMNS
+        from .wiki_lock import VaultWriteLock
+        if (type(item_id) is not int or item_id <= 0 or (expected_revision is not None
+                and (type(expected_revision) is not int or expected_revision < 0))):
+            raise RawError('raw_terminal_input_invalid')
+        vault = vault or self.vault()
+        if vault is None or not Path(vault).is_dir():
+            raise RawError('vault_unavailable')
+        ingestion = _item_ingestion(self.store)
+        ingestion.initialize()
+        with VaultWriteLock.acquire(vault) as lock:
+            with connect(self.store.path) as db:
+                kind, subject_id = self._item_subject(db, item_id)
+                item = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+                owner = {k: item[k] for k in RAW_OWNER_COLUMNS}
+                if (owner['state'] not in {'working', 'succeeded', 'raw_saved'}
+                        or (expected_revision is not None and owner['review_revision'] != expected_revision)):
+                    raise RawError('raw_terminal_stale')
+            if owner['state'] != 'raw_saved':
+                if kind == 'capture':
+                    ingestion._capture(subject_id, lock.vault, lock)
+                else:
+                    ingestion._material(subject_id, lock.vault, item_id=item_id, lock=lock)
+            with connect(self.store.path) as db:
+                db.execute('BEGIN IMMEDIATE')
+                current = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+                if current is None or any(current[k] != owner[k] for k in RAW_OWNER_COLUMNS):
+                    raise RawError('raw_terminal_stale')
+                if self._item_subject(db, item_id) != (kind, subject_id):
+                    raise RawError('source_binding_changed')
+                state = ingestion._source_state(db, kind, subject_id)
+                record = db.execute('SELECT * FROM raw_records WHERE raw_id=?',
+                                    (state['heads'][0]['raw_id'],)).fetchone()
+                binding = ingestion._binding(db, record, item_id)
+                receipt = ingestion._insert_proven(db, record, item_id, 'raw_verified', binding, lock)
+                self.store._finish_raw_item(db, item_id, owner)
+            return receipt
 
     def ensure_material(self, material_id: int, *, adjacency=None, reserved=None, collected_ms=None,
                         supersedes=None, check_source=None):
