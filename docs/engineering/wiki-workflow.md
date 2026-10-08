@@ -1,10 +1,10 @@
 # Wiki 独立任务与 Vault 写协议
 
-本文定义 V3 wiki 维护任务的持久边界、隔离 staging、独立 runner、批次状态、共享写锁和 Vault 工具包所有权。阶段 1 建立持久协议；阶段 2 建立合成环境下的 runner、发布和恢复边界；阶段 3 接入可信 helper、应用生命周期和只读状态观测。这些阶段都不启动正式任务、不升级用户 Vault，也不读取正式数据。
+当前实现核对：2026-10-09，Asia/Taipei，源码 HEAD `962d0c6`。本文定义 V3 wiki 维护任务的持久边界、隔离 staging、typed runner、批次状态、共享写锁和 Vault 工具包所有权。`WikiWorkflow.submit_all`、`WikiWorker._run_typed_locked`、来源／四维／R14 支持检查、journal 发布及 `accept_published_batch` 已有实际应用调用链；旧 SQL derive 不是此链。阶段 1–4 的合成证据是历史记录，不能替代当前验收。按主控当前证据，真实 accepted 仍为 0，发布未完成；本次文档维护未读取正式数据、未运行重复测试。
 
 ## 1. 任务边界
 
-Schema 22 在 V1 数据库中增加三张任务表：
+当前数据库为 Schema 27；以下 Schema 22／23 描述为表的历史引入阶段。Schema 22 在 V1 数据库中增加三张任务表：
 
 - `wiki_tasks` 保存 Vault 稳定键、请求类型、触发入口、backend/model/effort、工具包版本与清单摘要、冻结边界摘要、状态、计数、固定错误码、恢复状态和程序时间；
 - `wiki_task_batches` 保存批次号、条目数、状态和固定错误码；
@@ -12,7 +12,9 @@ Schema 22 在 V1 数据库中增加三张任务表：
 
 Schema 23 增加 `wiki_observations`。它为每个 Vault 保存最近一次后台扫描的 pending/candidate 计数、程序时间、关联任务和固定错误码；未知计数写 `NULL`。观测不保存正文，也不是任务冻结或发布的权威边界。首次启动、任务结束和显式刷新会唤醒后台有界扫描；首页 GET 只读这张表和任务表，不执行网络探针或全 Vault 扫描。
 
-这些表不保存 raw 正文、页面正文、标题、用户名、token、任意异常字符串或模型输出。`wiki_task_raw` 一经写入不可修改、删除；任务边界字段和批次身份同样不可修改。相同 Vault、raw 边界、工具包清单和执行配置的重复提交返回原任务。每个 `vault_key` 最多有一个活跃任务。`failed` 保留为历史；只有没有任何未完成恢复现场且 backend/model/effort 或工具包清单发生明确变化时，用户提交才可为剩余 pending 建立新任务。原失败任务、冻结 raw 和已发布批次不修改。不同 Vault 不互相阻塞。
+上述任务／观测表不保存 raw 正文、页面正文、标题、用户名、token、任意异常字符串或模型输出。`wiki_task_raw` 一经写入不可修改、删除；任务边界字段和批次身份同样不可修改。typed 任务另有 `outcome_contract/plan_json/plan_sha256`，程序计划固定 raw／批次、来源要求、kit、执行政策和三个 schema 摘要；legacy 保留旧六键唯一性，typed 去重另包含合同及计划摘要。相同执行身份的重复提交返回原任务。每个 `vault_key` 最多有一个活跃任务。`failed` 保留为历史；只有没有任何未完成恢复现场且 backend/model/effort 或工具包清单发生明确变化时，用户提交才可为剩余 pending 建立新任务。原失败任务、冻结 raw 和已发布批次不修改。不同 Vault 不互相阻塞。
+
+Schema 27 的正式 `wiki_outcome_receipts` 是独立收据边界，不属于上面的无正文任务／观测投影。accepted 九字段为 `receipt_id/task_id/batch_no/phase/contract/boundary_sha256/plan_sha256/payload_json/created_at`。`WikiTaskStore.accept_published_batch` 在 `BEGIN IMMEDIATE` 中校验计划并调用 verify，只有精确九字段的一次性连接权限可插入 accepted；普通连接默认拒绝。同一事务推进批次 succeeded 和 completed_batch_count；已 succeeded 不重复计数，已有 accepted 必须 receipt_id／payload 精确相同。
 
 Schema 21 到 22 的任务表、22 到 23 的受限任务表重建与观测表均在各自事务内升级，不重用旧 `organization` 表，也不改旧业务行。旧程序看到未来 schema 时应拒绝打开；回退依靠升级前备份恢复，不提供删除新表的有损降级。
 
@@ -30,7 +32,7 @@ failed → queued（仅显式 retry，且恢复不需要或已经成功）
 
 多批任务进入 `running` 后，任务保持该状态，各批依次走完自己的 `queued` 到 `succeeded`。所有批次都发布并读回后，任务才统一进入 `validating`、`publishing` 和 `succeeded`。这样下一批不需要让任务状态倒退。`completed_batch_count` 只在批次发布读回成功时增加，任务成功前必须等于 `batch_count`。
 
-失败只存 [固定错误码](../../src/knowledge_distiller/v1/wiki_schema.py)，不存原始异常文本。发布前且没有现场要恢复的失败用 `recovery_state=not_needed`、`recovery_phase=none`；暂存、发布或读回阶段的中断用 `required` 并记录固定阶段。恢复按 `required → running → succeeded/failed` 推进。只有 `not_needed` 或 `succeeded` 才能显式 retry。发布异常留下的 `failed` 任务由显式恢复入口处理；恢复只核对或回滚发布现场，不自动重跑模型。恢复成功后仍须显式 retry，已经由 journal 证明发布并读回成功的批次不会重复运行。
+失败只存 [固定错误码](../../src/knowledge_distiller/v1/wiki_schema.py)，不存原始异常文本。typed 发布前失败保留 checkpoint，以 `recovery_phase=none` 进入显式 retry；保留 checkpoint 不等于存在待恢复发布 journal。已有发布 journal 的异常使用 publishing 恢复阶段，恢复按 `required → running → succeeded/failed` 推进。只有 `not_needed` 或 `succeeded` 才能显式 retry。发布异常留下的 `failed` 任务由显式恢复入口处理；该入口只核对或回滚发布现场，不自动重跑模型。恢复成功后仍须显式 retry，已经由 journal 和 accepted 证明完成的 typed 批次不会重复运行。
 
 相同执行身份继续显式 retry 原任务；设置改变后的新任务也必须重新权威冻结剩余 pending。任一历史失败任务仍有 `required`、`running` 或 `failed` 恢复状态时，匹配旧任务和新建任务都拒绝，避免未恢复 journal 被另一条入口静默越过。
 
@@ -66,13 +68,19 @@ raw 先按包含收录日期和稳定编号的相对路径排序。`附言对象
 
 每个任务使用产品私有目录 `wiki-tasks/<task_id>/`。每次执行在 `attempts/<随机标识>/` 下新建 `workspace/`、`control/` 和 `backup/`，完整快照落盘后再原子更新 0600 的 `current-attempt` 指针。`workspace/` 是 Agent 唯一可写工作区，`control/` 保存控制器快照和发布 journal，`backup/` 预留给私有恢复材料。三者均不位于正式 Vault，Agent 不获得正式 Vault 路径或写权限。工作目录 `cwd` 只是定位；实际隔离还必须由 Codex OS sandbox 限制写根、代理网络、外部工具和 Unix socket。网络代理采用空域名白名单，只为本次 broker socket 建立精确允许项。
 
-控制器异常退出时，仍存活的旧 Agent 只能继续写旧 attempt；新 worker 必须创建不同的 attempt，不能删除或复用旧 workspace。当前成功执行只清理本轮已退出 runner 的 attempt。无法证明进程已结束的旧 attempt 会保守保留；后续垃圾回收必须使用可验证的 attempt 生命周期或锁证据，不能按 PID 或时间猜测删除。
+legacy 执行保留原新 attempt 规则。typed 执行首次建立 `execution/binding.json`，后续 `load_bound_staging` 核验 current-attempt、计划、kit、来源及布局后恢复同一绑定 staging，不另造 attempt 重置预算；模型子进程通过录制、broker 和有界 pipe pump 管理，不能把重新打开 workspace 当作旧进程已结束的证明。typed 当前不会在成功后自动清理绑定 checkpoint。未知旧 attempt 不按 PID 或时间猜测删除。
+
+每批 `execution/batch-N` 保留完整 baseline 和 before 字节、生成 reservation/result/proposal、检查／体检阶段收据、final-stage 与 validated receipt ID。生成在 spawn 前持久占额；正常结果复用已核验 checkpoint，未知结果允许消耗额度后有界再生，最多三次生成 reservation，不把未知完成当成功。支持修复使用原 Gate 的两次额外预算，跨重启保留。`validated.json` 已存在时严格比对同一 receipt_id，相同复用、不同拒绝，不覆盖文件；进入 publishing 后按 journal 恢复，不再次生成或发布。
 
 任务准备时复制任务开始可见的全部 raw，便于验证旧 wiki 引用；只有数据库冻结的 raw 能进入本任务批次。任务创建后到达的 raw 即使在 worker 准备前被复制，也必须保持 pending，不能被本批提前消费。每批校验要求 pending 集合恰好减少本批路径，raw 字节、工具包、未知文件和 `.graph` 中非白名单文件保持不变。允许发布的 `.graph` 文件仅为 `graph.json`、`state.json` 和 `检查结果.md`；例如可能含用户查询的 `queries.jsonl` 不是可再生白名单。
 
 最后一批 ingest 后，控制器重新读取结构化 `candidate_count` 和 health 字段。自动体检仅在素材与候选均清零，并且从未有效体检，或上次有效体检后发生 ingest/confirm 且已满七天时执行。体检使用独立 runner 调用；必须新增一条有效 lint 记录并改变体检报告，失败则整批不发布。晚到 raw 会使本轮不宣称清零，也不执行自动体检。
 
 发布在持有正式 Vault 锁时逐文件比较 before 摘要、原子替换并 fsync；成功只在正式路径按 after 摘要读回后记录。恢复以私有 journal 的 after 摘要为权威，不以可能被 Agent 后改的 staging 文件为唯一证据；同时复核未替换 wiki、全部原 raw、工具包和冻结 pending 边界。用户在崩溃后修改过目标时保留用户内容并进入固定冲突状态。
+
+typed 各阶段传完整冻结上下文 C，只消费当前批次 B；proposal 的 processed_with_knowledge／processed_no_knowledge 均要求非空 documents 和最终文件 SHA，正常无知识可只列 wiki/log.md，unknown 保留 pending。独立 check 核 definition／method／reference_lead／relations 四维及逐字证据范围，不按长度／空 points 宣告无知识。体检后的文件摘要由宿主刷新，必要时再核对。随后 `_typed_candidate` 构建最终 Registry、可信 GeneratedSection 与 program_facts，调用 R14 Gate；详见 [wiki-support.md](wiki-support.md)。Gate supported_candidate_not_published 只是候选支持，不能作正式 accepted。
+
+`_accept_typed` 在正式库接受事务中重新核验候选收据、完整 C、最终 documents、check／support、已提交 journal 和正式目标读回，并用同连接的 `trusted_source_callback` 重核来源摘要。通过后才由 `accept_published_batch` 写正式 accepted 并完成批次；支持检查成功、CLI 退出 0 或 staging 有文件均不足以替代这一过程。
 
 ## 7. 工具包所有权
 
@@ -92,9 +100,13 @@ V2.0 正式标签 `v2026.09.30.4` 尚未写入收据，但其 `vault-kit/README.
 
 应用由 `WikiWorkflow` 向 Web 暴露只读 `snapshot()`、权威 `submit_all()`、显式 `retry(task_id)` 和异步 `request_refresh()`。状态快照只返回任务身份、计数、固定错误码、恢复状态、受限动作和两个允许的结果相对路径；不返回正文。新 pending 优先显示可提交，活跃任务优先显示自身状态。工具包缺失、漂移或不兼容会持久写入观测，并把设置入口作为恢复动作，避免一次提交响应后的后续 GET 丢失错误。
 
+实际组装为 `app.py` 创建 `WikiWorker(..., source_store=store)`，`WikiWorkflow.submit_all()` 显式传 `outcome_contract='r08-wiki-outcomes-v1'`；worker 按合同分派 typed／legacy，不重分类旧任务。typed runner 使用固定 proposal/check/support schema 与录制 final 输出；应用政策为 `APPLICATION_UTF8_POLICY`，对完整实际 stdin 和 schema 的字节／摘要做有界校验，不以字符估算伪造 token 数，也不声称掌握远端完整请求窗口。真实 CLI 运行与正式 accepted 的验收须分别记录。
+
 主 worker 与 wiki worker 通过同一个可重入 admission gate 协调 Web、飞书入口和更新。更新 reservation 关闭新写入并依次保留两 worker；任一步失败都会按相反顺序释放已保留资源。飞书门禁位于消息、动作、补收和同步的实际入口，未停稳的 runtime 不会被清空或并发重启，较晚的停止或更新保留也会阻止回滚线程重新启动入口。worker 的有界 `stop()` 只有在线程确实退出时才报告成功；runner 在 preflight 与 `Popen` 之间也检查同一取消状态，避免停止请求丢失。macOS 通过 `applicationShouldTerminate_` 延迟终止许可，双 worker 和飞书实际停止后才允许退出；需要重启时也只在该门禁完成后启动重启辅助进程。
 
 ## 9. 验证边界
+
+下面阶段记录均为历史验证范围，不是对 HEAD `962d0c6` 全部测试重新通过的声明。当前接线已有 `test_wiki_worker_typed.py` 等合成实际 API 路径，仍不能代替真实 CLI 语义、正式 accepted 或发布验收。本次只改两份文档，不运行模型、矩阵或重复测试。现行主控 gpt-6-astra/medium、全部子 Agent gpt-6.1-sol/medium；历史 Luna 等执行者不作为当前分工。用户已按展示候选批准四项 UI 接入，并同意 R11 Reddit／R12 pyannote 延期；本维护不实施 UI，也不把其他未验事项扩展为已完成。
 
 合成测试覆盖 schema 21 加法升级与事务回滚、未来 schema 拒绝、任务和批次非法转换、失败恢复与显式重试、重复提交、不同 Vault 的活跃任务、60 份以上 raw 的全覆盖分批、晚到 raw、进程重启读回、跨进程及手动会话冲突、launcher 异常退出、孙进程会话验证、工具包漂移和路径符号链接。
 
