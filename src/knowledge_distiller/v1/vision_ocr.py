@@ -1,7 +1,11 @@
 """Apple Vision OCR, preserving the same immutable original-pixel evidence plane."""
 from io import BytesIO
 from dataclasses import asdict, dataclass, replace
-from importlib.metadata import distribution
+from importlib.metadata import distribution, PathDistribution
+from importlib.machinery import SourceFileLoader, ModuleSpec
+import base64
+import os
+import stat
 from pathlib import Path
 import hashlib
 import json
@@ -121,22 +125,109 @@ def validate_image_receipt(result, data, mime, member_id):
         raise OcrError('ocr_invalid_output', stage='receipt_validation') from error
 
 
+def _file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _origin_read(path, expected_bytes=None):
+    """Read a held regular file, checking its path and FD before and after."""
+    before = path.stat()
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError
+    count = before.st_size if expected_bytes is None else expected_bytes
+    if type(count) is not int or count < 0 or count != before.st_size:
+        raise ValueError
+    with path.open('rb') as stream:
+        if _file_identity(os.fstat(stream.fileno())) != _file_identity(before):
+            raise ValueError
+        data = stream.read(count + 1)
+        if len(data) != count or stream.read(1):
+            raise ValueError
+        if _file_identity(os.fstat(stream.fileno())) != _file_identity(before):
+            raise ValueError
+    if _file_identity(path.stat()) != _file_identity(before):
+        raise ValueError
+    return data, _file_identity(before)
+
+
+def _frozen_contents():
+    """Actual native main bundle/entry relationship, never a _MEIPASS claim."""
+    Foundation = sys.modules.get('Foundation')
+    objc = sys.modules.get('objc')
+    if (Foundation is None or objc is None
+            or not isinstance(Foundation.NSBundle, objc.objc_class)):
+        raise ValueError
+    bundle = Foundation.NSBundle.mainBundle()
+    if bundle is None or str(bundle.bundleIdentifier()) != 'local.knowledge-distiller.app':
+        raise ValueError
+    root = Path(str(bundle.bundlePath())).resolve(strict=True)
+    contents = (root / 'Contents').resolve(strict=True)
+    macos = (contents / 'MacOS').resolve(strict=True)
+    executable = Path(str(bundle.executablePath())).resolve(strict=True)
+    if (not root.is_dir() or root.suffix != '.app' or contents.parent != root
+            or not contents.is_dir() or macos.parent != contents or not macos.is_dir()
+            or not executable.is_file() or executable.parent != macos
+            or executable != Path(sys.executable).resolve(strict=True)):
+        raise ValueError
+    return contents
+
+
+def _source_origin(module, expected_name):
+    spec = module.__spec__
+    loader = module.__loader__
+    if (expected_name is None or module.__name__ != expected_name
+            or type(spec) is not ModuleSpec or spec.name != expected_name
+            or type(loader) is not SourceFileLoader or spec.loader is not loader
+            or loader.name != expected_name):
+        raise ValueError
+    paths = [Path(value).resolve(strict=True) for value in (
+        module.__file__, spec.origin, loader.get_filename(expected_name))]
+    if paths[0] != paths[1] or paths[0] != paths[2] or paths[0].suffix != '.py':
+        raise ValueError
+    return paths[0], id(spec), id(loader)
+
+
 def _bridge_origin(module, name):
+    expected_name = {'pyobjc-core': 'objc', 'pyobjc-framework-Vision': 'Vision',
+                     'pyobjc-framework-Cocoa': 'Foundation'}.get(name)
+    binding = _source_origin(module, expected_name)
+    origin = binding[0]
     dist = distribution(name)
+    # Fixed wheel metadata: CPython PathDistribution._path is the directory used
+    # by its read_text()/files()/locate_file(), not a caller-supplied trust flag.
+    if not isinstance(dist, PathDistribution):
+        raise ValueError
+    metadata = Path(dist._path).resolve(strict=True)
+    if not metadata.is_dir() or metadata.suffix != '.dist-info':
+        raise ValueError
+    metadata_files = [metadata / 'METADATA', metadata / 'RECORD']
+    contents = _frozen_contents() if getattr(sys, 'frozen', False) else None
+    if contents is not None and any(not p.resolve(strict=True).is_relative_to(contents)
+                                    for p in (origin, metadata, *metadata_files)):
+        raise ValueError
+    before_metadata = [_origin_read(path) for path in metadata_files]
     if dist.version != '12.2.2':
         raise ValueError
-    origin = Path(module.__file__).resolve(strict=True)
     matches = [p for p in dist.files or () if Path(dist.locate_file(p)).resolve() == origin]
-    if len(matches) != 1 or not origin.is_file():
+    if len(matches) != 1:
         raise ValueError
-    before = origin.stat()
-    digest = _sha(origin.read_bytes())
-    after = origin.stat()
-    identity = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-    if identity(before) != identity(after):
+    entry = matches[0]
+    if (str(entry) != expected_name + '/__init__.py'
+            or entry.hash is None or entry.hash.mode != 'sha256'
+            or type(entry.size) is not int or entry.size < 0):
+        raise ValueError
+    data, identity = _origin_read(origin, entry.size)
+    digest = _sha(data)
+    expected = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode('ascii').rstrip('=')
+    if entry.hash.value != expected:
+        raise ValueError
+    if (before_metadata != [_origin_read(path) for path in metadata_files]
+            or (contents is not None and _frozen_contents() != contents)
+            or _source_origin(module, expected_name) != binding
+            or _origin_read(origin, entry.size) != (data, identity)):
         raise ValueError
     return {'distribution': name, 'version': dist.version, 'origin': str(matches[0]),
-            'origin_identity': identity(after), 'origin_sha256': digest}
+            'origin_identity': identity, 'origin_sha256': digest}
 
 
 def _environment(objc, Vision, Foundation):

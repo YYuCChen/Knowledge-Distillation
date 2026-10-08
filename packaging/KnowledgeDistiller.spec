@@ -69,11 +69,13 @@ for distribution in ('trafilatura', 'httpx', 'httpcore', 'courlan', 'htmldate',
                      'jusText', 'babel', 'dateparser', 'lxml-html-clean', 'tld',
                      'tzlocal', 'charset-normalizer', 'urllib3'):
     datas += copy_metadata(distribution)
+datas += copy_metadata('Pillow')
 datas = list(dict.fromkeys(datas))
 binaries = list(dict.fromkeys(binaries))
 hiddenimports = sorted(set(hiddenimports))
 a = Analysis([str(project/'packaging/mac_entry.py')],pathex=[str(project/'src')],
              binaries=binaries,datas=datas,hiddenimports=hiddenimports,
+             module_collection_mode={'objc': 'py', 'Foundation': 'py', 'Vision': 'py'},
              excludes=['mlx', 'mlx_qwen3_asr', 'paddle', 'paddleocr', 'paddlex', 'knowledge_distiller.legacy','pytest','tkinter','IPython','matplotlib','torchaudio'])
 # OpenCV's wheel embeds an older OpenSSL 3. PyInstaller otherwise aliases Node's
 # newer OpenSSL dependency to that copy, making bundled Node fail at dyld load.

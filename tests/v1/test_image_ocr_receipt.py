@@ -3,11 +3,16 @@ from contextlib import nullcontext
 from copy import copy, deepcopy
 from dataclasses import replace
 from io import BytesIO
+from importlib.metadata import PathDistribution
+from importlib.machinery import SourceFileLoader
+from importlib.util import spec_from_file_location
+import base64
+import csv
 import hashlib
 import json
 from pathlib import Path
 import sys
-from types import SimpleNamespace as NS
+from types import ModuleType, SimpleNamespace as NS
 
 import pytest
 from PIL import Image
@@ -207,14 +212,48 @@ def test_environment_verifier_requires_system_identity_and_actual_build(monkeypa
         assert not calls
 
 
+def _record_hash(data):
+    return 'sha256=' + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip('=')
+
+
+def _write_record(metadata, rows):
+    with (metadata / 'RECORD').open('w', encoding='utf-8', newline='') as stream:
+        csv.writer(stream).writerows(rows)
+
+
+def _origin_fixture(root):
+    path = root / 'Vision' / '__init__.py'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'synthetic bridge source')
+    metadata = root / 'pyobjc_framework_vision-12.2.2.dist-info'
+    metadata.mkdir()
+    declaration = b'Metadata-Version: 2.1\nName: pyobjc-framework-Vision\nVersion: 12.2.2\n'
+    (metadata / 'METADATA').write_bytes(declaration)
+    rows = [['Vision/__init__.py', _record_hash(path.read_bytes()), str(path.stat().st_size)],
+            [metadata.name + '/METADATA', _record_hash(declaration), str(len(declaration))],
+            [metadata.name + '/RECORD', '', '']]
+    _write_record(metadata, rows)
+    loader = SourceFileLoader('Vision', str(path))
+    module = ModuleType('Vision')
+    module.__file__ = str(path)
+    module.__loader__ = loader
+    module.__spec__ = spec_from_file_location('Vision', path, loader=loader)
+    return NS(path=path, metadata=metadata, rows=rows, module=module,
+              dist=PathDistribution(metadata))
+
+
 @pytest.mark.parametrize('fault', [None, 'version', 'origin', 'missing'])
 def test_bridge_origin_requires_actual_distribution_file(monkeypatch, tmp_path, fault):
-    path = tmp_path / '__init__.py'; path.write_bytes(b'synthetic bridge source')
-    dist = NS(version='changed' if fault == 'version' else '12.2.2',
-              files=[] if fault == 'origin' else ['Vision/__init__.py'],
-              locate_file=lambda member: path)
-    monkeypatch.setattr(vision, 'distribution', lambda name: dist)
-    module = NS(__file__=str(tmp_path / 'missing' if fault == 'missing' else path))
+    fixture = _origin_fixture(tmp_path)
+    path, module = fixture.path, fixture.module
+    if fault == 'version':
+        (fixture.metadata / 'METADATA').write_text('Name: pyobjc-framework-Vision\nVersion: changed\n')
+    elif fault == 'origin':
+        _write_record(fixture.metadata, fixture.rows[1:])
+    elif fault == 'missing':
+        module.__file__ = str(tmp_path / 'missing')
+    monkeypatch.setattr(vision, 'distribution', lambda name: fixture.dist)
+    monkeypatch.setattr(vision.sys, 'frozen', False, raising=False)
     if fault:
         with pytest.raises((ValueError, OSError)):
             vision._bridge_origin(module, 'pyobjc-framework-Vision')
@@ -223,6 +262,108 @@ def test_bridge_origin_requires_actual_distribution_file(monkeypatch, tmp_path, 
         assert observed['origin'] == 'Vision/__init__.py'
         assert observed['origin_sha256'] == hashlib.sha256(path.read_bytes()).hexdigest()
         assert observed['origin_identity'][2] == len(b'synthetic bridge source')
+
+
+@pytest.mark.parametrize('fault', ['loader', 'loader_name', 'spec_name', 'spec_loader',
+    'spec_origin', 'file', 'hash', 'size', 'missing_hash', 'hash_algorithm', 'duplicate',
+    'alias_record', 'metadata_drift', 'source_drift', 'loader_drift', 'missing_record', 'bad_size'])
+def test_source_loader_record_or_prepost_drift_is_rejected(monkeypatch, tmp_path, fault):
+    fixture = _origin_fixture(tmp_path)
+    module = fixture.module
+    other = tmp_path / 'other.py'; other.write_bytes(b'synthetic bridge source')
+    if fault == 'loader':
+        module.__loader__ = module.__spec__.loader = NS(name='Vision', get_filename=lambda name: str(fixture.path))
+    elif fault == 'loader_name':
+        module.__loader__ = module.__spec__.loader = SourceFileLoader('Other', str(fixture.path))
+    elif fault == 'spec_name': module.__spec__.name = 'Other'
+    elif fault == 'spec_loader': module.__spec__.loader = SourceFileLoader('Vision', str(fixture.path))
+    elif fault == 'spec_origin': module.__spec__.origin = str(other)
+    elif fault == 'file': module.__file__ = str(other)
+    elif fault == 'hash': fixture.rows[0][1] = 'sha256=' + 'A' * 43
+    elif fault == 'size': fixture.rows[0][2] = str(fixture.path.stat().st_size + 1)
+    elif fault == 'missing_hash': fixture.rows[0][1] = ''
+    elif fault == 'hash_algorithm': fixture.rows[0][1] = fixture.rows[0][1].replace('sha256=', 'sha512=')
+    elif fault == 'duplicate': fixture.rows.append(fixture.rows[0].copy())
+    elif fault == 'alias_record':
+        alias = tmp_path / 'alias.py'; alias.symlink_to(fixture.path)
+        fixture.rows[0][0] = 'alias.py'
+    elif fault == 'bad_size': fixture.rows[0][2] = 'True'
+    _write_record(fixture.metadata, fixture.rows)
+    if fault == 'missing_record': (fixture.metadata / 'RECORD').unlink()
+    if fault in ('metadata_drift', 'source_drift', 'loader_drift'):
+        original_read = vision._origin_read
+        changed = []
+        def observed_read(path, expected_bytes=None):
+            value = original_read(path, expected_bytes)
+            if path == fixture.path and not changed:
+                changed.append(True)
+                if fault == 'metadata_drift':
+                    with (fixture.metadata / 'METADATA').open('ab') as stream: stream.write(b'X-Changed: yes\n')
+                elif fault == 'source_drift': fixture.path.write_bytes(b'changed source')
+                else:
+                    module.__loader__ = module.__spec__.loader = SourceFileLoader('Vision', str(fixture.path))
+            return value
+        monkeypatch.setattr(vision, '_origin_read', observed_read)
+    monkeypatch.setattr(vision, 'distribution', lambda name: fixture.dist)
+    monkeypatch.setattr(vision.sys, 'frozen', False, raising=False)
+    with pytest.raises((ValueError, OSError)):
+        vision._bridge_origin(module, 'pyobjc-framework-Vision')
+
+
+@pytest.mark.parametrize('fault', [None, 'source_shadow', 'metadata_shadow', 'wrong_identifier',
+    'wrong_entry', 'contents_escape', 'loader_proxy'])
+def test_frozen_source_requires_actual_bundle_relationship(monkeypatch, tmp_path, fault):
+    bundle_root = tmp_path / 'Candidate.app'
+    contents = bundle_root / 'Contents'
+    resources = contents / 'Resources'
+    fixture = _origin_fixture(resources)
+    macos = contents / 'MacOS'; macos.mkdir()
+    executable = macos / 'KnowledgeDistiller'; executable.write_bytes(b'synthetic entry, not executed')
+    frameworks = contents / 'Frameworks'; frameworks.mkdir()
+    (frameworks / 'Vision').symlink_to('../Resources/Vision', target_is_directory=True)
+    (frameworks / fixture.metadata.name).symlink_to('../Resources/' + fixture.metadata.name, target_is_directory=True)
+    module = fixture.module
+    alias = frameworks / 'Vision' / '__init__.py'
+    loader = SourceFileLoader('Vision', str(alias))
+    module.__file__ = str(alias); module.__loader__ = loader
+    module.__spec__ = spec_from_file_location('Vision', alias, loader=loader)
+    fixture.dist = PathDistribution(frameworks / fixture.metadata.name)
+    if fault == 'source_shadow':
+        outside = tmp_path / 'outside.py'; outside.write_bytes(fixture.path.read_bytes())
+        fixture.path.unlink(); fixture.path.symlink_to(outside)
+    elif fault == 'metadata_shadow':
+        outside = tmp_path / 'outside'; outside.mkdir()
+        (outside / 'Vision').symlink_to(resources / 'Vision', target_is_directory=True)
+        moved = outside / fixture.metadata.name
+        fixture.metadata.rename(moved)
+        fixture.dist = PathDistribution(moved)
+    elif fault == 'contents_escape':
+        detached = tmp_path / 'DetachedContents'
+        contents.rename(detached); contents.symlink_to(detached, target_is_directory=True)
+    elif fault == 'loader_proxy':
+        module.__loader__ = module.__spec__.loader = NS(name='Vision', get_filename=lambda name: str(alias))
+    other_entry = macos / 'Other'; other_entry.write_bytes(b'synthetic wrong entry')
+    bundle = NS(bundleIdentifier=lambda: 'wrong' if fault == 'wrong_identifier' else 'local.knowledge-distiller.app',
+        bundlePath=lambda: str(bundle_root),
+        executablePath=lambda: str(other_entry if fault == 'wrong_entry' else executable))
+    class FakeNSBundle:
+        @classmethod
+        def mainBundle(cls): return bundle
+    # Only native relationship is fake. Actual stdlib loader, disk metadata,
+    # RECORD and canonical symlink mapping are exercised; no native attestation.
+    monkeypatch.setitem(sys.modules, 'Foundation', NS(NSBundle=FakeNSBundle))
+    monkeypatch.setitem(sys.modules, 'objc', NS(objc_class=type))
+    monkeypatch.setattr(vision.sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(vision.sys, 'executable', str(executable))
+    monkeypatch.setattr(vision.sys, '_MEIPASS', str(tmp_path / 'untrusted-claim'), raising=False)
+    monkeypatch.setattr(vision, 'distribution', lambda name: fixture.dist)
+    if fault:
+        with pytest.raises((ValueError, OSError)):
+            vision._bridge_origin(module, 'pyobjc-framework-Vision')
+    else:
+        observed = vision._bridge_origin(module, 'pyobjc-framework-Vision')
+        assert observed['origin'] == 'Vision/__init__.py'
+        assert observed['origin_sha256'] == hashlib.sha256(fixture.path.read_bytes()).hexdigest()
 
 
 def test_plain_result_legacy_runner_and_paddle_never_gain_authority(native):
