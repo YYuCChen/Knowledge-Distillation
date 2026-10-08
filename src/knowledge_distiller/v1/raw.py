@@ -430,8 +430,15 @@ class RawLedger:
                 AND NOT EXISTS (SELECT 1 FROM raw_records n WHERE n.supersedes=r.raw_id)
                 ORDER BY raw_id DESC LIMIT 1''', (subject_kind, subject_id)).fetchone()
 
+    def heads(self, subject_kind, subject_id):
+        """Complete current set for explicit ingestion; legacy current is unchanged."""
+        with connect(self.store.path) as db:
+            return tuple(db.execute('''SELECT * FROM raw_records r WHERE subject_kind=? AND subject_id=?
+                AND NOT EXISTS(SELECT 1 FROM raw_records n WHERE n.supersedes=r.raw_id)
+                ORDER BY raw_id''', (subject_kind, subject_id)))
+
     def ensure_material(self, material_id: int, *, adjacency=None, reserved=None, collected_ms=None,
-                        supersedes=None):
+                        supersedes=None, check_source=None):
         """Assign the material's raw once; a repeated delivery reuses it.
 
         A third-party quick note keeps the id reserved when it was captured and
@@ -439,6 +446,8 @@ class RawLedger:
         vault = self.vault()
         with connect(self.store.path) as db:
             db.execute('BEGIN IMMEDIATE')
+            if check_source is not None:
+                check_source(db)  # Explicit ingestion only; legacy has no hook.
             existing = db.execute("SELECT raw_id FROM raw_records WHERE subject_kind='material' AND subject_id=? LIMIT 1",
                                   (material_id,)).fetchone()
             if existing is None:
@@ -493,7 +502,9 @@ class RawLedger:
             if state == 'conflict':
                 raise RawError('raw_target_conflict')
         except (RawError, OSError) as error:
-            code = str(error) if isinstance(error, RawError) else 'raw_write_failed'
+            codes = {'vault_unavailable', 'raw_id_collision', 'raw_attachment_conflict',
+                     'raw_target_conflict', 'raw_attachment_unavailable', 'raw_path_unsafe'}
+            code = error.args[0] if isinstance(error, RawError) and error.args and isinstance(error.args[0], str) and error.args[0] in codes else 'raw_write_failed'
             with connect(self.store.path) as db:
                 db.execute('UPDATE raw_records SET attempts=attempts+1, last_error=? WHERE raw_id=?',
                            (code, record['raw_id']))

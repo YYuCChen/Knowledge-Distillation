@@ -292,6 +292,16 @@ class Captures:
         """Recognition concerns are handled: drop the recording, keep the fact it existed."""
         if capture['message_type'] != 'audio' or capture['audio_released_at']:
             return
+        # Legacy callers do not possess locked readback authority. New-contract
+        # recordings remain retained, including cancellation and pending ASR.
+        if capture['item_id']:
+            item = self.store.item_bundle(capture['item_id'])
+            if item is not None and item['ingestion_contract'] != 'legacy':
+                return
+        with connect(self.store.path) as db:
+            if db.execute("SELECT 1 FROM ingestion_events WHERE subject_kind='capture' AND subject_id=? LIMIT 1",
+                          (capture['capture_id'],)).fetchone():
+                return
         if capture['audio_path']:
             Path(capture['audio_path']).unlink(missing_ok=True)
         with connect(self.store.path) as db:
@@ -331,6 +341,68 @@ class Captures:
         if receipt is not None and receipt['state'] in {'received', 'waiting_input'}:
             settled = False
         return (ids[0] if ids else None), settled
+
+    def message_raws(self, db, app_id, message_id):
+        """Complete ordered objects for explicit ingestion, no allocation/write.
+
+        Reserved IDs, errors, dismissal and missing SourceFacts are pending.
+        Distinct parts may have distinct raw; multiple heads of one object are
+        ambiguous. The old scalar projection remains unchanged for legacy UI.
+        """
+        receipt = db.execute('SELECT state FROM feishu_receipts WHERE app_id=? AND message_id=?',
+                             (app_id, message_id)).fetchone()
+        if receipt is not None and receipt['state'] != 'accepted':
+            return (), 'message_raw_pending'
+        capture = db.execute('''SELECT c.*,s.item_id FROM captures c JOIN capture_state s USING(capture_id)
+            WHERE c.app_id=? AND c.message_id=?''', (app_id, message_id)).fetchone()
+        parts = db.execute('SELECT position,item_id,error FROM feishu_parts WHERE app_id=? AND message_id=? ORDER BY position',
+                           (app_id, message_id)).fetchall()
+        if any(p['item_id'] is None or p['error'] for p in parts):
+            return (), 'message_raw_pending'
+        objects, own = [], None
+        def heads(kind, subject):
+            return tuple(dict(r) for r in db.execute('''SELECT r.* FROM raw_records r WHERE subject_kind=? AND subject_id=?
+                AND NOT EXISTS(SELECT 1 FROM raw_records n WHERE n.supersedes=r.raw_id) ORDER BY raw_id''', (kind, subject)))
+        if capture is not None:
+            decision = db.execute('SELECT * FROM capture_identity_events WHERE capture_id=? ORDER BY event_id DESC LIMIT 1',
+                                  (capture['capture_id'],)).fetchone()
+            current = heads('capture', capture['capture_id'])
+            if decision is None or decision['result'] not in {'my_thought', 'annotation', 'third_party'}:
+                return (), 'message_raw_pending'
+            if decision['result'] == 'third_party':
+                if current or capture['item_id'] is None:
+                    return (), 'message_raw_pending'
+            else:
+                if len(current) != 1:
+                    return (), 'message_raw_ambiguous' if len(current) > 1 else 'message_raw_pending'
+                if current[0]['identity'] != IDENTITIES[decision['result']]:
+                    return (), 'message_raw_pending'
+                own = current[0]
+                objects.append({'ordinal': -1, 'item_id': capture['item_id'], 'record': own})
+        inputs = [(p['position'], p['item_id']) for p in parts]
+        if capture is not None and capture['item_id'] is not None and capture['item_id'] not in {i for _, i in inputs}:
+            inputs.append((-1, capture['item_id']))
+        seen = {own['raw_id']} if own else set()
+        for ordinal, item_id in inputs:
+            item = db.execute('''SELECT i.*,m.source_kind,sf.source_fact_id FROM distill_items i
+                LEFT JOIN materials m USING(material_id) LEFT JOIN source_facts sf USING(material_id) WHERE item_id=?''',
+                              (item_id,)).fetchone()
+            if (item is None or item['source_fact_id'] is None or item['confirmation_json'] is not None
+                    or item['state'] == 'failed' or item['dismissed_at'] is not None):
+                return (), 'message_raw_pending'
+            if own is not None and item_id == capture['item_id']:
+                if heads('material', item['material_id']):
+                    return (), 'message_raw_ambiguous'
+                continue  # Latest own identity, no obsolete external head.
+            if item['source_kind'] == 'feishu_voice':
+                return (), 'message_raw_pending'  # No matching own capture object.
+            current = heads('material', item['material_id'])
+            if len(current) != 1:
+                return (), 'message_raw_ambiguous' if len(current) > 1 else 'message_raw_pending'
+            if current[0]['raw_id'] not in seen:
+                objects.append({'ordinal': ordinal, 'item_id': item_id, 'record': current[0]})
+                seen.add(current[0]['raw_id'])
+        return tuple(objects), None if objects else 'message_raw_pending'
 
     @staticmethod
     def _material_raw(db, item_id):
@@ -391,6 +463,45 @@ class Captures:
             result.append((capture, decided))
         return result
 
+    def ensure_raw(self, capture, decided, adjacency, target_id, *, ledger=None, unsettled=0, existing_ok=True,
+                   check_source=None):
+        """Assign using the existing reserved ID/render/insert; never release.
+
+        The explicit ingestion caller checks source/relations and holds the
+        Vault lock. Re-read the decision and capture in the assignment txn;
+        stale existing heads are returned for the caller to reject, not fixed
+        by silently making a new version.
+        """
+        ledger = ledger or raw.RawLedger(self.store)
+        with connect(self.store.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            current = db.execute('SELECT * FROM capture_identity_events WHERE capture_id=? ORDER BY event_id DESC LIMIT 1',
+                                 (capture['capture_id'],)).fetchone()
+            if current is None or dict(current) != dict(decided) or current['result'] not in {'my_thought', 'annotation'}:
+                raise raw.RawError('capture_decision_changed')
+            fresh = self.get(capture['capture_id'])
+            if fresh != dict(capture):
+                raise raw.RawError('capture_source_changed')
+            if check_source is not None:
+                check_source(db)  # Read-only ingestion CAS, before freezing bytes.
+            heads = db.execute("""SELECT r.raw_id FROM raw_records r WHERE subject_kind='capture' AND subject_id=?
+                AND NOT EXISTS(SELECT 1 FROM raw_records n WHERE n.supersedes=r.raw_id)""",
+                               (capture['capture_id'],)).fetchall()
+            if len(heads) > 1:
+                raise raw.RawError('capture_heads_ambiguous')
+            if heads:
+                if not existing_ok:
+                    return None  # Original write_ready concurrently-assigned skip.
+                raw_id = heads[0]['raw_id']
+            else:
+                if db.execute('SELECT 1 FROM raw_records WHERE raw_id=?', (capture['raw_id'],)).fetchone():
+                    raise raw.RawError('capture_id_assigned_elsewhere')
+                document = self.render(capture, decided, adjacency, unsettled, target_id)
+                raw_id = capture['raw_id']
+                raw.insert(db, raw_id, 'capture', capture['capture_id'], IDENTITIES[decided['result']],
+                           document, origin='app')
+        return ledger.record(raw_id)
+
     def write_ready(self, ledger=None, *, now=None) -> dict:
         ledger = ledger or raw.RawLedger(self.store)
         now = now or datetime.now(UTC)
@@ -404,15 +515,10 @@ class Captures:
             young = now - _local(capture['received_ms']) < timedelta(hours=SETTLE_HOURS)
             if young and (unsettled or not target_settled or (decided['result'] == 'annotation' and target_id is None)):
                 continue  # Earlier deliveries are still being processed; cite them once they have raw ids.
-            document = self.render(capture, decided, adjacency, unsettled if not young else 0, target_id)
-            with connect(self.store.path) as db:
-                db.execute('BEGIN IMMEDIATE')
-                if db.execute("SELECT 1 FROM raw_records WHERE subject_kind='capture' AND subject_id=?",
-                              (capture['capture_id'],)).fetchone():
-                    continue
-                raw.insert(db, capture['raw_id'], 'capture', capture['capture_id'], IDENTITIES[decided['result']],
-                           document, origin='app')
-            record = ledger.record(capture['raw_id'])
+            record = self.ensure_raw(capture, decided, adjacency, target_id, ledger=ledger,
+                                     unsettled=unsettled if not young else 0, existing_ok=False)
+            if record is None:
+                continue
             results[capture['raw_id']] = ledger.write(record)
             if results[capture['raw_id']] in {'placed', 'already'}:
                 self.release_audio(capture)

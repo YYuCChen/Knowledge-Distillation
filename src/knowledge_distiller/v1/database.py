@@ -174,6 +174,10 @@ def connect(path: Path, *, timeout: float = 5) -> Iterator[sqlite3.Connection]:
     connection = sqlite3.connect(path, timeout=timeout)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    # Normal connections have no filesystem authority. A2 installs exact,
+    # transaction-local predicates only after locked readback and binding CAS.
+    connection.create_function('ingestion_proof', 3, lambda *_: 0)
+    connection.create_function('ingestion_release', 4, lambda *_: 0)
     try:
         yield connection
         connection.commit()
@@ -515,11 +519,17 @@ def migrate_v24(connection: sqlite3.Connection) -> None:
         connection.execute(f"""CREATE TRIGGER IF NOT EXISTS ingestion_events_no_{action.lower()}
             BEFORE {action} ON ingestion_events
             BEGIN SELECT RAISE(ABORT,'ingestion event is immutable'); END""")
-    # A1 has no filesystem-proof producer. Neither an API nor direct SQL can
-    # manufacture a verified/release event until the reviewed A2 boundary exists.
+    # This DDL is for fresh/22/23 synthetic candidate roots only. initialize(24)
+    # intentionally does not replace an earlier candidate's fail-closed guard.
     connection.execute("""CREATE TRIGGER IF NOT EXISTS ingestion_events_proof_unavailable
         BEFORE INSERT ON ingestion_events
         WHEN NEW.kind IN ('raw_verified','release_authorized','media_released')
+          AND (ingestion_proof(NEW.kind,NEW.binding_sha256,NEW.detail_json)!=1
+               OR NEW.kind IS NOT json_extract(NEW.detail_json,'$.code')
+               OR NEW.subject_kind IS NOT json_extract(NEW.detail_json,'$.manifest.subject_kind')
+               OR NEW.subject_id IS NOT json_extract(NEW.detail_json,'$.manifest.subject_id')
+               OR NEW.item_id IS NOT json_extract(NEW.detail_json,'$.manifest.owner_item_id')
+               OR NEW.binding_sha256 IS NOT json_extract(NEW.detail_json,'$.final_binding_sha256'))
         BEGIN SELECT RAISE(ABORT,'filesystem proof unavailable'); END""")
     from .wiki_schema import migrate_outcome_storage
     migrate_outcome_storage(connection)

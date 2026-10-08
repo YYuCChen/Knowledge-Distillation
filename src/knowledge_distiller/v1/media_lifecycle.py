@@ -69,12 +69,18 @@ def _legacy_owners(db):
 
 
 def protect_ingestion(db):
-    """A1 never releases new-contract bytes, even with alleged proof events."""
+    """Normal connections retain bytes; locked ingestion can clear exact members.
+
+    The original SourceFact/terminal-owner/written-raw veto is retained as an
+    additional condition. Proof alone never changes a visible owner state.
+    Reinitializing an existing 24 never invokes this migration.
+    """
     for action in ('UPDATE', 'DELETE'):
         db.execute(f"""CREATE TRIGGER IF NOT EXISTS source_media_ingestion_no_{action.lower()}
             BEFORE {action} ON source_media
             WHEN EXISTS (SELECT 1 FROM distill_items i WHERE i.material_id=OLD.material_id
                          AND i.ingestion_contract!='legacy')
+              {'AND ingestion_release(OLD.material_id,OLD.member_id,OLD.sha256,NEW.content)!=1' if action == 'UPDATE' else ''}
             BEGIN SELECT RAISE(ABORT,'ingestion media is retained'); END""")
     db.execute("""CREATE TRIGGER IF NOT EXISTS submitted_sources_ingestion_no_release
         BEFORE UPDATE OF content,input_metadata ON submitted_sources
@@ -93,6 +99,22 @@ def protect_ingestion(db):
             SELECT 1 FROM distill_items i WHERE i.item_id IN (OLD.item_id,NEW.item_id)
             AND i.ingestion_contract!='legacy')
         BEGIN SELECT RAISE(ABORT,'ingestion input owner is immutable'); END""")
+    protected_capture = """EXISTS(SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id
+        AND i.ingestion_contract!='legacy') OR EXISTS(SELECT 1 FROM ingestion_events e
+        WHERE e.subject_kind='capture' AND e.subject_id=OLD.capture_id AND e.contract='raw-verified-v1')"""
+    db.execute(f"""CREATE TRIGGER IF NOT EXISTS source_media_ingestion_capture_binding
+        BEFORE UPDATE OF item_id,audio_path ON capture_state
+        WHEN ({protected_capture}) AND (NEW.item_id IS NOT OLD.item_id
+            OR (OLD.audio_path IS NOT NULL AND NEW.audio_path IS NOT OLD.audio_path))
+        BEGIN SELECT RAISE(ABORT,'ingestion capture binding is immutable'); END""")
+    db.execute(f"""CREATE TRIGGER IF NOT EXISTS source_media_ingestion_capture_release
+        BEFORE UPDATE OF audio_released_at ON capture_state
+        WHEN ({protected_capture}) AND NEW.audio_released_at IS NOT OLD.audio_released_at
+          AND ingestion_release('capture',OLD.capture_id,OLD.audio_path,NEW.audio_released_at)!=1
+        BEGIN SELECT RAISE(ABORT,'ingestion audio is retained'); END""")
+    db.execute(f"""CREATE TRIGGER IF NOT EXISTS source_media_ingestion_capture_no_delete
+        BEFORE DELETE ON capture_state WHEN ({protected_capture})
+        BEGIN SELECT RAISE(ABORT,'ingestion capture owner is durable'); END""")
 
 
 def preview(path):

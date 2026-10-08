@@ -10,10 +10,21 @@ import pytest
 
 from knowledge_distiller.v1 import raw
 from knowledge_distiller.v1.captures import record_capture
-from knowledge_distiller.v1.database import connect
+from knowledge_distiller.v1.database import connect, INGESTION_CONTRACT
 from knowledge_distiller.v1.ingestion import Ingestion, IngestionError, verify_record, read_regular
 from knowledge_distiller.v1.store import Store
-from .test_raw import material, PNG
+from .test_raw import material as _material, PNG
+
+
+def material(store, *args, **kwargs):
+    """Explicit new-contract synthetic owner; production defaults stay legacy."""
+    mid = _material(store, *args, **kwargs)
+    item = store.create_item(f"synthetic://raw/{mid}", ingestion_contract=INGESTION_CONTRACT,
+                             source_binding_sha256=hashlib.sha256(f"input:{mid}".encode()).hexdigest(),
+                             relation_binding_sha256=hashlib.sha256(b"synthetic frozen no-selection plan").hexdigest())
+    with connect(store.path) as db:
+        db.execute("UPDATE distill_items SET material_id=? WHERE item_id=?", (mid, item))
+    return mid
 
 
 @pytest.fixture
@@ -23,7 +34,7 @@ def world(tmp_path):
     vault = tmp_path / "vault"
     vault.mkdir()
     store.set_setting("vault_path", str(vault))
-    candidate = Ingestion(store, tmp_path / "candidate.sqlite3")
+    candidate = Ingestion(store)
     candidate.initialize()
     return store, vault, candidate
 
@@ -35,7 +46,7 @@ def test_exact_receipt_no_sql_knowledge_or_wiki_task(world, monkeypatch):
     monkeypatch.setattr(store, "establish_knowledge", lambda *a: pytest.fail("old knowledge called"))
     receipt = candidate.material(mid, vault)
     assert receipt.subject_kind == "material" and receipt.identity == "第三方"
-    assert receipt.format_version == 1 and '"native_version":"v7"' in receipt.source_version
+    assert receipt.format_version == 1 and len(receipt.source_version) == 64
     assert (vault / receipt.relative_path).read_bytes() == candidate.ledger.record(receipt.raw_id)["content"].encode()
     assert receipt.attachments and (vault / receipt.attachments[0][0]).read_bytes() == PNG
     with connect(store.path) as db:
@@ -45,17 +56,17 @@ def test_exact_receipt_no_sql_knowledge_or_wiki_task(world, monkeypatch):
     assert [e[0] for e in candidate.events(f"material:{mid}")].count("raw_verified") == 1
 
 
-def test_explicit_private_initialization_and_no_history_backfill(world, tmp_path):
+def test_main_process_storage_does_not_initialize_or_backfill_history(world, tmp_path):
     store, vault, _ = world
     material(store, "x", "历史原件")
-    with pytest.raises(IngestionError, match="candidate_database_required"):
-        Ingestion(store, store.path)
-    candidate = Ingestion(store, tmp_path / "separate.sqlite3")
-    with pytest.raises(sqlite3.OperationalError):
-        candidate.events("material:1")
+    candidate = Ingestion(store)
     candidate.initialize()
     assert candidate.events("material:1") == []
     assert not (vault / "raw").exists()
+    assert candidate.path == store.path and not (tmp_path / "candidate.sqlite3").exists()
+    unopened = Ingestion(Store(tmp_path / "not-initialized.sqlite3"))
+    with pytest.raises(IngestionError, match="candidate_schema_rebuild_required"):
+        unopened.initialize()
 
 
 def test_unavailable_retains_bytes_and_retries_same_raw(world, tmp_path):
@@ -64,17 +75,16 @@ def test_unavailable_retains_bytes_and_retries_same_raw(world, tmp_path):
     unavailable = tmp_path / "unmounted"
     with pytest.raises(IngestionError, match="vault_unavailable"):
         candidate.material(mid, unavailable)
-    record = candidate.ledger.current("material", mid)
-    with sqlite3.connect(candidate.path) as db:
-        parts = db.execute("SELECT content FROM ingest_retained").fetchall()
-        assert set(row[0] for row in parts) == {record["content"].encode(), PNG}
-        with pytest.raises(sqlite3.IntegrityError):
-            db.execute("DELETE FROM ingest_retained")
+    assert candidate.ledger.current("material", mid) is None  # No lockable Vault, no assignment.
+    with connect(store.path) as db:
+        assert db.execute("SELECT content FROM source_media WHERE material_id=?", (mid,)).fetchone()[0] == PNG
+        assert db.execute("SELECT snapshot FROM source_facts WHERE material_id=?", (mid,)).fetchone()[0] == "必须保留的原件"
+        assert db.execute("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'ingest_retained%'").fetchone()[0] == 0
     assert not any(e[0] == "raw_verified" for e in candidate.events(f"material:{mid}"))
     unavailable.mkdir()
     receipt = candidate.material(mid, unavailable)
-    assert receipt.raw_id == record["raw_id"]
-    assert len(candidate.events(f"material:{mid}")) == 3
+    assert receipt.raw_id == candidate.ledger.current("material", mid)["raw_id"]
+    assert [e[0] for e in candidate.events(f"material:{mid}")] == ["raw_verified"]
 
 
 @pytest.mark.parametrize("damage", ["raw", "attachment", "missing", "symlink"])
@@ -124,14 +134,14 @@ def _capture(store, candidate, *, voice=False, decision="my_thought", target=Non
     return cid
 
 
-def test_capture_needs_precise_existing_interface_not_second_business(world):
+def test_capture_uses_extracted_writer_without_success_or_release(world):
     store, vault, candidate = world
     cid = _capture(store, candidate)
-    with pytest.raises(IngestionError, match="capture_precise_writer_required"):
-        candidate.capture(cid, vault)
+    receipt = candidate.capture(cid, vault)
     with connect(store.path) as db:
-        assert db.execute("SELECT COUNT(*) FROM raw_records").fetchone()[0] == 0
-    assert candidate.events(f"capture:{cid}") == []
+        assert db.execute("SELECT COUNT(*) FROM raw_records").fetchone()[0] == 1
+    assert receipt.raw_id == candidate.captures.get(cid)["raw_id"]
+    assert [e[0] for e in candidate.events(f"capture:{cid}")] == ["raw_verified"]
 
 
 def test_capture_uses_own_identity_and_waits_for_actual_target(world):
@@ -187,17 +197,21 @@ def test_write_conflict_or_attachment_failure_never_verifies(world, monkeypatch)
 def _part(world, message, position, *, written=True, state="working"):
     store, vault, candidate = world
     mid = material(store, "x", f"完整原件{message}-{position}", key=f"{message}-{position}")
-    item = store.create_item(f"https://example.org/{message}/{position}")
+    with connect(store.path) as db:
+        item = db.execute("SELECT item_id FROM distill_items WHERE material_id=? AND ingestion_contract=?",
+                          (mid, INGESTION_CONTRACT)).fetchone()[0]
     with connect(store.path) as db:
         db.execute("INSERT OR IGNORE INTO feishu_binding VALUES(?,?,?,?,0,0)",
                    ("app-synthetic", "bot", "owner", "chat"))
         db.execute("""INSERT OR IGNORE INTO feishu_receipts
             (app_id,message_id,created_ms,raw_json,text,same_topic,content_kind,state)
             VALUES(?,?,0,'{}','synthetic',0,'links','accepted')""", ("app-synthetic", message))
-        db.execute("UPDATE distill_items SET material_id=?,state=? WHERE item_id=?", (mid, state, item))
+        db.execute("UPDATE distill_items SET state=? WHERE item_id=?", ("working" if written else state, item))
         db.execute("INSERT INTO feishu_parts(app_id,message_id,position,item_id) VALUES(?,?,?,?)",
                    ("app-synthetic", message, position, item))
     receipt = candidate.material(mid, vault) if written else None
+    with connect(store.path) as db:
+        db.execute("UPDATE distill_items SET state=? WHERE item_id=?", (state, item))
     return mid, item, receipt
 
 
@@ -436,8 +450,9 @@ def test_external_exception_text_is_not_persisted_as_pending_reason(world, monke
     monkeypatch.setattr(ingestion, "verify_record", fail)
     with pytest.raises(IngestionError):
         candidate.material(mid, vault)
-    details = " ".join(e[2] for e in candidate.events(f"material:{mid}"))
-    assert "external private source text" not in details and "raw_readback_failed" in details
+    with connect(store.path) as db:
+        details = " ".join(r[0] for r in db.execute("SELECT detail_json FROM ingestion_events"))
+    assert "external private source text" not in details and "readback_pending" in details
 
 
 def test_voice_does_not_need_success_or_release_audio(world, tmp_path):
@@ -452,39 +467,39 @@ def test_voice_does_not_need_success_or_release_audio(world, tmp_path):
         db.execute("UPDATE capture_state SET item_id=?,audio_path=? WHERE capture_id=?", (item, str(audio), cid))
     with pytest.raises(IngestionError, match="capture_route_required"):
         candidate.material(mid, vault)
-    with pytest.raises(IngestionError, match="capture_precise_writer_required"):
-        candidate.capture(cid, vault)
-    capture = candidate.captures.get(cid)
-    document = candidate.captures.render(capture, candidate.captures.identity(cid), [], 0, None)
-    with connect(store.path) as db:
-        raw.insert(db, capture["raw_id"], "capture", cid, "本人", document, origin="app")
-    assert candidate.capture(cid, vault).identity == "本人"
-    assert candidate._message_raw("app-synthetic", "m1", vault) == capture["raw_id"]
+    receipt = candidate.capture(cid, vault)
+    assert receipt.identity == "本人"
+    assert candidate._message_raw("app-synthetic", "m1", vault) == receipt.raw_id
     assert store.item_bundle(item)["state"] == "working"
     assert audio.read_bytes().startswith(b"synthetic")
     assert candidate.captures.get(cid)["audio_released_at"] is None
 
 
 CHILD = """
-import os,sys
+import os,sys,time
 from pathlib import Path
 from knowledge_distiller.v1.store import Store
 from knowledge_distiller.v1.ingestion import Ingestion
-c=Ingestion(Store(Path(sys.argv[1])),Path(sys.argv[2]));c.initialize()
-if sys.argv[5]=='crash':
- original=c._event
- def event(subject,kind,binding,detail):
+c=Ingestion(Store(Path(sys.argv[1])));c.initialize()
+if sys.argv[4]=='crash':
+ original=c._insert_proven
+ def event(db,record,item_id,kind,binding,lock):
   if kind=='raw_verified': os._exit(23)
-  return original(subject,kind,binding,detail)
- c._event=event
-c.material(int(sys.argv[3]),Path(sys.argv[4]))
+  return original(db,record,item_id,kind,binding,lock)
+ c._insert_proven=event
+for attempt in range(100):
+ try:
+  c.material(int(sys.argv[2]),Path(sys.argv[3]));break
+ except BlockingIOError:
+  if attempt==99: raise
+  time.sleep(.02)
 """
 
 
 def test_multiprocess_same_subject_and_crash_after_placement(world):
     store, vault, candidate = world
     mid = material(store, "x", "跨进程原件", media=[("image-1", PNG)])
-    args = [sys.executable, "-c", CHILD, str(store.path), str(candidate.path), str(mid), str(vault)]
+    args = [sys.executable, "-c", CHILD, str(store.path), str(mid), str(vault)]
     child = subprocess.run(args + ["crash"], capture_output=True, timeout=30)
     assert child.returncode == 23, child.stderr
     assert not any(e[0] == "raw_verified" for e in candidate.events(f"material:{mid}"))
@@ -496,4 +511,111 @@ def test_multiprocess_same_subject_and_crash_after_placement(world):
     assert len(list((vault / "raw").rglob("*.md"))) == 1
     with sqlite3.connect(candidate.path) as db:
         with pytest.raises(sqlite3.IntegrityError):
-            db.execute("UPDATE ingest_events SET detail='{}'")
+            db.execute("UPDATE ingestion_events SET detail_json='{}'")
+
+
+def test_full_adjacency_preserves_two_objects_but_annotation_does_not_choose(world):
+    store, vault, candidate = world
+    first = _part(world, "target", 0)[2]
+    second = _part(world, "target", 1)[2]
+    cid = _capture(store, candidate)
+    with connect(store.path) as db:
+        db.execute("INSERT INTO delivery_adjacency VALUES(?,?,?,7)", ("app-synthetic", "m1", "target"))
+        objects, code = candidate.captures.message_raws(db, "app-synthetic", "target")
+    assert code is None and [o["ordinal"] for o in objects] == [0, 1]
+    assert [o["record"]["raw_id"] for o in objects] == [first.raw_id, second.raw_id]
+    receipt = candidate.capture(cid, vault)
+    from knowledge_distiller.v1.ingestion import envelope_fields
+    fields = envelope_fields((vault / receipt.relative_path).read_bytes())
+    assert fields["邻接"] == [{"编号": first.raw_id, "间隔秒": 7}, {"编号": second.raw_id, "间隔秒": 7}]
+    candidate.captures._event(cid, "annotation", "用户", 1.0, "target")
+    with pytest.raises(IngestionError, match="capture_target_ambiguous"):
+        candidate.capture(cid, vault)
+    assert (vault / receipt.relative_path).read_bytes() == candidate.ledger.record(receipt.raw_id)["content"].encode()
+
+
+def test_partial_error_is_pending_even_if_another_part_is_written(world):
+    store, vault, candidate = world
+    _part(world, "target", 0)
+    with connect(store.path) as db:
+        db.execute("INSERT INTO feishu_parts(app_id,message_id,position,error) VALUES(?,?,1,?)",
+                   ("app-synthetic", "target", "source_input_unsupported"))
+        objects, code = candidate.captures.message_raws(db, "app-synthetic", "target")
+    assert objects == () and code == "message_raw_pending"
+    with pytest.raises(IngestionError, match="message_raw_pending"):
+        candidate._message_raw("app-synthetic", "target", vault)
+
+
+def test_material_source_projection_cannot_validate_arbitrary_ledger_body(world):
+    store, vault, candidate = world
+    mid = material(store, "x", "真实完整来源")
+    record = candidate.ledger.ensure_material(mid)
+    # Use the existing writer/supersession interface, no source mutation or
+    # disabled triggers. A fabricated ledger body is not a source certificate.
+    forged = candidate.ledger.supersede(record["raw_id"], lambda rid, moment: raw.RawDocument(
+        raw.relative_path(rid, "第三方", moment), record["content"].replace(record["raw_id"], rid).replace("真实完整来源", "伪造正文")),
+        identity="第三方")
+    assert candidate.ledger.write(forged, vault) in {"placed", "already"}
+    with pytest.raises(IngestionError, match="source_fact_binding_invalid"):
+        candidate.material(mid, vault)
+    assert candidate.events(f"material:{mid}") == []
+
+
+def test_material_cycle_is_pending_at_bounded_leaf(world):
+    store, vault, candidate = world
+    _part(world, "self", 0)
+    with connect(store.path) as db:
+        db.execute("INSERT INTO delivery_adjacency VALUES(?,?,?,1)", ("app-synthetic", "self", "self"))
+    with pytest.raises(IngestionError, match="capture_adjacency_pending"):
+        candidate._message_raw("app-synthetic", "self", vault)
+
+
+def test_current_decision_changed_after_write_cannot_commit_raw_verified(world, monkeypatch):
+    store, vault, candidate = world
+    cid = _capture(store, candidate)
+    original = candidate.ledger.write
+    def write_then_change(record, destination):
+        result = original(record, destination)
+        candidate.captures._event(cid, "annotation", "用户", 1.0, "new-target")
+        return result
+    monkeypatch.setattr(candidate.ledger, "write", write_then_change)
+    with pytest.raises(IngestionError, match="source_binding_changed"):
+        candidate.capture(cid, vault)
+    assert candidate.events(f"capture:{cid}") == []
+    record = candidate.ledger.current("capture", cid)
+    assert (vault / record["relative_path"]).read_bytes() == record["content"].encode()
+
+
+def test_changed_adjacency_is_rejected_inside_assignment_transaction(world, monkeypatch):
+    store, vault, candidate = world
+    _part(world, "earlier", 0)
+    mid, item, _ = _part(world, "current", 0, written=False)
+    original = candidate.ledger.ensure_material
+    def change_before_assignment(material_id, **kwargs):
+        with connect(store.path) as db:
+            db.execute("INSERT INTO delivery_adjacency VALUES(?,?,?,1)", ("app-synthetic", "current", "earlier"))
+        return original(material_id, **kwargs)
+    monkeypatch.setattr(candidate.ledger, "ensure_material", change_before_assignment)
+    with pytest.raises(IngestionError, match='source_binding_changed'):
+        candidate.material(mid, vault, item_id=item)
+    assert candidate.ledger.heads('material', mid) == ()
+
+
+def test_nonnull_empty_confirmation_still_blocks_raw(world):
+    store, vault, candidate = world
+    mid = material(store, 'x', 'synthetic source')
+    with connect(store.path) as db:
+        db.execute("UPDATE distill_items SET confirmation_json='' WHERE material_id=?", (mid,))
+    with pytest.raises(IngestionError, match='source_not_ready'):
+        candidate.material(mid, vault)
+    assert candidate.ledger.heads('material', mid) == ()
+
+
+def test_unknown_identity_keeps_reserved_capture_without_raw(world):
+    store, vault, candidate = world
+    cid = _capture(store, candidate, decision='pending')
+    with pytest.raises(IngestionError, match='capture_identity_pending'):
+        candidate.capture(cid, vault)
+    assert candidate.captures.get(cid)['raw_id']
+    assert candidate.ledger.heads('capture', cid) == ()
+    assert candidate.events(f'capture:{cid}') == []

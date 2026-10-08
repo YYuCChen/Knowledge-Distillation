@@ -156,3 +156,25 @@ PYTHONPATH='/Users/chen./Documents/知识蒸馏器/V3.0开发/source/src' TZ=Asi
 首测根 `/tmp/kd-v3-r01-a1-tests-20261008.k6xU15`、JUnit SHA `9829dc2946898410c068df42b6a589a946f5b024d90b32bc4813ad5bf34b328e`，123项中121通过2夹具失败。只修水位夹具后，Luna/max 在新0700根 `/tmp/kd-v3-r01-a1-fixture-tests-20261008.9M3hUa`、env-i、CPython3.11.16测试工具及SQLite3.53.1下唯一一次定向复验22/23两个节点，2 passed、无失败/错误/跳过，pytest/外层均退出0。JUnit SHA `ccd9bf0438c2276b30abf96a7363e000b2b21a0011ac473577a874176872f417`；主控独立解析两份实际JUnit并核五业务/既有wiki_schema测试前后SHA不变，修后新测试SHA `3e113797e32e7135d373c64368b4164a16519ed95595e7d6eb90bd2bf265ebd9`。
 
 全部123个不同节点已覆盖通过，不冒称修后重跑七文件全套。主控已审实际五业务diff、全部新测试和既有测试diff：schema22/23迁移事务、旧列/字节/ID/水位、默认legacy、不可变绑定、保守保留、typed观察及并发幂等在限定合成范围内成立。A1仍无filesystem proof producer、产品接线、真实资料迁移或Vault写入；本验收不把typed事件或预留receipt当原件/出版成功，也不证明正式应用升级。
+
+### 2026-10-08 A2：主 DB 原件证明与显式释放候选（冻结前静态核验，未 pytest）
+
+本节为当前 A2 接口；前面的私有 ingestion DB、缺精确 capture writer、A1 proof_unavailable 描述保留为对应阶段历史。A1 已由主控按实际 JUnit/SHA验收并提交 e22c05f890ac603aa1b7f96edeffd62e531f6b11：首121 passed +定向2覆盖123 distinct，不是全套重跑。A2启动真实自身JSONL为 session 01a1185a-d5d8-70c3-8591-e7d65ee763b9，最新 turn_context 2026-10-07T23:17:44.967Z、gpt-6.1-sol/medium；未用父 CODEX_SESSION_ID。
+
+- `Ingestion(store)` 使用主 DB 的 append-only ingestion_events，移除第二私有库及正文/附件副本。initialize只检查已存在候选schema的proof guard，不创建DB、不迁移、不扫历史；四个显式业务入口均先检查。原私有库/旧资料不自动删除或回填。material必须指定或唯一解析显式新合同owner；capture是显式的新过程调用，独立文字capture由实际不可变输入/当前关系快照生成摘要，不改变旧item合同；legacy-linked capture诊断证明不能授权其录音释放。
+- 原 Captures.write_ready 分配段抽为 ensure_raw，共用唯一render、raw.insert和预留ID。source/check_source只读CAS在原BEGIN IMMEDIATE内，decision/get及SourceFact/确认/当前邻接和唯一目标重新核对；不复制writer/allocate，不以succeeded才能分配，不释放原音。旧write_ready仍按原ready/24h规则、原单ID投影及legacy音频政策调用同一分配段，保留并发已分配skip；原render正文/信封和immutable guards不改。
+- Captures.message_raws按part ordinal/capture关系完整枚举当前对象，技术error、缺part/Fact/原件、确认/failed/dismissed/未accepted皆pending；一个subject多个head冲突。Ingestion逐对象实际读回及当前完整render/source核对；多对象邻接可复用原列表表达，多个target仍ambiguous，不能首项或all猜。叶依赖已有邻接/附言时保守pending，含material/capture循环都不递归。生产原scalar投影和UI未改。
+- 首次验证持实际VaultWriteLock：原分配事务重查输入/关系→原RawLedger.write→FULL synchronous/BEGIN IMMEDIATE→重读SourceFact/latest完整decision/head/原输入/全部owner与关系摘要→当前renderer/精确bytes/hash/稳定ID/路径/身份/格式/完整附件集合核验→绑定CAS→登记raw_verified。普通written_at、旧kr、调用者RawReceipt/manifest/published=True不构成证明。事件只固定码、ID/版本/hash/长度/成员manifest，外部正文和任意异常str不写事件/last_error。
+- 数据库保留同名proof_unavailable guard：正常connect注册恒拒绝UDF，普通Store append API只可观察；普通SQL无UDF或恒0，不能伪造成功/释放。内部_insert_proven不接受RawReceipt/manifest，只接受实际锁与事务，自行重做读回及CAS后短暂安装匹配本次kind/binding/detail的连接能力，finally撤销；清source_media的能力只允许本次已读回member/hash和空bytes。SQL自身不证明FS，也不抵抗同uid任意改库/改Python/UDF或不遵守锁的写入与syscallgap。
+- release_material独立显式调用：实际再读正文/全部附件、全owner新合同各自当前证明、确认/取消/终态/原历史水位均复查；source_media清零、release_authorized/media_released事件、计数同事务，保留全部身份/hash。释放后同Vault/同当前绑定的已首次证明manifest才允许精确文件读回；缺失/损坏不从空source修复，不重采/旧derive。新owner在已释放后加入使旧聚合绑定失效，现保守pending，不扩大缓存证明。
+- release_capture只支持原Captures确定的owned audio_root/<capture_id>.opus、单owner且无共享path；实际raw/ASR绑定/录音hash核验后先提交release_authorized，再持锁重读当前owner/确认/绑定/原件后unlink和media_released。删除后DB崩溃可显式重试同意图，仍读回原raw并复核绑定；不自动启动恢复，不重跑模型。不匹配原owned path、多owner或共享录音始终保留。
+- 保留原source_media_no_update的终态/written raw条件作为额外veto；raw_verified不自行mark_succeeded。Store/TemporaryArtifacts原A1的TTL、submitted原输入和工作目录保留门槛未改，默认sweep/prepare/clean_item没有FS能力，仍不清新合同。A3终态投影及安全工作目录回收仍待主控另授权，不能说采集产品主链已切换。
+- schema24仍是未发行候选，22→原23→扩充24、23→24、新根使用新增guard。initialize(24)不移除旧guard；旧候选24合成根明确重建，Ingestion识别旧guard拒绝。未修改wiki_schema、旧captures/transcript/SourceFact/raw不可变合同或任何真实库。
+
+初始item两hash仍沿A1绑定投递命名空间/输入快照与冻结关系计划，不等于最终Fact。A2将其不可变值与实际当前输入摘要、最终Fact/revision、解析关系摘要一起CAS；尚未接生产入口的初始manifest规范序列化producer，合成a/b值不能冒充该producer已验收。无item/legacy-linked capture的显式诊断过程使用实际capture输入和当前关系快照的摘要；它不改写legacy item合同，也不能授权legacy owner或共享录音释放。现VaultWriteLock仅POSIX，新证明/释放在Windows保守不可用；未新增跨平台锁实现或切换旧产品。原始DB过程证据丢失时，raw仍是原件正本，但本步不会从written_at/历史日志重建成功或释放权，也没有接正式wiki结果投影。
+
+合成测试已更新/新增：实际Vault首写/精确回执/释放后读回；raw/附件损坏、遗失、symlink、FIFO/驱动路径；完整多part邻接及单target歧义；same identity换target、最新third_party旧本人head、正文投影诊断和audio合法旧fixture新material更正；SourceFact不匹配/未表示媒体成员拒绝；分配事务关系变化；写后DB前真实子进程crash、两进程Vault锁忙显式重试、重启同ID/事件幂等；普通API/SQL复制真实manifest也拒绝；新owner缺证明/确认/取消/TTL保护；清零后事务失败rollback；原音删除后DB失败的持久意图恢复、owned path和共享owner保护。这些是测试设计，未收集/运行，不伪称通过。原失败QA/JUnit不删，fake ASR字节/SourceFact不证明真实ASR语义。
+
+已执行7个修改Python文件AST、scoped git diff --check、只读源码/AST/HEAD字节比对。原Raw render/body/envelope/allocate/place/insert/附件writer，Captures render/record_capture/旧message投影/ready/decide，media_lifecycle原release trigger/migrate/require_raw/release_completed/preview的AST与HEAD相同。Store、TemporaryArtifacts、capture_schema、wiki_schema、pipeline、worker、app字节与A1 HEAD相同。未执行业务import/SQL/pytest/collect/model/network/真实Vault或DB/应用安装/公开动作，没有新JUnit或提交。其他worker的未授权写集差异保留，未回退。
+
+实际完整scoped diff、SHA、接口/限制与Luna待执行命令交接：`/tmp/kd-v3-r01-a2-handoff-20261008.md`。A2冻结后由主控读实际diff再决定Luna首测；不进入A3/B，产品可见接线仍未批准。
