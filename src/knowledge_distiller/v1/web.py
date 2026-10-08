@@ -896,8 +896,10 @@ def create_app(
             abort(404)
         pending = prepared['pending']
         requested = request.args.get('concern_id', '')
-        matches = [c for c in pending.get('concerns', [])
-                   if requested in {c.get('concern_uid'), c.get('audio_name')}]
+        concerns = pending.get('concerns', [])
+        matches = (concerns if not requested and len(concerns) == 1 else
+                   [c for c in concerns if requested and
+                    requested in {c.get('concern_uid'), c.get('audio_name')}])
         if len(matches) != 1:
             abort(404)
         from .confirmation_preparation import prepared_audio, PreparationError

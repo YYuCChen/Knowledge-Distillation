@@ -198,12 +198,47 @@ def test_verified_audio_retains_range_seek_actual_slice_and_no_factory(setup):
     assert response.headers['Content-Range'] == f'bytes 44-75/{len(expected)}'
     assert response.data == expected[44:76]
     assert response.headers['Cache-Control'] == 'no-store'
+    assert client.get(f'/items/{item}/confirmation-audio').status_code == 404
     assert client.get(f'/items/{item}/confirmation-audio?concern_id=not-a-member').status_code == 404
     assert client.get(f'/items/{item}/confirmation-audio?concern_id=../audio/standard.wav').status_code == 404
     assert len(calls) == count and len(producer.calls) == 1
     (store.preparation_runtime_root / 'items' / str(item) / 'confirmation/concern-2.wav').unlink()
     assert client.get(f'/items/{item}/confirmation-audio?concern_id=concern-1.wav',
                       headers={'Range': 'bytes=44-75'}).status_code == 404
+    assert len(calls) == count and len(producer.calls) == 1
+
+
+def test_single_verified_audio_legacy_url_is_scoped_and_read_only(setup):
+    client, store, producer, calls, worker, item, gate = setup
+    pending = _pending()
+    pending['concerns'] = pending['concerns'][:1]
+    store.mark_waiting(item, pending)
+    assert client.get(f'/items/{item}/confirmation-audio').status_code == 404
+    assert calls == producer.calls == []
+    _prepare(store, worker, item)
+    current = store.presentation_context(item)
+    assert len(current['pending']['concerns']) == 1
+    assert ready(current['pending'], current['item_runtime_root'],
+                 source_descriptor=current['source_descriptor'])
+    member = current['pending']['concerns'][0]
+    expected = (current['item_runtime_root'] / 'confirmation' / member['audio_file']).read_bytes()
+    saved = store.item_bundle(item)['confirmation_json']
+    count = len(calls)
+    for suffix in ('', '?concern_id=' + member['concern_uid'],
+                   '?concern_id=' + member['audio_name']):
+        response = client.get(f'/items/{item}/confirmation-audio{suffix}')
+        assert response.status_code == 200 and response.data == expected
+        assert response.headers['Cache-Control'] == 'no-store'
+    response = client.get(f'/items/{item}/confirmation-audio', headers={'Range': 'bytes=44-75'})
+    assert response.status_code == 206 and response.data == expected[44:76]
+    assert response.headers['Content-Range'] == f'bytes 44-75/{len(expected)}'
+    assert response.headers['Cache-Control'] == 'no-store'
+    assert client.get(f'/items/{item + 1}/confirmation-audio').status_code == 404
+    assert client.get(f'/items/{item}/confirmation-audio?concern_id=not-a-member').status_code == 404
+    assert store.item_bundle(item)['confirmation_json'] == saved
+    assert len(calls) == count and len(producer.calls) == 1
+    (current['item_runtime_root'] / 'confirmation' / member['audio_file']).write_bytes(b'damaged clip')
+    assert client.get(f'/items/{item}/confirmation-audio').status_code == 404
     assert len(calls) == count and len(producer.calls) == 1
 
 
