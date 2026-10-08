@@ -654,32 +654,15 @@ def migrate_v24(connection: sqlite3.Connection) -> None:
             BEFORE INSERT ON {table} WHEN NEW.ingestion_contract!='legacy'
               AND (NEW.source_binding_sha256 IS NULL OR NEW.relation_binding_sha256 IS NULL)
             BEGIN SELECT RAISE(ABORT,'ingestion binding required'); END""")
-    connection.execute("""CREATE TRIGGER IF NOT EXISTS distill_items_ingestion_owner_immutable
-        BEFORE UPDATE OF material_id ON distill_items
-        WHEN OLD.ingestion_contract!='legacy' AND OLD.material_id IS NOT NULL
-          AND NEW.material_id IS NOT OLD.material_id
-        BEGIN SELECT RAISE(ABORT,'ingestion owner is immutable'); END""")
-    connection.execute("""CREATE TRIGGER IF NOT EXISTS distill_items_ingestion_no_delete
-        BEFORE DELETE ON distill_items WHEN OLD.ingestion_contract!='legacy'
-        BEGIN SELECT RAISE(ABORT,'ingestion owner is durable'); END""")
+    connection.execute(_SOURCE_GUARDS['distill_items_ingestion_owner_immutable'][2].replace('CREATE TRIGGER ', 'CREATE TRIGGER IF NOT EXISTS ', 1))
+    connection.execute(_SOURCE_GUARDS['distill_items_ingestion_no_delete'][2].replace('CREATE TRIGGER ', 'CREATE TRIGGER IF NOT EXISTS ', 1))
     connection.execute("""CREATE TRIGGER IF NOT EXISTS collection_members_ingestion_contract_match
         BEFORE INSERT ON collection_members
         WHEN (SELECT ingestion_contract FROM collection_operations WHERE operation_id=NEW.operation_id)
           IS NOT (SELECT ingestion_contract FROM distill_items WHERE item_id=NEW.item_id)
         BEGIN SELECT RAISE(ABORT,'collection ingestion contract mismatch'); END""")
-    connection.execute("""CREATE TABLE IF NOT EXISTS ingestion_events (
-        event_id INTEGER PRIMARY KEY,
-        event_key TEXT NOT NULL UNIQUE CHECK(length(event_key)=64 AND event_key NOT GLOB '*[^0-9a-f]*'),
-        contract TEXT NOT NULL CHECK(contract='raw-verified-v1'),
-        subject_kind TEXT NOT NULL CHECK(subject_kind IN ('item','material','capture')),
-        subject_id INTEGER NOT NULL CHECK(subject_id>0),
-        item_id INTEGER REFERENCES distill_items(item_id),
-        kind TEXT NOT NULL CHECK(kind IN ('source_ready','raw_pending','raw_verified','release_authorized','media_released')),
-        binding_sha256 TEXT NOT NULL CHECK(length(binding_sha256)=64 AND binding_sha256 NOT GLOB '*[^0-9a-f]*'),
-        detail_json TEXT NOT NULL CHECK(json_valid(detail_json) AND json_type(detail_json)='object'),
-        created_at TEXT NOT NULL CHECK(trim(created_at)!='')
-    )""")
-    connection.execute('CREATE INDEX IF NOT EXISTS ingestion_events_subject ON ingestion_events(subject_kind,subject_id,event_id)')
+    connection.execute(_SOURCE_GUARDS['ingestion_events'][2].replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS ', 1))
+    connection.execute(_SOURCE_GUARDS['ingestion_events_subject'][2].replace('CREATE INDEX ', 'CREATE INDEX IF NOT EXISTS ', 1))
     connection.execute(OBSERVATION_V24_SQL)
     for action in ('UPDATE', 'DELETE'):
         connection.execute(f"""CREATE TRIGGER IF NOT EXISTS ingestion_events_no_{action.lower()}
@@ -687,16 +670,7 @@ def migrate_v24(connection: sqlite3.Connection) -> None:
             BEGIN SELECT RAISE(ABORT,'ingestion event is immutable'); END""")
     # This DDL is for fresh/22/23 synthetic candidate roots only. initialize(24)
     # intentionally does not replace an earlier candidate's fail-closed guard.
-    connection.execute("""CREATE TRIGGER IF NOT EXISTS ingestion_events_proof_unavailable
-        BEFORE INSERT ON ingestion_events
-        WHEN NEW.kind IN ('raw_verified','release_authorized','media_released')
-          AND (ingestion_proof(NEW.kind,NEW.binding_sha256,NEW.detail_json)!=1
-               OR NEW.kind IS NOT json_extract(NEW.detail_json,'$.code')
-               OR NEW.subject_kind IS NOT json_extract(NEW.detail_json,'$.manifest.subject_kind')
-               OR NEW.subject_id IS NOT json_extract(NEW.detail_json,'$.manifest.subject_id')
-               OR NEW.item_id IS NOT json_extract(NEW.detail_json,'$.manifest.owner_item_id')
-               OR NEW.binding_sha256 IS NOT json_extract(NEW.detail_json,'$.final_binding_sha256'))
-        BEGIN SELECT RAISE(ABORT,'filesystem proof unavailable'); END""")
+    connection.execute(_SOURCE_GUARDS['ingestion_events_proof_unavailable'][2].replace('CREATE TRIGGER ', 'CREATE TRIGGER IF NOT EXISTS ', 1))
     from .wiki_schema import migrate_outcome_storage
     migrate_outcome_storage(connection)
     from .media_lifecycle import protect_ingestion
@@ -729,6 +703,137 @@ OBSERVATION_V26_SQL = OBSERVATION_V24_SQL.replace(
 
 def _stored_ddl(statement):
     return statement.strip().rstrip(';')
+
+
+SUBMITTED_BINDING_COLUMNS = ('item_id', 'input_kind', 'input_key', 'input_label',
+                             'input_metadata', 'content', 'retain_until', 'retryable')
+
+
+def _source_ddl(statement):
+    """Only SQLite's documented CREATE prefix/storage spelling differences."""
+    sql = _stored_ddl(statement)
+    for kind in ('TABLE', 'INDEX', 'TRIGGER'):
+        prefix = 'CREATE ' + kind + ' IF NOT EXISTS '
+        if sql.startswith(prefix):
+            return 'CREATE ' + kind + ' ' + sql[len(prefix):]
+    return sql
+
+
+def source_schema_inventory(db):
+    """Finite catalog/ABI read only; missing guards never grant capability.
+
+    No initialization, migration, callbacks, row/body hashing or byte loading.
+    A known damaged guard is returned as a gap; unknown structure is rejected.
+    """
+    from .media_lifecycle import OLD_INPUT_GUARDS, LOCAL_INPUT_GUARDS, RELEASABLE
+    from .capture_schema import STATEMENTS as CAPTURE_STATEMENTS
+    version = db.execute('PRAGMA user_version').fetchone()[0]
+    if version not in (25, 26):
+        raise ValueError('source_schema_unsupported')
+    catalog = {r[1]: (r[0], r[2], r[3]) for r in db.execute(
+        'SELECT type,name,tbl_name,sql FROM sqlite_schema')}
+    expected = dict(_SOURCE_GUARDS)
+    for statement in RAW_STATEMENTS:
+        sql = _source_ddl(statement)
+        kind, name = sql.split()[1:3]
+        parent = 'raw_records' if name != 'raw_counters' else name
+        expected[name] = (kind.lower(), parent, sql)
+    submitted = SUBMITTED_SCHEMA_V26 if version == 26 else SUBMITTED_SCHEMA.replace("'epub'", "'epub', 'image'")
+    expected['submitted_sources'] = ('table', 'submitted_sources', _source_ddl(submitted))
+    for statement in (*OLD_INPUT_GUARDS, *(LOCAL_INPUT_GUARDS if version == 26 else ())):
+        sql = _source_ddl(statement)
+        expected[sql.split()[2]] = ('trigger', 'submitted_sources', sql)
+    observation = OBSERVATION_V26_SQL if version == 26 else OBSERVATION_V24_SQL
+    expected['ingestion_events_observation_typed'] = ('trigger', 'ingestion_events', _source_ddl(observation))
+    if version == 26:
+        expected['ingestion_events_local_owner'] = ('index', 'ingestion_events', _source_ddl(LOCAL_EVENT_INDEX))
+    for statement in RAW_TERMINAL_TRIGGERS:
+        expected[statement.split()[2]] = ('trigger', 'distill_items', statement)
+    for statement in CAPTURE_STATEMENTS:
+        sql = _source_ddl(statement)
+        kind, name = sql.split()[1:3]
+        table = name if kind == 'TABLE' else name.rsplit('_no_', 1)[0]
+        expected[name] = (kind.lower(), table, sql)
+    start = SCHEMA.index('CREATE TABLE distill_items (')
+    parent = SCHEMA[start:SCHEMA.index('\n);', start) + 2]
+    for definition in ("platform_authority_json TEXT NOT NULL DEFAULT '{}'",
+                       "submitted_title TEXT NOT NULL DEFAULT ''",
+                       'review_revision INTEGER NOT NULL DEFAULT 0', *INGESTION_COLUMNS):
+        parent = parent[:-1] + ', ' + definition + ')'
+    old_state = "state IN ('queued', 'working', 'waiting_user', 'succeeded', 'failed')"
+    if parent.count(old_state) != 1:
+        raise ValueError('source_schema_unsupported')
+    parent = parent.replace(old_state,
+                            "state IN ('queued','working','waiting_user','succeeded','failed','raw_saved')", 1)
+    parent = parent[:-1] + ", CHECK(state!='raw_saved' OR (phase='done' AND ingestion_contract='raw-verified-v1')))"
+    expected['distill_items'] = ('table', 'distill_items', parent)
+    start = SCHEMA.index('CREATE TABLE source_facts (')
+    expected['source_facts'] = ('table', 'source_facts', SCHEMA[start:SCHEMA.index('\n);', start) + 2])
+    for name in ('source_facts_no_update', 'source_facts_no_delete'):
+        start = SCHEMA.index('CREATE TRIGGER ' + name)
+        expected[name] = ('trigger', 'source_facts', SCHEMA[start:SCHEMA.index('\nEND;', start) + 4])
+    expected['source_media'] = ('table', 'source_media', '''CREATE TABLE source_media (
+                material_id INTEGER NOT NULL REFERENCES materials(material_id),
+                member_id TEXT NOT NULL, position INTEGER NOT NULL,
+                mime_type TEXT NOT NULL, sha256 TEXT NOT NULL, content BLOB NOT NULL,
+                PRIMARY KEY(material_id, member_id), UNIQUE(material_id, position)
+            )''')
+    expected['source_media_no_delete'] = ('trigger', 'source_media', '''CREATE TRIGGER source_media_no_delete
+                    BEFORE DELETE ON source_media
+                    WHEN EXISTS (SELECT 1 FROM source_facts WHERE material_id = OLD.material_id) BEGIN
+                    SELECT RAISE(ABORT, 'SourceFact media is immutable'); END''')
+    expected['source_media_no_insert'] = ('trigger', 'source_media', '''CREATE TRIGGER source_media_no_insert
+                BEFORE INSERT ON source_media
+                WHEN EXISTS (SELECT 1 FROM source_facts WHERE material_id = NEW.material_id) BEGIN
+                SELECT RAISE(ABORT, 'SourceFact media is immutable'); END''')
+    expected['source_media_no_update'] = ('trigger', 'source_media', f'''CREATE TRIGGER source_media_no_update BEFORE UPDATE ON source_media
+        WHEN EXISTS (SELECT 1 FROM source_facts WHERE material_id=OLD.material_id)
+        AND NOT (NEW.material_id=OLD.material_id AND NEW.member_id=OLD.member_id
+            AND NEW.position=OLD.position AND NEW.mime_type=OLD.mime_type
+            AND NEW.sha256=OLD.sha256 AND length(OLD.content)>0
+            AND typeof(NEW.content)='blob' AND length(NEW.content)=0
+            AND EXISTS (SELECT 1 FROM materials m WHERE m.material_id=OLD.material_id AND {RELEASABLE}))
+        BEGIN SELECT RAISE(ABORT,'SourceFact media is immutable'); END''')
+    gaps = []
+    for name, (kind, table, sql) in expected.items():
+        actual = catalog.get(name)
+        variants = {_source_ddl(sql)}
+        if kind == 'table':
+            variants.add(_source_ddl(sql).replace('CREATE TABLE ' + name, 'CREATE TABLE "' + name + '"', 1))
+        matches = (actual is not None and actual[:2] == (kind, table)
+                   and isinstance(actual[2], str) and _source_ddl(actual[2]) in variants)
+        if not matches:
+            if kind == 'table':
+                raise ValueError('source_schema_unsupported')
+            gaps.append(name)
+    # Exact table DDL fixes CHECK/FK/column ABI. Explicit indexes fix uniqueness.
+    # Extra guards/indexes on these source tables are not silently adopted.
+    tables = {'raw_records', 'raw_counters', 'source_facts', 'source_media',
+              'submitted_sources', 'ingestion_events', 'captures', 'capture_state',
+              'capture_transcripts', 'capture_identity_events', 'delivery_adjacency'}
+    if any(table in tables and name not in expected and not (kind == 'index' and sql is None)
+           for name, (kind, table, sql) in catalog.items()):
+        raise ValueError('source_schema_unsupported')
+    columns = tuple(tuple(r) for r in db.execute('PRAGMA table_xinfo(distill_items)'))
+    if (len(columns) != len(RAW_OWNER_COLUMNS) or {r[1] for r in columns} != set(RAW_OWNER_COLUMNS)
+            or any(r[6] or r[2] != ('INTEGER' if r[1] in {'item_id', 'material_id', 'review_revision'} else 'TEXT')
+                   for r in columns)):
+        raise ValueError('source_schema_unsupported')
+    if tuple(tuple(r) for r in db.execute('PRAGMA foreign_key_list(distill_items)')) != (
+            (0, 0, 'materials', 'material_id', 'material_id', 'NO ACTION', 'NO ACTION', 'NONE'),):
+        raise ValueError('source_schema_unsupported')
+    for table, wanted in (('submitted_sources', ('input_kind', 'input_key', 'binding_scope') if version == 26 else ('input_kind', 'input_key')),
+                          ('source_media', ('material_id', 'member_id'))):
+        indexes = db.execute('PRAGMA index_list(' + table + ')').fetchall()
+        unique = []
+        for row in indexes:
+            if row[2] and not row[4]:
+                keys = tuple(r[2] for r in db.execute('PRAGMA index_xinfo(' + _quoted(row[1]) + ')') if r[5])
+                unique.append(keys)
+        required = {wanted} if table == 'submitted_sources' else {wanted, ('material_id', 'position')}
+        if set(unique) != required or len(unique) != len(required):
+            raise ValueError('source_schema_unsupported')
+    return version, tuple(sorted(gaps))
 
 
 def migrate_v26(db):
@@ -833,3 +938,101 @@ def migrate_v26(db):
         raise RuntimeError('local intake migration unexpected unique index')
     if db.execute('PRAGMA foreign_key_check').fetchone() is not None or db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
         raise RuntimeError('local intake migration integrity failed')
+
+
+# Finite source catalog from the accepted schema25 DDL; no upgrade probe
+# imports or full-domain row inventory on the read path.
+_SOURCE_GUARDS = {
+    'ingestion_events': ('table', 'ingestion_events',
+        """CREATE TABLE ingestion_events (
+        event_id INTEGER PRIMARY KEY,
+        event_key TEXT NOT NULL UNIQUE CHECK(length(event_key)=64 AND event_key NOT GLOB '*[^0-9a-f]*'),
+        contract TEXT NOT NULL CHECK(contract='raw-verified-v1'),
+        subject_kind TEXT NOT NULL CHECK(subject_kind IN ('item','material','capture')),
+        subject_id INTEGER NOT NULL CHECK(subject_id>0),
+        item_id INTEGER REFERENCES distill_items(item_id),
+        kind TEXT NOT NULL CHECK(kind IN ('source_ready','raw_pending','raw_verified','release_authorized','media_released')),
+        binding_sha256 TEXT NOT NULL CHECK(length(binding_sha256)=64 AND binding_sha256 NOT GLOB '*[^0-9a-f]*'),
+        detail_json TEXT NOT NULL CHECK(json_valid(detail_json) AND json_type(detail_json)='object'),
+        created_at TEXT NOT NULL CHECK(trim(created_at)!='')
+    )"""),
+    'ingestion_events_subject': ('index', 'ingestion_events',
+        """CREATE INDEX ingestion_events_subject ON ingestion_events(subject_kind,subject_id,event_id)"""),
+    'ingestion_events_no_update': ('trigger', 'ingestion_events',
+        """CREATE TRIGGER ingestion_events_no_update
+            BEFORE UPDATE ON ingestion_events
+            BEGIN SELECT RAISE(ABORT,'ingestion event is immutable'); END"""),
+    'ingestion_events_no_delete': ('trigger', 'ingestion_events',
+        """CREATE TRIGGER ingestion_events_no_delete
+            BEFORE DELETE ON ingestion_events
+            BEGIN SELECT RAISE(ABORT,'ingestion event is immutable'); END"""),
+    'ingestion_events_proof_unavailable': ('trigger', 'ingestion_events',
+        """CREATE TRIGGER ingestion_events_proof_unavailable
+        BEFORE INSERT ON ingestion_events
+        WHEN NEW.kind IN ('raw_verified','release_authorized','media_released')
+          AND (ingestion_proof(NEW.kind,NEW.binding_sha256,NEW.detail_json)!=1
+               OR NEW.kind IS NOT json_extract(NEW.detail_json,'$.code')
+               OR NEW.subject_kind IS NOT json_extract(NEW.detail_json,'$.manifest.subject_kind')
+               OR NEW.subject_id IS NOT json_extract(NEW.detail_json,'$.manifest.subject_id')
+               OR NEW.item_id IS NOT json_extract(NEW.detail_json,'$.manifest.owner_item_id')
+               OR NEW.binding_sha256 IS NOT json_extract(NEW.detail_json,'$.final_binding_sha256'))
+        BEGIN SELECT RAISE(ABORT,'filesystem proof unavailable'); END"""),
+    'distill_items_ingestion_binding_immutable': ('trigger', 'distill_items',
+        """CREATE TRIGGER distill_items_ingestion_binding_immutable
+            BEFORE UPDATE OF ingestion_contract,source_binding_sha256,relation_binding_sha256 ON distill_items
+            WHEN NEW.ingestion_contract IS NOT OLD.ingestion_contract
+              OR NEW.source_binding_sha256 IS NOT OLD.source_binding_sha256
+              OR NEW.relation_binding_sha256 IS NOT OLD.relation_binding_sha256
+            BEGIN SELECT RAISE(ABORT,'ingestion binding is immutable'); END"""),
+    'distill_items_ingestion_binding_required': ('trigger', 'distill_items',
+        """CREATE TRIGGER distill_items_ingestion_binding_required
+            BEFORE INSERT ON distill_items WHEN NEW.ingestion_contract!='legacy'
+              AND (NEW.source_binding_sha256 IS NULL OR NEW.relation_binding_sha256 IS NULL)
+            BEGIN SELECT RAISE(ABORT,'ingestion binding required'); END"""),
+    'distill_items_ingestion_owner_immutable': ('trigger', 'distill_items',
+        """CREATE TRIGGER distill_items_ingestion_owner_immutable
+        BEFORE UPDATE OF material_id ON distill_items
+        WHEN OLD.ingestion_contract!='legacy' AND OLD.material_id IS NOT NULL
+          AND NEW.material_id IS NOT OLD.material_id
+        BEGIN SELECT RAISE(ABORT,'ingestion owner is immutable'); END"""),
+    'distill_items_ingestion_no_delete': ('trigger', 'distill_items',
+        """CREATE TRIGGER distill_items_ingestion_no_delete
+        BEFORE DELETE ON distill_items WHEN OLD.ingestion_contract!='legacy'
+        BEGIN SELECT RAISE(ABORT,'ingestion owner is durable'); END"""),
+    'source_media_ingestion_no_update': ('trigger', 'source_media',
+        """CREATE TRIGGER source_media_ingestion_no_update
+            BEFORE UPDATE ON source_media
+            WHEN EXISTS (SELECT 1 FROM distill_items i WHERE i.material_id=OLD.material_id
+                         AND i.ingestion_contract!='legacy')
+              AND ingestion_release(OLD.material_id,OLD.member_id,OLD.sha256,NEW.content)!=1
+            BEGIN SELECT RAISE(ABORT,'ingestion media is retained'); END"""),
+    'source_media_ingestion_no_delete': ('trigger', 'source_media',
+        """CREATE TRIGGER source_media_ingestion_no_delete
+            BEFORE DELETE ON source_media
+            WHEN EXISTS (SELECT 1 FROM distill_items i WHERE i.material_id=OLD.material_id
+                         AND i.ingestion_contract!='legacy')
+\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20
+            BEGIN SELECT RAISE(ABORT,'ingestion media is retained'); END"""),
+    'source_media_ingestion_capture_binding': ('trigger', 'capture_state',
+        """CREATE TRIGGER source_media_ingestion_capture_binding
+        BEFORE UPDATE OF item_id,audio_path ON capture_state
+        WHEN (EXISTS(SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id
+        AND i.ingestion_contract!='legacy') OR EXISTS(SELECT 1 FROM ingestion_events e
+        WHERE e.subject_kind='capture' AND e.subject_id=OLD.capture_id AND e.contract='raw-verified-v1')) AND (NEW.item_id IS NOT OLD.item_id
+            OR (OLD.audio_path IS NOT NULL AND NEW.audio_path IS NOT OLD.audio_path))
+        BEGIN SELECT RAISE(ABORT,'ingestion capture binding is immutable'); END"""),
+    'source_media_ingestion_capture_release': ('trigger', 'capture_state',
+        """CREATE TRIGGER source_media_ingestion_capture_release
+        BEFORE UPDATE OF audio_released_at ON capture_state
+        WHEN (EXISTS(SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id
+        AND i.ingestion_contract!='legacy') OR EXISTS(SELECT 1 FROM ingestion_events e
+        WHERE e.subject_kind='capture' AND e.subject_id=OLD.capture_id AND e.contract='raw-verified-v1')) AND NEW.audio_released_at IS NOT OLD.audio_released_at
+          AND ingestion_release('capture',OLD.capture_id,OLD.audio_path,NEW.audio_released_at)!=1
+        BEGIN SELECT RAISE(ABORT,'ingestion audio is retained'); END"""),
+    'source_media_ingestion_capture_no_delete': ('trigger', 'capture_state',
+        """CREATE TRIGGER source_media_ingestion_capture_no_delete
+        BEFORE DELETE ON capture_state WHEN (EXISTS(SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id
+        AND i.ingestion_contract!='legacy') OR EXISTS(SELECT 1 FROM ingestion_events e
+        WHERE e.subject_kind='capture' AND e.subject_id=OLD.capture_id AND e.contract='raw-verified-v1'))
+        BEGIN SELECT RAISE(ABORT,'ingestion capture owner is durable'); END"""),
+}

@@ -12,7 +12,8 @@ import yaml
 
 from . import raw
 from .captures import Captures
-from .database import connect, INGESTION_CONTRACT, RAW_OWNER_COLUMNS, RAW_TERMINAL_TRIGGERS
+from .database import (connect, INGESTION_CONTRACT, RAW_OWNER_COLUMNS,
+                       SUBMITTED_BINDING_COLUMNS, source_schema_inventory)
 from .wiki_lock import VaultWriteLock, session_fd_holds_lock
 
 CONTRACT = INGESTION_CONTRACT
@@ -205,8 +206,11 @@ class Ingestion:
         if not self.path.is_file():
             raise IngestionError("candidate_schema_rebuild_required")
         with connect(self.path) as db:
-            guard = db.execute("SELECT sql FROM sqlite_master WHERE name='ingestion_events_proof_unavailable'").fetchone()
-            if guard is None or "ingestion_proof" not in guard[0]:
+            try:
+                _, gaps = source_schema_inventory(db)
+            except ValueError:
+                raise IngestionError("candidate_schema_rebuild_required") from None
+            if gaps:
                 raise IngestionError("candidate_schema_rebuild_required")
 
     def events(self, subject: str):
@@ -217,6 +221,7 @@ class Ingestion:
                 (kind, int(subject_id)))]
 
     def _terminal_owner(self, db, item_id, subject_kind, subject_id, expected_revision):
+        self._require_writer_sources(db, subject_kind, subject_id, item_id)
         row = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
         if row is None or row['review_revision'] != expected_revision:
             raise IngestionError('raw_terminal_stale')
@@ -256,10 +261,13 @@ class Ingestion:
             raise IngestionError('raw_terminal_input_invalid')
         self.initialize()
         with connect(self.path) as db:
-            guards = dict(db.execute("SELECT name,sql FROM sqlite_schema WHERE name LIKE 'distill_items_raw_terminal_%'"))
-            expected = {s.split()[2]: s for s in RAW_TERMINAL_TRIGGERS}
-            if db.execute('PRAGMA user_version').fetchone()[0] != 25 or guards != expected:
+            try:
+                _, gaps = source_schema_inventory(db)
+            except ValueError:
+                raise IngestionError('raw_terminal_schema_required') from None
+            if gaps:
                 raise IngestionError('raw_terminal_schema_required')
+            self._require_legacy_sources(db, subject_kind, subject_id, item_id)
         if not Path(vault).is_dir():
             raise IngestionError('vault_unavailable')
         with VaultWriteLock.acquire(vault) as lock:
@@ -355,13 +363,83 @@ class Ingestion:
                 for row in db.execute(sql, parameters)]
 
     def _item_state(self, db, item_id):
+        self._require_legacy_item(db, item_id)
         rows = self._rows(db, """SELECT item_id,submitted_url,material_id,confirmation_json,dismissed_at,
             ingestion_contract,source_binding_sha256,relation_binding_sha256
             FROM distill_items WHERE item_id=?""", (item_id,))
         if not rows:
             raise IngestionError("source_not_ready")
         return {"owner": rows[0], "submitted": self._rows(db,
-            "SELECT * FROM submitted_sources WHERE item_id=?", (item_id,))}
+            "SELECT " + ','.join(SUBMITTED_BINDING_COLUMNS) + " FROM submitted_sources WHERE item_id=?", (item_id,))}
+
+    @staticmethod
+    def _require_legacy_item(db, item_id):
+        version = db.execute('PRAGMA user_version').fetchone()[0]
+        if version not in (25, 26):
+            raise IngestionError('candidate_schema_rebuild_required')
+        if version == 26:
+            row = db.execute('SELECT binding_scope FROM submitted_sources WHERE item_id=?', (item_id,)).fetchone()
+            frozen = db.execute("""SELECT 1 FROM ingestion_events WHERE item_id=? AND kind='raw_pending'
+                AND json_extract(detail_json,'$.code')='intake_frozen' LIMIT 1""", (item_id,)).fetchone()
+            if frozen is not None or (row is not None and row[0] != 'legacy'):
+                raise IngestionError('local_source_qualification_pending')
+
+    def _require_legacy_sources(self, db, kind, subject_id, item_id=None):
+        """Inspect real owners and message dependencies before any allocation.
+
+        No identity inference, dependency construction, BLOB loads or writes.
+        Even a caller without a requested owner must inspect the actual owners.
+        """
+        subjects, messages, seen_subjects, seen_messages = [(kind, subject_id)], [], set(), set()
+        if item_id is not None:
+            self._require_legacy_item(db, item_id)
+        while subjects or messages:
+            if subjects:
+                current_kind, current_id = subjects.pop()
+                if (current_kind, current_id) in seen_subjects:
+                    continue
+                seen_subjects.add((current_kind, current_id))
+                if current_kind == 'material':
+                    owners = [r[0] for r in db.execute('SELECT item_id FROM distill_items WHERE material_id=?', (current_id,))]
+                else:
+                    owners = [r[0] for r in db.execute('SELECT item_id FROM capture_state WHERE capture_id=? AND item_id IS NOT NULL', (current_id,))]
+                    messages.extend(tuple(r) for r in db.execute('SELECT app_id,message_id FROM captures WHERE capture_id=?', (current_id,)))
+                for owner in owners:
+                    self._require_legacy_item(db, owner)
+                    subjects.extend(('material', r[0]) for r in db.execute('SELECT material_id FROM distill_items WHERE item_id=? AND material_id IS NOT NULL', (owner,)))
+                    messages.extend(tuple(r) for r in db.execute('SELECT app_id,message_id FROM feishu_parts WHERE item_id=?', (owner,)))
+                    subjects.extend(('capture', r[0]) for r in db.execute('SELECT capture_id FROM capture_state WHERE item_id=?', (owner,)))
+                # Existing raw dependencies are facts, never generated here.
+                for row in db.execute('''SELECT content FROM raw_records r WHERE subject_kind=? AND subject_id=?
+                    AND NOT EXISTS(SELECT 1 FROM raw_records n WHERE n.supersedes=r.raw_id)''', (current_kind, current_id)):
+                    fields = envelope_fields(row[0].encode())
+                    refs = [link['编号'] for link in fields.get('邻接', [])]
+                    if fields.get('附言对象'):
+                        refs.append(fields['附言对象'])
+                    for ref in refs:
+                        subjects.extend(tuple(r) for r in db.execute('SELECT subject_kind,subject_id FROM raw_records WHERE raw_id=?', (ref,)))
+            else:
+                app_id, message_id = messages.pop()
+                if (app_id, message_id) in seen_messages:
+                    continue
+                seen_messages.add((app_id, message_id))
+                subjects.extend(('capture', r[0]) for r in db.execute('SELECT capture_id FROM captures WHERE app_id=? AND message_id=?', (app_id, message_id)))
+                for row in db.execute('SELECT item_id FROM feishu_parts WHERE app_id=? AND message_id=? AND item_id IS NOT NULL', (app_id, message_id)):
+                    self._require_legacy_item(db, row[0])
+                    subjects.extend(('material', r[0]) for r in db.execute('SELECT material_id FROM distill_items WHERE item_id=? AND material_id IS NOT NULL', (row[0],)))
+                messages.extend((app_id, r[0]) for r in db.execute('SELECT earlier_message_id FROM delivery_adjacency WHERE app_id=? AND message_id=?', (app_id, message_id)))
+                messages.extend((app_id, r[0]) for r in db.execute('''SELECT e.target_message_id FROM capture_identity_events e JOIN captures c USING(capture_id)
+                    WHERE c.app_id=? AND c.message_id=? AND e.event_id=(SELECT MAX(n.event_id) FROM capture_identity_events n WHERE n.capture_id=e.capture_id)
+                    AND e.result='annotation' AND e.target_message_id IS NOT NULL''', (app_id, message_id)))
+
+    def _require_writer_sources(self, db, kind, subject_id, item_id=None):
+        try:
+            _, gaps = source_schema_inventory(db)
+        except ValueError:
+            raise IngestionError('candidate_schema_rebuild_required') from None
+        if gaps:
+            raise IngestionError('candidate_schema_rebuild_required')
+        self._require_legacy_sources(db, kind, subject_id, item_id)
 
     def _source_state(self, db, kind, subject_id, *, heads_required=True):
         if kind == "material":
@@ -418,6 +496,7 @@ class Ingestion:
         return result
 
     def _binding(self, db, record, item_id):
+        self._require_legacy_sources(db, record['subject_kind'], record['subject_id'], item_id)
         state = self._source_state(db, record["subject_kind"], record["subject_id"])
         if state["heads"][0]["raw_id"] != record["raw_id"]:
             raise IngestionError("raw_head_changed")
@@ -594,6 +673,7 @@ class Ingestion:
             raise IngestionError("filesystem_proof_unavailable")
         vault = lock.vault
         with connect(self.path) as db:
+            self._require_writer_sources(db, record['subject_kind'], record['subject_id'], item_id)
             before = self._binding(db, record, item_id)
             released = self._proven_release(db, record, before, vault)
         self._pending(item_id, "writer_pending")
@@ -609,6 +689,7 @@ class Ingestion:
                 db.execute("PRAGMA synchronous=FULL")
                 db.execute("BEGIN IMMEDIATE")
                 fresh = db.execute("SELECT * FROM raw_records WHERE raw_id=?", (record["raw_id"],)).fetchone()
+                self._require_writer_sources(db, fresh['subject_kind'], fresh['subject_id'], item_id)
                 binding = self._binding(db, fresh, item_id)
                 if binding != before:
                     raise IngestionError("source_binding_changed")
@@ -623,6 +704,8 @@ class Ingestion:
 
     def material(self, material_id: int, vault: Path, *, item_id: int | None = None):
         self.initialize()
+        with connect(self.path) as db:
+            self._require_writer_sources(db, 'material', material_id, item_id)
         item_id = self._owner(material_id, item_id)
         if not Path(vault).is_dir():
             self._pending(item_id, "writer_pending")
@@ -632,6 +715,7 @@ class Ingestion:
 
     def _material(self, material_id, vault, *, item_id, lock):
         with connect(self.store.path) as db:
+            self._require_writer_sources(db, 'material', material_id, item_id)
             row = db.execute("""SELECT m.source_kind,m.snapshot_key,m.metadata_json,sf.source_fact_id
                 FROM materials m JOIN source_facts sf USING(material_id) WHERE m.material_id=?""",
                              (material_id,)).fetchone()
@@ -666,6 +750,7 @@ class Ingestion:
         if len(self.ledger.heads("material", material_id)) > 1:
             raise IngestionError("raw_heads_ambiguous")
         def check_source(db):
+            self._require_writer_sources(db, 'material', material_id, item_id)
             self._owner(material_id, item_id)
             if len(self.ledger.heads("material", material_id)) > 1:
                 raise IngestionError("raw_heads_ambiguous")
@@ -770,6 +855,8 @@ class Ingestion:
             return self._capture(capture_id, lock.vault, lock)
 
     def _capture(self, capture_id, vault, lock):
+        with connect(self.path) as db:
+            self._require_writer_sources(db, 'capture', capture_id)
         capture = self.captures.get(capture_id)
         decision = self.captures.identity(capture_id) if capture else None
         if decision is None or decision["result"] not in {"my_thought", "annotation"}:
@@ -788,6 +875,7 @@ class Ingestion:
                     or item["state"] == "failed" or item["dismissed_at"] is not None):
                 raise IngestionError("capture_source_pending")
         def check_source(db):
+            self._require_writer_sources(db, 'capture', capture_id)
             if self._relations_ready(capture, vault) != adjacency:
                 raise IngestionError("source_binding_changed")
             if decision["result"] == "annotation" and self._message_raw(capture["app_id"], decision["target_message_id"], vault) != target:
@@ -829,6 +917,7 @@ class Ingestion:
             db.execute("PRAGMA synchronous=FULL")
             db.execute("BEGIN IMMEDIATE")
             from .media_lifecycle import RELEASABLE
+            self._require_writer_sources(db, 'material', material_id)
             eligible = db.execute(f"""SELECT m.material_id FROM materials m WHERE m.material_id=?
                 AND m.material_id>(SELECT legacy_material_id FROM media_lifecycle WHERE singleton=1)
                 AND {RELEASABLE}""", (material_id,)).fetchone()
@@ -885,6 +974,7 @@ class Ingestion:
             with connect(self.path) as db:
                 db.execute("PRAGMA synchronous=FULL")
                 db.execute("BEGIN IMMEDIATE")
+                self._require_writer_sources(db, 'capture', capture_id)
                 capture = self.captures.get(capture_id)
                 item = self.store.item_bundle(capture["item_id"]) if capture and capture["item_id"] else None
                 if (capture is None or capture["message_type"] != "audio" or not capture["audio_path"]

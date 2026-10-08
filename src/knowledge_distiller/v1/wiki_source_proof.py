@@ -16,24 +16,13 @@ import sqlite3
 import stat
 
 from .ingestion import Ingestion, IngestionError, envelope_fields, read_regular
+from .database import source_schema_inventory
 from .raw import FORMAT_VERSION, RawError, _duplicate_id
 from .wiki_lock import VaultWriteLock, WikiLockError, canonical_vault, session_fd_holds_lock
 from .wiki_tasks import FrozenRaw, _boundary
 
 CONTRACT = 'wiki-source-proof-v1'
 INPUT_LIMIT = 32 * 1024 * 1024  # application bytes; never model tokens
-# Exact schema25 DDL from database.py at 58bc8ee. SQLite stores this CREATE
-# statement with the initial IF NOT EXISTS removed; no other normalization.
-_PROOF_TRIGGER_SQL = """CREATE TRIGGER ingestion_events_proof_unavailable
-        BEFORE INSERT ON ingestion_events
-        WHEN NEW.kind IN ('raw_verified','release_authorized','media_released')
-          AND (ingestion_proof(NEW.kind,NEW.binding_sha256,NEW.detail_json)!=1
-               OR NEW.kind IS NOT json_extract(NEW.detail_json,'$.code')
-               OR NEW.subject_kind IS NOT json_extract(NEW.detail_json,'$.manifest.subject_kind')
-               OR NEW.subject_id IS NOT json_extract(NEW.detail_json,'$.manifest.subject_id')
-               OR NEW.item_id IS NOT json_extract(NEW.detail_json,'$.manifest.owner_item_id')
-               OR NEW.binding_sha256 IS NOT json_extract(NEW.detail_json,'$.final_binding_sha256'))
-        BEGIN SELECT RAISE(ABORT,'filesystem proof unavailable'); END"""
 
 
 class SourceProofError(ValueError):
@@ -47,18 +36,6 @@ def _encoded(value):
 
 def _sha(value):
     return hashlib.sha256(value).hexdigest()
-
-
-def _proof_guard_available(db):
-    row = db.execute('SELECT type,tbl_name,sql FROM sqlite_schema WHERE name=?',
-                     ('ingestion_events_proof_unavailable',)).fetchone()
-    if row is None or row['type'] != 'trigger' or row['tbl_name'] != 'ingestion_events':
-        return False
-    sql = row['sql']
-    prefix = 'CREATE TRIGGER IF NOT EXISTS '
-    if isinstance(sql, str) and sql.startswith(prefix):
-        sql = 'CREATE TRIGGER ' + sql[len(prefix):]
-    return sql == _PROOF_TRIGGER_SQL
 
 
 @dataclass(frozen=True)
@@ -117,6 +94,31 @@ def _scope(fields, gaps):
             'platform_total_verified': False}
 
 
+def _unqualified_state(ingestion, db, record, max_bytes):
+    """Observe actual unqualified owners too; never mint a binding for them."""
+    if record['subject_kind'] == 'material':
+        state = {'source': ingestion._rows(db,
+            'SELECT m.*,sf.* FROM materials m LEFT JOIN source_facts sf USING(material_id) WHERE material_id=?',
+            (record['subject_id'],))}
+        owners = [r[0] for r in db.execute('SELECT item_id FROM distill_items WHERE material_id=? ORDER BY item_id',
+                                         (record['subject_id'],))]
+    else:
+        state = {'capture': ingestion.captures.get(record['subject_id']),
+                 'decision': ingestion.captures.identity(record['subject_id']),
+                 'transcript': ingestion.captures.transcript(record['subject_id'])}
+        owner = (state['capture'] or {}).get('item_id')
+        owners = [owner] if owner is not None else []
+    state['unqualified_owners'] = []
+    for owner in owners:
+        size = db.execute('SELECT coalesce(length(content),0) FROM submitted_sources WHERE item_id=?', (owner,)).fetchone()
+        if size is not None and size[0] > max_bytes:
+            raise SourceProofError('source_input_limit')
+        state['unqualified_owners'].append({'owner': ingestion._rows(db,
+            'SELECT * FROM distill_items WHERE item_id=?', (owner,)), 'submitted': ingestion._rows(db,
+            'SELECT * FROM submitted_sources WHERE item_id=?', (owner,))})
+    return state
+
+
 def _record_observation(ingestion, db, record, max_bytes):
     events = [dict(r) for r in db.execute(
         'SELECT event_key,contract,item_id,kind,binding_sha256,detail_json '
@@ -127,17 +129,7 @@ def _record_observation(ingestion, db, record, max_bytes):
     except IngestionError:
         # Still bind actual source/head/decision drift when current qualification
         # fails; never reuse an old successful descriptor on a failed readback.
-        if record['subject_kind'] == 'material':
-            state = {'source': [dict(r) for r in db.execute(
-                'SELECT m.*,sf.* FROM materials m LEFT JOIN source_facts sf USING(material_id) '
-                'WHERE material_id=?', (record['subject_id'],))]}
-            state['owners'] = [ingestion._item_state(db, r[0]) for r in db.execute(
-                'SELECT item_id FROM distill_items WHERE material_id=? ORDER BY item_id',
-                (record['subject_id'],))]
-        else:
-            state = {'capture': ingestion.captures.get(record['subject_id']),
-                     'decision': ingestion.captures.identity(record['subject_id']),
-                     'transcript': ingestion.captures.transcript(record['subject_id'])}
+        state = _unqualified_state(ingestion, db, record, max_bytes)
         state['heads'] = [dict(r) for r in db.execute(
             'SELECT raw_id,identity,content_sha256,relative_path,supersedes FROM raw_records '
             'WHERE subject_kind=? AND subject_id=? ORDER BY raw_id',
@@ -167,7 +159,7 @@ def _record_observation(ingestion, db, record, max_bytes):
             try:
                 dependent = ingestion._source_state(db, row['subject_kind'], row['subject_id'])
             except IngestionError:
-                dependent = {'unqualified': True}
+                dependent = _unqualified_state(ingestion, db, row, max_bytes)
             state['referenced_sources'].append({'raw': dict(row), 'state': dependent})
         else:
             state['referenced_sources'].append({'raw_id': raw_id, 'missing': True})
@@ -253,8 +245,10 @@ def _verify(store, task, snapshot, context, lock, max_bytes):
         with closing(sqlite3.connect(database.absolute().as_uri() + '?mode=ro', uri=True)) as db:
             db.row_factory = sqlite3.Row
             db.execute('PRAGMA query_only=ON')
-            if db.execute('PRAGMA user_version').fetchone()[0] != 25:
-                raise SourceProofError('source_schema_unsupported')
+            try:
+                schema_version, guard_gaps = source_schema_inventory(db)
+            except ValueError:
+                raise SourceProofError('source_schema_unsupported') from None
             for frozen, supplied in context:
                 if (not isinstance(frozen, FrozenRaw) or raws.get(frozen.raw_id) != frozen
                         or type(supplied) is not bytes or len(supplied) != frozen.byte_count
@@ -333,10 +327,11 @@ def _verify(store, task, snapshot, context, lock, max_bytes):
                     fact = db.execute('SELECT source_fact_id FROM source_facts WHERE material_id=?',
                                       (material_id,)).fetchone()
                     versions['source_fact_id'] = fact[0] if fact else None
-                    if not _proof_guard_available(db):
+                    if guard_gaps:
                         gaps.add('internal_event_guard_unavailable')
                     try:
-                        # Every callee here is read-only in fixed schema25.
+                        # Actual scope is checked even without a requested owner.
+                        ingestion._require_legacy_sources(db, record['subject_kind'], record['subject_id'])
                         ingestion._validate_context(record, vault, None)
                         ingestion._message_readback(db, record, vault)
                         matching = []
@@ -370,14 +365,18 @@ def _verify(store, task, snapshot, context, lock, max_bytes):
                             capabilities += ['canonical_source_binding', 'canonical_ingestion_event']
                         else:
                             gaps.add('canonical_event_unavailable')
-                    except (IngestionError, RawError, KeyError, TypeError, AttributeError, IndexError):
+                    except IngestionError as error:
+                        gaps.add('local_source_qualification_pending' if error.args == ('local_source_qualification_pending',)
+                                 else 'current_source_unqualified')
+                    except (RawError, KeyError, TypeError, AttributeError, IndexError):
                         gaps.add('current_source_unqualified')
                 scope = _scope(fields, gaps)
                 if not gaps and 'canonical_ingestion_event' in capabilities:
                     capabilities.append('declared_capture_verified')
                 result.append({'raw_id': frozen.raw_id, 'path': frozen.relative_path,
                     'identity': frozen.identity, 'sha256': frozen.content_sha256, 'byte_count': frozen.byte_count,
-                    'format_version': FORMAT_VERSION, 'versions': versions,
+                    'format_version': FORMAT_VERSION, 'source_schema_version': schema_version,
+                    'schema_guard_gaps': list(guard_gaps), 'versions': versions,
                     'subject': subject, 'attachments': attachments,
                     'scope': scope, 'capabilities': sorted(capabilities), 'gaps': sorted(gaps),
                     'source_binding_sha256': binding, 'observation_sha256': observation,
