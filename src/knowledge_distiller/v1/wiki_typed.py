@@ -1024,9 +1024,21 @@ def _stage_check(task, result, binding, rows, payload, proposal, documents):
     review = parse_check(result.final_bytes, binding, rows,
         proposal_sha256=digest(proposal), changes_sha256=digest(documents),
         source_proof_sha256=payload['source_proof_sha256'], full_context=whole)
-    if any(r['status'] != 'verified' or r['source_check']['status'] != 'complete'
-           or any(d['status'] == 'unknown' for d in r['dimensions']) for r in review['reviews']):
-        raise TypedError('typed_protocol_invalid')
+    candidate = parse_proposal(proposal, binding, rows)
+    for outcome, result_review in zip(candidate['outcomes'], review['reviews']):
+        dimensions = result_review['dimensions']
+        if (result_review['source_check']['status'] != 'complete'
+                or any(d['status'] == 'unknown' for d in dimensions)):
+            raise TypedError('typed_protocol_invalid')
+        if outcome['status'] == 'processed_no_knowledge':
+            if result_review['status'] != 'verified':
+                raise TypedError('typed_protocol_invalid')
+        elif outcome['status'] == 'processed_with_knowledge':
+            if (result_review['status'] != 'unsupported'
+                    or not any(d['status'] == 'present' for d in dimensions)):
+                raise TypedError('typed_protocol_invalid')
+        else:
+            raise TypedError('typed_protocol_invalid')
 
 
 def _stage_receipt(binding, proposal, check, changes, documents, tree, source):
