@@ -141,7 +141,7 @@ def prepare():
     print(json.dumps(prepared, ensure_ascii=False))
 
 
-def resume_task(root, prepared, store, tasks, wiki):
+def resume_task(root, prepared, store, tasks, wiki, *, final_check=False):
     """Use production retry gates; reject absent/invalid saved generation.
 
     No model call here. The checkpoint precheck prevents this manual recovery
@@ -163,6 +163,14 @@ def resume_task(root, prepared, store, tasks, wiki):
         task = tasks.get(task.task_id)
     if task.recovery_state not in {'not_needed', 'succeeded'}:
         raise RuntimeError('production_recovery_gate_unresolved')
+    if final_check:
+        previous = json.loads((root / 'resume-result.json').read_text())
+        marker = json.loads((root / 'resume-once.json').read_text())
+        if (task.task_id != '045b88da28254f258cb63edfe181e603'
+                or root != Path('/private/tmp/kd-live-wiki-20261008.5yb2seef')
+                or task.batch_count != 1 or previous.get('task_id') != task.task_id
+                or previous.get('status') != 'failed' or marker.get('task_id') != task.task_id):
+            raise RuntimeError('final_check_original_failed_task_required')
     with VaultWriteLock.acquire(root / 'vault') as lock:
         source = trusted_source_callback(store, lock)
         for batch in task.batches:
@@ -172,17 +180,29 @@ def resume_task(root, prepared, store, tasks, wiki):
                 batch_no=batch.batch_no, lock=lock, expected_plan_sha256=task.plan_sha256,
                 source_proof=source, allow_regenerated_graph=True)
             phase_root = root / 'runtime' / 'wiki-tasks' / task.task_id / 'execution' / f'batch-{batch.batch_no}'
+            if final_check:
+                reservations = sorted(p.name for p in phase_root.glob('check-reservation-*.json'))
+                if (reservations != ['check-reservation-1.json', 'check-reservation-2.json']
+                        or (phase_root / 'check-result.json').exists()):
+                    raise RuntimeError('final_check_requires_exactly_two_consumed_reservations')
+                for name in reservations:
+                    record = json.loads((phase_root / name).read_text())
+                    if (record.get('task_id') != task.task_id or record.get('batch_no') != batch.batch_no
+                            or record.get('phase') != 'check' or record.get('plan_sha256') != task.plan_sha256):
+                        raise RuntimeError('final_check_reservation_binding_changed')
             if len(tuple(phase_root.glob('check-reservation-*.json'))) >= 3 and not (phase_root / 'check-result.json').exists():
                 raise RuntimeError('production_checker_attempts_exhausted')
     tasks.retry_failed(task.task_id)
 
 
-def run(path, core_ready, *, resume=False):
+def run(path, core_ready, *, resume=False, final_check=False):
     root = private_root(path)
     prepared = json.loads((root / 'prepared.json').read_text())
     readiness = json.loads(Path(core_ready).read_text())
     if resume:
-        if (readiness.get('protocol') != 'passed' or readiness.get('action') != 'resume-once'
+        ready_field = 'status_prompt' if final_check else 'protocol'
+        action = 'resume-final-check' if final_check else 'resume-once'
+        if (readiness.get(ready_field) != 'passed' or readiness.get('action') != action
                 or readiness.get('task_id') != prepared['task_id']
                 or readiness.get('released') is not True or not readiness.get('evidence')):
             raise ValueError('explicit_protocol_resume_release_required')
@@ -191,7 +211,9 @@ def run(path, core_ready, *, resume=False):
         raise ValueError('core_generated_and_repair_release_required')
     # One outer scenario; a crash also consumes this reservation. No automatic
     # retry_failed/recover_task loops. The actual worker owns its bounded repair.
-    fd = os.open(root / ('resume-once.json' if resume else 'run-once.json'),
+    prefix = 'resume-final-check' if final_check else ('resume' if resume else '')
+    marker_name = 'resume-final-check-once.json' if final_check else ('resume-once.json' if resume else 'run-once.json')
+    fd = os.open(root / marker_name,
                  os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(fd, 'w') as stream:
         json.dump({'task_id': prepared['task_id'], 'core_ready': readiness}, stream, ensure_ascii=False)
@@ -209,14 +231,18 @@ def run(path, core_ready, *, resume=False):
             if digest((root / 'vault' / source['relative_path']).read_bytes()) != source['sha256']:
                 raise RuntimeError('prepared_raw_changed')
         if resume:
-            resume_task(root, prepared, store, tasks, wiki)
+            prior_hashes = {name: digest((root / name).read_bytes()) for name in
+                            (('result.json', 'run-once.json', 'resume-result.json', 'resume-once.json')
+                             if final_check else ('result.json', 'run-once.json'))}
+            summary['prior_artifact_sha256'] = prior_hashes
+            resume_task(root, prepared, store, tasks, wiki, final_check=final_check)
         result = wiki.run_one()  # actual runner, recording, validators and publisher
         after = tasks.get(task.task_id)
         with connect(store.path) as db:
             rows = db.execute("SELECT payload_json FROM wiki_outcome_receipts WHERE task_id=? AND phase='accepted'",
                               (task.task_id,)).fetchall()
         payloads = [json.loads(row['payload_json']) for row in rows]
-        save(root / ('resume-accepted-private.json' if resume else 'accepted-private.json'), payloads)
+        save(root / (prefix + '-accepted-private.json' if resume else 'accepted-private.json'), payloads)
         unchanged = all(digest((root / 'vault' / r['relative_path']).read_bytes()) == r['sha256']
                         for r in prepared['raw'])
         outcomes = [o for p in payloads for o in p.get('outcomes', [])]
@@ -226,33 +252,38 @@ def run(path, core_ready, *, resume=False):
         summary.update(error_code=result.error_code if result else 'no_work', task_state=after.state,
             raw_unchanged=unchanged, accepted_receipts=len(rows),
             outcome_statuses=[o['status'] for o in outcomes], expected_outcomes_match=by_raw == expected_outcomes)
+        if resume:
+            summary['prior_artifacts_unchanged'] = all(
+                digest((root / name).read_bytes()) == sha for name, sha in prior_hashes.items())
         if (result is not None and result.error_code is None and after.state == 'succeeded'
-                and unchanged and by_raw == expected_outcomes):
+                and unchanged and by_raw == expected_outcomes
+                and (not resume or summary['prior_artifacts_unchanged'])):
             summary['status'] = 'passed'
     except Exception as error:
-        (root / ('resume-failure-private.log' if resume else 'failure-private.log')).write_text(traceback.format_exc())
+        (root / (prefix + '-failure-private.log' if resume else 'failure-private.log')).write_text(traceback.format_exc())
         summary.update(exception_type=type(error).__name__)
     finally:
         if runner is not None:
             runner.cancel()
-        save(root / ('resume-result.json' if resume else 'result.json'), summary)
+        save(root / (prefix + '-result.json' if resume else 'result.json'), summary)
         print(json.dumps(summary, ensure_ascii=False))
     return 0 if summary['status'] == 'passed' else 1
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('prepare', 'run', 'resume-once'))
+    parser.add_argument('action', choices=('prepare', 'run', 'resume-once', 'resume-final-check'))
     parser.add_argument('--root')
     parser.add_argument('--core-ready')
     parser.add_argument('--resume-ready')
     options = parser.parse_args()
     if options.action == 'prepare':
         prepare()
-    elif options.action == 'resume-once':
+    elif options.action in ('resume-once', 'resume-final-check'):
         if not options.root or not options.resume_ready:
-            parser.error('resume-once requires --root and --resume-ready (fresh explicit release)')
-        sys.exit(run(options.root, options.resume_ready, resume=True))
+            parser.error('resume requires --root and --resume-ready (fresh explicit release)')
+        sys.exit(run(options.root, options.resume_ready, resume=True,
+                     final_check=options.action == 'resume-final-check'))
     elif not options.root or not options.core_ready:
         parser.error('run requires --root and --core-ready')
     else:

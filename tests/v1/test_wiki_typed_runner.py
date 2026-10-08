@@ -369,6 +369,7 @@ def test_checker_is_independent_readonly_without_second_broker_or_tokens(fixture
     assert result.succeeded
     observed = json.loads((snapshot.workspace / 'observed.json').read_text())
     assert not observed['has_token'] and not observed['has_key']
+    assert '每raw独立判定“该raw无知识”命题是否成立；review.status的verified表示无知识成立，必须完整来源且四维均无present/unknown；unsupported表示无知识不成立（有present，可对应processed_with_knowledge），不是说知识正文unsupported；unknown表示无法判断。' in observed['prompt']
     assert 'reference_lead须核对来源有价值的人物/作品—概念关系与名称是否在候选遗漏；无关修辞不强留，来源未给书名不得补。' in observed['prompt']
     argv = observed['argv']
     effective = dict(v.split('=', 1) for i, v in enumerate(argv) if i and argv[i - 1] == '-c')

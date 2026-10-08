@@ -7,6 +7,7 @@ boolean. The caller must still verify staging changes and publication.
 from __future__ import annotations
 
 import codecs
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -214,8 +215,13 @@ def parse_proposal(content, binding, rows):
 
 def parse_check(content, binding, rows, *, proposal_sha256, changes_sha256, source_proof_sha256,
                 full_context=None):
+    """Validate the check, then resolve only legal misplaced exact quotations.
+
+    Original model bytes stay untouched. An already exact range is retained;
+    otherwise only a unique literal match in the named frozen raw can resolve it.
+    """
     validate_binding(binding)
-    value = strict_json(content)
+    value = deepcopy(strict_json(content))
     _object(value, ('contract', 'schema_revision', 'binding', 'proposal_sha256', 'changes_sha256', 'reviews'))
     if (value['contract'] != CHECK_CONTRACT or type(value['schema_revision']) is not int
             or value['schema_revision'] != 1 or value['binding'] != binding
@@ -232,6 +238,7 @@ def parse_check(content, binding, rows, *, proposal_sha256, changes_sha256, sour
     if (len(by_id) != len(evidence_rows)
             or any(by_id.get(raw.raw_id) != (raw, data.decode('utf-8')) for raw, data in rows)):
         raise TypedError('typed_coverage_invalid')
+    quotations = []
     for review, (raw, _data) in zip(reviews, rows):
         _object(review, ('raw_id', 'content_sha256', 'status', 'reason', 'source_check', 'dimensions'))
         if review['raw_id'] != raw.raw_id or review['content_sha256'] != raw.content_sha256:
@@ -271,14 +278,27 @@ def parse_check(content, binding, rows, *, proposal_sha256, changes_sha256, sour
                 start, end = evidence['start'], evidence['end']
                 _text(evidence['text'])
                 if (evidence['content_sha256'] != evidence_raw.content_sha256
-                        or type(start) is not int or type(end) is not int or not 0 <= start < end <= len(text)
-                        or type(evidence['text']) is not str or evidence['text'] != text[start:end]):
+                        or type(start) is not int or type(end) is not int or not 0 <= start < end <= len(text)):
                     raise TypedError('typed_binding_invalid')
+                quotations.append((evidence, text))
         # Still only a model candidate, but even its claim of verified cannot
         # contradict its own source or dimensions. No SourceFact is created.
         if review['status'] == 'verified' and (source['status'] != 'complete' or any(
                 d['status'] in {'present', 'unknown'} for d in dimensions)):
             raise TypedError('typed_protocol_invalid')
+    # All structural/source/binding checks precede normalization. Count a
+    # second occurrence from start+1 so overlapping matches remain ambiguous.
+    for evidence, text in quotations:
+        quote = evidence['text']
+        start, end = evidence['start'], evidence['end']
+        if quote != text[start:end]:
+            start = text.find(quote)
+            if start < 0 or text.find(quote, start + 1) >= 0:
+                raise TypedError('typed_binding_invalid')
+            end = start + len(quote)
+            evidence['start'], evidence['end'] = start, end
+        if not 0 <= start < end <= len(text) or quote != text[start:end]:
+            raise TypedError('typed_binding_invalid')
     return value
 
 
