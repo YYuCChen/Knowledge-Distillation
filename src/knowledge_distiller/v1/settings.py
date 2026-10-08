@@ -780,6 +780,18 @@ class SettingsService:
 
     def jev_client(self):
         """A Jev client when a key is saved, else None. Its failures are reported, never hidden."""
+        from .jev import ActiveDecisionAdapter, UnavailableDecisionAdapter
+        if sys.platform != 'win32':
+            try:
+                # No profile directory is created on the legacy/unconfigured path.
+                root = self._decision_root or self.store.path.parent / 'decision-profiles'
+                if self._decision_profiles_factory is not None or Path(root).exists() or Path(root).is_symlink():
+                    active = self.decision_client()
+                    if active is not None:
+                        identity, client = active
+                        return ActiveDecisionAdapter(client, identity)
+            except SettingsError as error:
+                return UnavailableDecisionAdapter(str(error))
         if self.jev_state() == 'unconfigured':
             return None
         from .jev import JevClient, SECRET_ACCOUNT

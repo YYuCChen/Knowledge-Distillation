@@ -186,20 +186,36 @@
         <div id="doubao-credentials">{% include 'doubao_onboarding.html' %}</div>
       </details>
 
-      {% set jev = settings.jev|default({'state': 'unconfigured'}) %}
+      {% set jev = {'state': decision.state} %}
       <details class="jev-setting" {% if open_group == 'models' and request.args.get('message', '').startswith('jev_') %}open{% endif %}>
         <summary class="setting-row model-row">
           <span class="state-dot {{ jev.state }}" aria-hidden="true"></span>
-          <strong>Jev</strong>
-          <span>TypeSafe</span>
-          <span class="model-name">jev-latest</span>
+          <strong>决策模型</strong>
+          <span>{{ decision.active_provider_label }}</span>
+          <span class="model-name">{{ decision.active_model }}</span>
           <span class="status-text">{{ {'configured': '已配置', 'unavailable': '不可用', 'unconfigured': '未配置'}[jev.state] }}</span>
-          <span class="row-actions"><span class="secondary-button">{{ '配置模型' if jev.state == 'unconfigured' else '更换密钥' }}</span></span>
+          <span class="row-actions"><span class="secondary-button">{{ '配置模型' if jev.state == 'unconfigured' else '更换模型' }}</span></span>
         </summary>
-        <form class="model-form jev-form" action="{{ url_for('settings.save_jev') }}" method="post">
+        <form id="decision-form" class="model-form" data-cloud-key-saved="{{ decision.cloud_key_saved|tojson }}" action="{{ url_for('settings.check_decision') }}" method="post">
           <input type="hidden" name="return_to" value="{{ return_to }}">
-          <label class="model-secret">API Key<input type="password" name="api_key" autocomplete="new-password" placeholder="不会回显已保存的密钥" required></label>
-          <button class="outline-button">保存并启用</button>
+          <input type="hidden" name="candidate_id" value="{{ decision.candidate_id or '' }}">
+          <input type="hidden" name="candidate_revision" value="{{ decision.candidate_revision }}">
+          <input type="hidden" name="form_nonce" value="{{ decision.form_nonce }}">
+          <label class="model-provider">模型方案
+            <select name="provider" id="decision-provider">
+              <option value="jev" {% if decision.provider == 'jev' %}selected{% endif %}>Jev · 云端</option>
+              <option value="clef" {% if decision.provider == 'clef' %}selected{% endif %}>Clef · 本地</option>
+            </select>
+          </label>
+          <label>模型 ID<input name="model" id="decision-model" value="{{ decision.model }}" required autocomplete="off"></label>
+          <label class="model-base">接口地址<input type="url" name="endpoint" id="decision-endpoint" value="{{ decision.endpoint }}" {% if decision.provider == 'jev' %}readonly{% endif %} required></label>
+          <span class="model-key-status" id="decision-auth-status">{{ ('API Key 已保存；留空沿用，填写新密钥后须检查并明确启用。' if decision.cloud_key_saved else 'API Key 未保存；请填写后检查。') if decision.provider == 'jev' else '本地 API Key 可留空；不会清除云端密钥。' }}</span>
+          <label class="model-secret">API Key<input type="password" name="api_key" id="decision-key" autocomplete="new-password" placeholder="{{ '不会回显已保存的密钥；留空沿用' if decision.provider == 'jev' and decision.cloud_key_saved else '填写 API Key' if decision.provider == 'jev' else '本地服务无需认证时留空' }}" {% if decision.provider == 'jev' and not decision.cloud_key_saved %}required{% endif %}></label>
+          <span class="model-key-status" id="decision-check-status" role="status">{{ decision.check_message }}</span>
+          <div class="decision-actions">
+          <button class="outline-button" type="submit" id="decision-check">检查配置</button>
+          <button class="secondary-button" type="submit" id="decision-enable" formaction="{{ url_for('settings.enable_decision') }}" {% if not decision.enable_allowed %}disabled{% endif %}>启用此方案</button>
+          </div>
         </form>
       </details>
     </details>

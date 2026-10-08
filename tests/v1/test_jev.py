@@ -239,7 +239,7 @@ def test_a_rejected_key_at_run_time_marks_jev_unavailable(settings):
     assert service.jev_state() == 'configured'
 
 
-def test_settings_page_has_a_jev_row_with_key_and_button_on_one_line(settings):
+def test_settings_page_has_approved_decision_actions_on_one_line(settings, tmp_path):
     from pathlib import Path
     import threading
     from playwright.sync_api import sync_playwright
@@ -248,7 +248,7 @@ def test_settings_page_has_a_jev_row_with_key_and_button_on_one_line(settings):
     service, _ = settings
     app = create_app(service.store, object(), service)
     page_html = app.test_client().get('/settings?open=models').get_data(as_text=True)
-    assert 'Jev' in page_html and 'TypeSafe' in page_html and 'jev-latest' in page_html and '未配置' in page_html
+    assert '决策模型' in page_html and 'Jev · 云端' in page_html and 'jev-latest' in page_html and '未配置' in page_html
     assert '随手记云端判断' not in page_html  # The old toggle is gone (user decision 2026-09-30).
     response = app.test_client().post('/settings/jev', data={'api_key': 'good-key'})
     assert response.status_code == 302 and 'jev_saved' in response.headers['Location']
@@ -263,12 +263,21 @@ def test_settings_page_has_a_jev_row_with_key_and_button_on_one_line(settings):
             page = browser.new_page(viewport={'width': 1280, 'height': 900})
             page.goto(f'http://127.0.0.1:{server.server_port}/settings?open=models')
             row = page.locator('.jev-setting > summary')
-            assert '已配置' in row.inner_text() and '更换密钥' in row.inner_text()
+            assert '已配置' in row.inner_text() and '更换模型' in row.inner_text()
             row.click()
-            field = page.locator('.jev-form input[name="api_key"]').bounding_box()
-            button = page.get_by_role('button', name='保存并启用').last.bounding_box()
-            assert button['x'] > field['x'] + field['width'] - 1  # Same line, to the right of the key.
-            assert abs((button['y'] + button['height'] / 2) - (field['y'] + field['height'] / 2)) < 16
+            for width in (1280, 360):
+                page.set_viewport_size({'width': width, 'height': 900})
+                check = page.locator('#decision-check').bounding_box()
+                enable = page.locator('#decision-enable').bounding_box()
+                field = page.locator('#decision-key').bounding_box()
+                assert abs((check['y'] + check['height'] / 2) - (enable['y'] + enable['height'] / 2)) < 1
+                assert abs(enable['x'] + enable['width'] - field['x'] - field['width']) < 1
+                assert page.locator('[name="timeout_seconds"], [name="token_budget"]').count() == 0
+                assert page.locator('#decision-enable').is_disabled()
+                page.locator('.jev-setting').screenshot(path=str(tmp_path / f'decision-{width}.png'))
+            page.locator('#decision-provider').select_option('clef')
+            assert not page.locator('#decision-key').get_attribute('required')
+            assert page.locator('#decision-endpoint').input_value() == 'http://127.0.0.1:18765/v1/systemone'
             browser.close()
     finally:
         server.shutdown()

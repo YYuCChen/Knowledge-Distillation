@@ -476,3 +476,17 @@
 .local-address-editor input[name="port"]::-webkit-inner-spin-button,
 .local-address-editor input[name="port"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 #local-address-preview { overflow-wrap: anywhere; }
+
+#decision-form .decision-actions {
+  grid-column: 1 / -1;
+  justify-self: end;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  align-items: center;
+  gap: 16px;
+}
+#decision-form .decision-actions button {
+  grid-column: auto;
+  justify-self: stretch;
+  width: 100%;
+}
