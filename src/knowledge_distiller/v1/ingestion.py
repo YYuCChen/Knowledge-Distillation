@@ -56,7 +56,27 @@ def require_legacy_sources(db, kind, subject_id, *, item_id=None, referenced_raw
             or (item_id is not None and (type(item_id) is not int or item_id <= 0))
             or type(referenced_raw_ids) not in (tuple, list)):
         raise IngestionError('local_source_qualification_pending')
-    subjects, messages, seen_subjects, seen_messages = [(kind, subject_id)], [], set(), set()
+    _require_legacy_graph(db, subjects=[(kind, subject_id)],
+                          items=[] if item_id is None else [item_id], referenced_raw_ids=referenced_raw_ids)
+
+
+def require_legacy_message(db, app_id, message_id, *, referenced_raw_ids=()):
+    """A real receipt/capture/part is required before reserving a capture ID."""
+    _require_legacy_graph(db, messages=[(app_id, message_id)], referenced_raw_ids=referenced_raw_ids)
+
+
+def require_legacy_item_sources(db, item_id, *, referenced_raw_ids=()):
+    """Seed all actual item owners and messages, even before a material exists."""
+    _require_legacy_graph(db, items=[item_id], referenced_raw_ids=referenced_raw_ids)
+
+
+def _require_legacy_graph(db, *, subjects=(), messages=(), items=(), referenced_raw_ids=()):
+    if db.execute('PRAGMA user_version').fetchone()[0] not in (25, 26):
+        raise IngestionError('candidate_schema_rebuild_required')
+    if type(referenced_raw_ids) not in (tuple, list):
+        raise IngestionError('local_source_qualification_pending')
+    subjects, messages, items = list(subjects), list(messages), list(items)
+    seen_subjects, seen_messages, seen_items = set(), set(), set()
     def referenced_subject(ref):
         if type(ref) is not str or raw.ID_RE.fullmatch(ref) is None:
             raise IngestionError('local_source_qualification_pending')
@@ -69,24 +89,40 @@ def require_legacy_sources(db, kind, subject_id, *, item_id=None, referenced_raw
             raise IngestionError('local_source_qualification_pending')
         return tuple(row)
     subjects.extend(referenced_subject(ref) for ref in referenced_raw_ids)
-    if item_id is not None:
-        require_legacy_item(db, item_id)
-    while subjects or messages:
-        if subjects:
+    while subjects or messages or items:
+        if items:
+            owner = items.pop()
+            if type(owner) is not int or owner <= 0:
+                raise IngestionError('local_source_qualification_pending')
+            if owner in seen_items:
+                continue
+            seen_items.add(owner)
+            row = db.execute('SELECT material_id FROM distill_items WHERE item_id=?', (owner,)).fetchone()
+            if row is None:
+                raise IngestionError('local_source_qualification_pending')
+            require_legacy_item(db, owner)
+            if row[0] is not None:
+                subjects.append(('material', row[0]))
+            messages.extend(tuple(r) for r in db.execute('SELECT app_id,message_id FROM feishu_parts WHERE item_id=?', (owner,)))
+            subjects.extend(('capture', r[0]) for r in db.execute('SELECT capture_id FROM capture_state WHERE item_id=?', (owner,)))
+        elif subjects:
             current_kind, current_id = subjects.pop()
+            if (current_kind not in {'material', 'capture'} or type(current_id) is not int or current_id <= 0):
+                raise IngestionError('local_source_qualification_pending')
+            table, column = ('materials', 'material_id') if current_kind == 'material' else ('captures', 'capture_id')
+            if db.execute('SELECT 1 FROM ' + table + ' WHERE ' + column + '=?', (current_id,)).fetchone() is None:
+                raise IngestionError('local_source_qualification_pending')
             if (current_kind, current_id) in seen_subjects:
                 continue
             seen_subjects.add((current_kind, current_id))
             if current_kind == 'material':
                 owners = [r[0] for r in db.execute('SELECT item_id FROM distill_items WHERE material_id=?', (current_id,))]
             else:
+                if db.execute('SELECT 1 FROM capture_state WHERE capture_id=?', (current_id,)).fetchone() is None:
+                    raise IngestionError('local_source_qualification_pending')
                 owners = [r[0] for r in db.execute('SELECT item_id FROM capture_state WHERE capture_id=? AND item_id IS NOT NULL', (current_id,))]
                 messages.extend(tuple(r) for r in db.execute('SELECT app_id,message_id FROM captures WHERE capture_id=?', (current_id,)))
-            for owner in owners:
-                require_legacy_item(db, owner)
-                subjects.extend(('material', r[0]) for r in db.execute('SELECT material_id FROM distill_items WHERE item_id=? AND material_id IS NOT NULL', (owner,)))
-                messages.extend(tuple(r) for r in db.execute('SELECT app_id,message_id FROM feishu_parts WHERE item_id=?', (owner,)))
-                subjects.extend(('capture', r[0]) for r in db.execute('SELECT capture_id FROM capture_state WHERE item_id=?', (owner,)))
+            items.extend(owners)
             # Existing raw dependencies are facts, never generated here.
             for row in db.execute('''SELECT content,supersedes FROM raw_records r WHERE subject_kind=? AND subject_id=?
                 AND NOT EXISTS(SELECT 1 FROM raw_records n WHERE n.supersedes=r.raw_id)''', (current_kind, current_id)):
@@ -99,13 +135,19 @@ def require_legacy_sources(db, kind, subject_id, *, item_id=None, referenced_raw
                 subjects.extend(referenced_subject(ref) for ref in refs)
         else:
             app_id, message_id = messages.pop()
+            if (type(app_id) is not str or not app_id or type(message_id) is not str or not message_id):
+                raise IngestionError('local_source_qualification_pending')
             if (app_id, message_id) in seen_messages:
                 continue
             seen_messages.add((app_id, message_id))
+            if db.execute('''SELECT 1 FROM feishu_receipts WHERE app_id=? AND message_id=? AND state!='rejected'
+                UNION ALL SELECT 1 FROM captures WHERE app_id=? AND message_id=?
+                UNION ALL SELECT 1 FROM feishu_parts WHERE app_id=? AND message_id=? LIMIT 1''',
+                (app_id, message_id, app_id, message_id, app_id, message_id)).fetchone() is None:
+                raise IngestionError('local_source_qualification_pending')
             subjects.extend(('capture', r[0]) for r in db.execute('SELECT capture_id FROM captures WHERE app_id=? AND message_id=?', (app_id, message_id)))
             for row in db.execute('SELECT item_id FROM feishu_parts WHERE app_id=? AND message_id=? AND item_id IS NOT NULL', (app_id, message_id)):
-                require_legacy_item(db, row[0])
-                subjects.extend(('material', r[0]) for r in db.execute('SELECT material_id FROM distill_items WHERE item_id=? AND material_id IS NOT NULL', (row[0],)))
+                items.append(row[0])
             messages.extend((app_id, r[0]) for r in db.execute('SELECT earlier_message_id FROM delivery_adjacency WHERE app_id=? AND message_id=?', (app_id, message_id)))
             messages.extend((app_id, r[0]) for r in db.execute('''SELECT e.target_message_id FROM capture_identity_events e JOIN captures c USING(capture_id)
                 WHERE c.app_id=? AND c.message_id=? AND e.event_id=(SELECT MAX(n.event_id) FROM capture_identity_events n WHERE n.capture_id=e.capture_id)

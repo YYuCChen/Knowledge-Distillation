@@ -67,6 +67,20 @@ def record_capture(db, app_id: str, message_id: str, *, message_type: str, creat
                    text: str | None = None, file_key: str | None = None, duration_ms: int | None = None,
                    vault: Path | None = None) -> None:
     """The immutable capture, with a raw id reserved now so later files can refer to it."""
+    import sqlite3
+    from .ingestion import IngestionError, require_legacy_message
+    if not db.in_transaction:
+        db.execute('BEGIN IMMEDIATE')
+    raw._source_inventory(db)
+    try:
+        require_legacy_message(db, app_id, message_id)
+    except IngestionError as error:
+        code = 'candidate_schema_rebuild_required' if error.args == ('candidate_schema_rebuild_required',) else 'local_source_qualification_pending'
+        raise raw.LegacySourceVeto(code) from None
+    except sqlite3.DatabaseError:
+        raise raw.LegacySourceVeto('candidate_schema_rebuild_required') from None
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+        raise raw.LegacySourceVeto('local_source_qualification_pending') from None
     if db.execute('SELECT 1 FROM captures WHERE app_id=? AND message_id=?', (app_id, message_id)).fetchone():
         return
     day = _local(received_ms).strftime('%Y%m%d')
@@ -467,8 +481,9 @@ class Captures:
                    check_source=None):
         """Assign using the existing reserved ID/render/insert; never release.
 
-        The explicit ingestion caller checks source/relations and holds the
-        Vault lock. Re-read the decision and capture in the assignment txn;
+        The default legacy gate checks actual owners/relations before render.
+        The explicit ingestion caller adds source CAS and holds the Vault lock.
+        Re-read the decision and capture in the same assignment txn;
         stale existing heads are returned for the caller to reject, not fixed
         by silently making a new version.
         """
@@ -479,9 +494,14 @@ class Captures:
                                  (capture['capture_id'],)).fetchone()
             if current is None or dict(current) != dict(decided) or current['result'] not in {'my_thought', 'annotation'}:
                 raise raw.RawError('capture_decision_changed')
-            fresh = self.get(capture['capture_id'])
+            row = db.execute('''SELECT c.*, s.item_id, s.audio_path, s.audio_released_at FROM captures c
+                                JOIN capture_state s USING(capture_id) WHERE capture_id=?''',
+                             (capture['capture_id'],)).fetchone()
+            fresh = dict(row) if row else None
             if fresh != dict(capture):
                 raise raw.RawError('capture_source_changed')
+            raw._legacy_source_gate(db, 'capture', capture['capture_id'],
+                                    referenced_raw_ids=raw._reference_ids(adjacency, target_id))
             if check_source is not None:
                 check_source(db)  # Read-only ingestion CAS, before freezing bytes.
             heads = db.execute("""SELECT r.raw_id FROM raw_records r WHERE subject_kind='capture' AND subject_id=?
@@ -507,21 +527,26 @@ class Captures:
         now = now or datetime.now(UTC)
         results = {}
         for capture, decided in self.ready():
-            adjacency, unsettled = self.adjacency(capture['app_id'], capture['message_id'])
-            target_id, target_settled = None, True
-            if decided['result'] == 'annotation':
-                with connect(self.store.path) as db:
-                    target_id, target_settled = self.raw_id_of_message(db, capture['app_id'], decided['target_message_id'])
-            young = now - _local(capture['received_ms']) < timedelta(hours=SETTLE_HOURS)
-            if young and (unsettled or not target_settled or (decided['result'] == 'annotation' and target_id is None)):
-                continue  # Earlier deliveries are still being processed; cite them once they have raw ids.
-            record = self.ensure_raw(capture, decided, adjacency, target_id, ledger=ledger,
-                                     unsettled=unsettled if not young else 0, existing_ok=False)
-            if record is None:
-                continue
-            results[capture['raw_id']] = ledger.write(record)
-            if results[capture['raw_id']] in {'placed', 'already'}:
-                self.release_audio(capture)
+            try:
+                adjacency, unsettled = self.adjacency(capture['app_id'], capture['message_id'])
+                target_id, target_settled = None, True
+                if decided['result'] == 'annotation':
+                    with connect(self.store.path) as db:
+                        target_id, target_settled = self.raw_id_of_message(db, capture['app_id'], decided['target_message_id'])
+                young = now - _local(capture['received_ms']) < timedelta(hours=SETTLE_HOURS)
+                if young and (unsettled or not target_settled or (decided['result'] == 'annotation' and target_id is None)):
+                    continue  # Earlier deliveries are still being processed; cite them once they have raw ids.
+                record = self.ensure_raw(capture, decided, adjacency, target_id, ledger=ledger,
+                                         unsettled=unsettled if not young else 0, existing_ok=False)
+                if record is None:
+                    continue
+                results[capture['raw_id']] = ledger.write(record)
+                if results[capture['raw_id']] in {'placed', 'already'}:
+                    self.release_audio(capture)
+            except raw.LegacySourceVeto as error:
+                if error.args != ('local_source_qualification_pending',):
+                    raise
+                results[capture['raw_id']] = 'local_source_qualification_pending'
         return results
 
     def render(self, capture, decided, adjacency, unsettled, target_id, *, raw_id=None, supersedes=None, now=None):
@@ -571,7 +596,8 @@ class Captures:
         ledger = raw.RawLedger(self.store)
         record = ledger.supersede(written['raw_id'], lambda raw_id, now: self.render(
             capture, decided, adjacency, 0, target_id, raw_id=raw_id, supersedes=written['raw_id'], now=now),
-            identity=IDENTITIES[result])
+            identity=IDENTITIES[result],
+            referenced_raw_ids=raw._reference_ids(adjacency, target_id))
         ledger.write(record)
 
 

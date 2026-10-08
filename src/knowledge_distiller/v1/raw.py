@@ -78,10 +78,10 @@ def _legacy_source_gate(db, kind, subject_id, *, item_id=None, referenced_raw_id
 
 
 def _legacy_item_gate(db, item_id):
-    from .ingestion import IngestionError, require_legacy_item
+    from .ingestion import IngestionError, require_legacy_item_sources
     _source_inventory(db)
     try:
-        require_legacy_item(db, item_id)
+        require_legacy_item_sources(db, item_id)
     except IngestionError as error:
         code = 'candidate_schema_rebuild_required' if error.args == ('candidate_schema_rebuild_required',) else 'local_source_qualification_pending'
         raise LegacySourceVeto(code) from None
