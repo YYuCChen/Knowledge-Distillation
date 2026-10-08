@@ -291,6 +291,29 @@ def test_frontmatter_provenance_program_checks_and_judgment_registered(h):
     assert {d.category for c in wrong.claims for d in c.diagnostics} >= {"metadata_mismatch", "missing_citation"}
 
 
+def test_only_raw_envelope_verified_metadata_can_use_program_basis(h):
+    text = f'---\n原始文件: {RAW_PATH}\n标题: 测试\n作者: 作者甲\n---\n'+cited()+'\n'
+    registry = h.make(text)
+    checks = [dict(claim_id=c.block.claim_id, status='supported', basis=(
+        'program' if c.block.kind == 'provenance_metadata' else 'raw'),
+        reason='Synthetic response for deterministic metadata basis.', issues=[]) for c in registry.claims]
+    parsed, diagnostics = ws.parse_checks(registry, json.dumps({'checks': checks}))
+    assert not diagnostics and len(parsed) == len(registry.claims)
+    assert {c.block.position for c in registry.claims if c.block.kind == 'provenance_metadata'} == {
+        'fm:作者', 'fm:标题', 'fm:原始文件'}
+    wrong = h.make(text.replace('作者: 作者甲', '作者: 未署名'))
+    _, diagnostics = ws.parse_checks(wrong, json.dumps({'checks': checks}))
+    assert any(d.reason == 'program_basis_outside_management' for d in diagnostics)
+    client = FakeClient()
+    assert h.gate(wrong).review(client).status == 'source_boundary_failed' and not client.calls
+    for item in checks:
+        item['basis'] = 'program'
+    _, diagnostics = ws.parse_checks(registry, json.dumps({'checks': checks}))
+    assert any(d.reason == 'program_basis_outside_management' and d.claim_id ==
+               next(c.block.claim_id for c in registry.claims if c.block.kind != 'provenance_metadata')
+               for d in diagnostics)
+
+
 def test_time_value_compared_as_same_instant_not_guessed(h):
     text = f"---\n原始文件: {RAW_PATH}\n发布时间: 2026-10-08T04:00:00+00:00\n---\n" + cited()
     assert not any(c.diagnostics for c in h.make(text).claims)
@@ -415,6 +438,52 @@ def test_changed_candidate_same_failure_positions_is_no_improvement(h):
     reserved = gate.reserve_repair()
     changed = h.make(cited("仍错误。"), parent=initial)
     assert h.gate(changed).review(FakeClient({0: "unsupported"}), reservation=reserved).status == "no_improvement"
+
+
+@pytest.mark.parametrize('new_failure', ['author', 'body'])
+def test_cleared_hard_boundary_allows_first_semantic_failures_and_remaining_budget(h, new_failure):
+    text = f'---\n原始文件: {RAW_PATH}\n标题: 测试\n作者: 未署名\n发布日期: 2026-10-08\n---\n'+cited()+'\n'
+    initial = h.make(text)
+    client = FakeClient()
+    gate = h.gate(initial)
+    original = gate.review(client)
+    assert original.status == 'source_boundary_failed' and not original.checks and not client.calls
+    first_reservation = gate.reserve_repair()
+    fixed = h.make(text.replace('作者: 未署名', '作者: 作者甲'), parent=initial)
+    author = next(c for c in fixed.claims if c.block.position == 'fm:作者')
+    assert author.evidence[0]['kind'] == 'program_verified_metadata'
+    failed_id = (author.block.claim_id if new_failure == 'author' else
+                 next(c.block.claim_id for c in fixed.claims if c.block.kind != 'provenance_metadata'))
+    index = next(i for i, c in enumerate(fixed.claims) if c.block.claim_id == failed_id)
+    semantic_client = FakeClient({index: 'unsupported'})
+    repaired_gate = h.gate(fixed)
+    result = repaired_gate.review(semantic_client, reservation=first_reservation)
+    assert result.status == 'source_support_failed' and result.checks and result.used_repairs == 1
+    assert len(semantic_client.calls) == 1
+    # Re-parsing the persisted receipt after restart preserves the stage boundary.
+    assert h.gate(fixed).review(semantic_client).status == 'source_support_failed'
+    assert len(semantic_client.calls) == 1
+    second = h.gate(fixed).reserve_repair()
+    assert second.number == 2
+    assert second.feedback['allowed_fields'] == [{'claim_id': failed_id, 'field': 'text'}]
+    changed = text.replace('作者: 未署名', '作者: 作者甲')
+    if new_failure == 'body':
+        changed = changed.replace('作者甲认为数值不是 12，而是 10。', '作者甲认为只有低温条件下数值是 10。')
+        last = h.make(changed, parent=fixed)
+        final = h.gate(last).review(FakeClient({index: 'unsupported'}), reservation=second)
+        assert final.status == 'no_improvement' and final.used_repairs == 2
+
+
+def test_remaining_hard_boundary_does_not_count_as_first_semantic_progress(h):
+    text = f'---\n原始文件: {RAW_PATH}\n作者: 未署名\n---\n'+cited()+'\n'
+    initial = h.make(text)
+    client = FakeClient()
+    gate = h.gate(initial)
+    assert gate.review(client).status == 'source_boundary_failed'
+    reservation = gate.reserve_repair()
+    still_wrong = h.make(text.replace('作者: 未署名', '作者: 另一个错误'), parent=initial)
+    result = h.gate(still_wrong).review(client, reservation=reservation)
+    assert result.status == 'no_improvement' and not result.checks and not client.calls
 
 
 def test_config_budget_and_raw_change_do_not_reset_existing_gate(h):

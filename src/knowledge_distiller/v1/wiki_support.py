@@ -47,9 +47,9 @@ AI 推测不得冒充原话或用户判断。检查否定、数值、条件、�
 status 仅 supported/unsupported/uncertain；reason 非空；supported issues 必须空，
 其他至少一个 issue，每个 issue 严格 {"field":"text或citations","category":"...","reason":"..."}。
 category 仅 negation/number/condition/strength/attribution/cross_point/unsupported/missing_context。
-program_verified_metadata 已按原信封确定性核验，依据是信封值，不要求段落 citation。
+program_verified_metadata 已按原信封确定性核验，依据是信封值，不要求段落 citation，可选program。
 每项basis仅raw/program/mixed。program_facts是程序冻结的当前staging库状态和已持久成功阶段，
-独立于raw，不含知识正文或模型自述。仅management_eligible位置的纯管理事实可选program；
+独立于raw，不含知识正文或模型自述。除上述元数据外，仅management_eligible位置的纯管理事实可选program；
 declared_topics只表示页面声明的主题归属，confirmed只表示确认字段，不是知识正确性证明。
 须逐项被program_facts支持，缺记录的历史检查值、“我已读完”等自述为uncertain或unsupported。
 外部知识即使写在日志/报告/概览，也不能由program_facts支持；知识选raw，混合段选mixed，
@@ -854,7 +854,12 @@ def parse_checks(registry: Registry, raw: str):
         basis = item.get('basis', 'raw')
         if type(basis) is not str or basis not in {'raw', 'program', 'mixed'}:
             raise WikiSupportError('protocol_invalid')
-        if basis in {'program', 'mixed'} and (registry.program_facts is None or not _management(known[cid])):
+        verified_metadata = (basis == 'program' and known[cid].kind == 'provenance_metadata'
+                             and not claims[cid].diagnostics and bool(claims[cid].evidence)
+                             and all(e.get('kind') == 'program_verified_metadata'
+                                     for e in claims[cid].evidence))
+        if (basis in {'program', 'mixed'} and not verified_metadata
+                and (registry.program_facts is None or not _management(known[cid]))):
             diagnostics.append(Diagnostic(cid, known[cid].path, known[cid].position,
                                           'text', 'unsupported', 'program_basis_outside_management'))
         if basis in {'raw', 'mixed'}:
@@ -1071,7 +1076,26 @@ class WikiSupportGate:
         if status in {"source_boundary_failed", "source_support_failed"} and diagnostics and attempt["parent_failures"]:
             current = {(d.claim_id, d.field) for d in diagnostics}
             previous = {tuple(p) for p in attempt["parent_failures"]}
-            if not current < previous:
+            first_semantic_review = False
+            if status == 'source_support_failed' and checks and not deterministic:
+                # A hard boundary failure prevented the parent's whole batch
+                # from being checked. Clearing it exposes previously unchecked
+                # fields, not a regression in fields that passed a review.
+                parents = [a for a in self._state()['attempts']
+                           if a['candidate_hash'] == attempt['parent_hash']]
+                if len(parents) == 1:
+                    parent_id = parents[0]['request_id']
+                    parent_decision = self.directory / ('decision-' + parent_id + '.json')
+                    parent_response = self.directory / ('response-' + parent_id + '.json')
+                    if (parent_decision.is_file() and not parent_response.exists()
+                            and not parent_response.is_symlink()):
+                        parent = self._load(parent_decision)
+                        first_semantic_review = (
+                            parent.get('candidate_hash') == attempt['parent_hash']
+                            and parent.get('status') == 'source_boundary_failed'
+                            and parent.get('checks') == []
+                            and {(d['claim_id'], d['field']) for d in parent['diagnostics']} == previous)
+            if not current < previous and not first_semantic_review:
                 status = "no_improvement"
         return GateResult(status, registry.candidate_hash, attempt["parent_hash"], diagnostics,
                           checks, attempt["used"], receipt)
