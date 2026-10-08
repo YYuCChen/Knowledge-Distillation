@@ -17,8 +17,11 @@ import selectors
 import stat
 import time
 
+from .wiki_support import CATEGORIES as _SUPPORT_CATEGORIES, FIELDS as _SUPPORT_FIELDS
+
 CONTRACT = 'r08-wiki-outcomes-v1'
 CHECK_CONTRACT = 'r08-no-knowledge-check-v1'
+SUPPORT_CONTRACT = 'r14-typed-support-v1'
 STDOUT_LIMIT = 8 * 1024 * 1024
 LINE_LIMIT = 256 * 1024
 STDERR_LIMIT = 256 * 1024
@@ -370,6 +373,7 @@ def require_budget(prompt, schema, measure):
         raise TypedError('input_budget_unavailable')
     if count > budget:
         raise TypedError('group_over_budget')
+    return version, count, budget
 
 
 def _input_bytes(root, relative, limit):
@@ -460,6 +464,175 @@ def checked_documents(snapshot, changes):
             raise TypedError('typed_binding_invalid')
         documents.append({'path': path, 'sha256': sha, 'content': content.decode('utf-8')})
     return documents
+
+
+# Transport schema only: parse_checks remains the sole R14 support judgment.
+SUPPORT_SCHEMA = _schema_object({
+    'contract': _string((SUPPORT_CONTRACT,)), 'schema_revision': {'type': 'integer', 'enum': [1]},
+    'binding': _BINDING_SCHEMA, 'registry_sha256': _HASH_SCHEMA,
+    'candidate_sha256': _HASH_SCHEMA,
+    'checks': {'type': 'array', 'items': _schema_object({
+        'claim_id': _string(), 'status': _string(('supported', 'unsupported', 'uncertain')),
+        'reason': _string(), 'issues': {'type': 'array', 'items': _schema_object({
+            'field': _string(sorted(_SUPPORT_FIELDS)),
+            'category': _string(sorted(_SUPPORT_CATEGORIES)),
+            'reason': _string()})}})}})
+
+
+@dataclass(frozen=True)
+class SupportInput:
+    binding: dict
+    registry_sha256: str
+    candidate_sha256: str
+    prompt: bytes
+    model_config_hash: str
+    measurement: tuple
+
+
+def _support_bytes(value):
+    """Canonical full JSON with a transport byte cap, never token estimation."""
+    output = bytearray()
+    encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    for text in encoder.iterencode(value):
+        piece = text.encode('utf-8')
+        if len(output) + len(piece) > INPUT_LIMIT:
+            raise TypedError('typed_input_limit')
+        output.extend(piece)
+    return bytes(output)
+
+
+def freeze_support(task, snapshot, registry, source_proof, measure, *, runtime_root, model, effort):
+    """Trusted caller admission before constructing/reviewing an R14 Gate.
+
+    Reads EVERY task raw and the whole current tree. Snapshot before hashes
+    are controller-owned baseline authority; backup is initially empty. The
+    proof/measure capabilities have no production implementation/default here.
+    This is a bounded readback/CAS observation, not protection from same-UID
+    arbitrary writes or an atomic filesystem snapshot.
+    """
+    from .wiki_staging import _all_files, REGENERABLE_GRAPH, WikiStagingError
+    from .wiki_support import SYSTEM, WikiSupportError, CONTRACT_VERSION, EXTRACTOR_VERSION, RECOVERY_VERSION
+    from dataclasses import asdict
+    if source_proof is None:
+        raise TypedError('source_proof_unavailable')
+    if measure is None:
+        raise TypedError('input_budget_unavailable')
+    if os.name != 'posix':
+        raise TypedError('runner_unavailable')
+    if (model != task.model or effort != task.effort or task.backend != 'codex_cli'
+            or type(model) is not str or not model or type(effort) is not str or not effort):
+        raise TypedError('typed_binding_invalid')
+    if registry.staging_root != snapshot.workspace:
+        raise TypedError('typed_binding_invalid')
+    payload, all_raw, batches = None, [], []
+    for batch in task.batches:
+        binding, context, frozen = freeze_input(task, snapshot, batch.batch_no, source_proof,
+                                               runtime_root=runtime_root)
+        if payload is None:
+            payload = dict(frozen)
+        batches.append({'binding': binding, 'source_proof_sha256': frozen['source_proof_sha256']})
+        all_raw.extend(frozen['raw'])
+    if payload is None or len(all_raw) != len(task.raw):
+        raise TypedError('typed_coverage_invalid')
+    try:
+        paths = _all_files(snapshot.workspace)
+    except WikiStagingError:
+        raise TypedError('typed_binding_invalid') from None
+    expected_raw = {(r.relative_path, r.raw_id, r.content_sha256) for r in task.raw}
+    if (len(registry.raws) != len(expected_raw)
+            or {(r.path, r.stable_id, r.sha256) for r in registry.raws} != expected_raw):
+        raise TypedError('typed_coverage_invalid')
+    baseline = {f.relative_path: f for f in snapshot.files}
+    changes = {c.path: c for c in registry.changes}
+    if len(changes) != len(registry.changes) or set(baseline) - set(paths):
+        raise TypedError('typed_coverage_invalid')
+    current, changed, total = [], set(), 0
+    for path in sorted(paths):
+        size = (snapshot.workspace / path).lstat().st_size
+        total += size
+        if total > INPUT_LIMIT:
+            raise TypedError('typed_input_limit')
+        content = _input_bytes(snapshot.workspace, path, size)
+        sha = digest(content)
+        current.append({'path': path, 'sha256': sha, 'byte_count': len(content)})
+        old = baseline.get(path)
+        differs = old is None or old.sha256 != sha or old.byte_count != len(content)
+        if differs and path.startswith('wiki/'):
+            if not path.endswith('.md'):
+                raise TypedError('typed_path_invalid')
+            changed.add(path)
+        elif differs and path not in REGENERABLE_GRAPH:
+            raise TypedError('typed_binding_invalid')
+        change = changes.get(path)
+        if change is not None:
+            if change.after != content or change.after_sha256 != sha:
+                raise TypedError('typed_binding_invalid')
+            if old is None:
+                if change.before is not None or change.before_sha256 is not None:
+                    raise TypedError('typed_binding_invalid')
+            elif (type(change.before) is not bytes or digest(change.before) != old.sha256
+                  or change.before_sha256 != old.sha256 or len(change.before) != old.byte_count):
+                raise TypedError('typed_binding_invalid')
+    if changed != set(changes):
+        raise TypedError('typed_coverage_invalid')
+    try:
+        registry.verify()
+    except WikiSupportError:
+        raise TypedError('typed_binding_invalid') from None
+    # Re-scan names after readback: concurrent added/missing files are drift.
+    try:
+        if paths != _all_files(snapshot.workspace):
+            raise TypedError('typed_binding_invalid')
+    except WikiStagingError:
+        raise TypedError('typed_binding_invalid') from None
+    payload.update(raw=all_raw, batches=batches, current_files=current, current_task=asdict(task),
+                   registry_binding_sha256=registry.binding_hash,
+                   registry=registry.payload(), support_contract=SUPPORT_CONTRACT)
+    binding = {key: payload[key] for key in ('task_id', 'attempt_id', 'batch_no', 'boundary_sha256')}
+    binding['input_sha256'] = digest(_support_bytes(payload))
+    registry_sha = digest(_support_bytes(registry.payload()))
+    # The R14 SYSTEM is byte-for-byte first; canonical Registry payload stays
+    # byte-for-byte nested as registry. Everything after SYSTEM is material.
+    prompt = (SYSTEM + '\n\nTransport: return ONLY the fixed SUPPORT_SCHEMA envelope; '
+              'binding/registry_sha256/candidate_sha256 must equal the supplied values. '
+              'The envelope wraps the original checks; no tools or edits.\n').encode() + _support_bytes({
+                  'binding': binding, 'registry_sha256': registry_sha,
+                  'candidate_sha256': registry.candidate_hash, 'inputs': payload})
+    measurement = require_budget(prompt, SUPPORT_SCHEMA, measure)
+    # Policy identity excludes candidate/prompt/input hash and measured count.
+    # 8192 is Gate request policy, NOT a Codex CLI hard output token limit.
+    policy = {'contract': SUPPORT_CONTRACT, 'schema': SUPPORT_SCHEMA,
+              'provider': 'knowledge_subscription', 'transport_policy': 'readonly-schema-final-v1',
+              'input_byte_limit': INPUT_LIMIT, 'final_byte_limit': FINAL_LIMIT,
+              'r14_versions': [CONTRACT_VERSION, EXTRACTOR_VERSION, RECOVERY_VERSION],
+              'system_sha256': digest(SYSTEM.encode()), 'model': model, 'effort': effort,
+              'tokenizer_version': measurement[0], 'max_tokens': 8192,
+              'source_boundary': {'task_id': task.task_id, 'attempt_id': snapshot.task_root.name,
+                  'boundary_sha256': task.boundary_sha256, 'task_raw': payload['task_raw'],
+                  'baseline': payload['baseline'],
+                  'source_proofs': [b['source_proof_sha256'] for b in batches]},
+              'kit_version': task.kit_version,
+              'kit_manifest_sha256': task.kit_manifest_sha256, 'timeout': CHECK_TIMEOUT}
+    return SupportInput(binding, registry_sha, registry.candidate_hash, prompt,
+                        digest(encoded(policy)), measurement)
+
+
+def parse_support(content, prepared, registry):
+    from .wiki_support import parse_checks, WikiSupportError
+    value = strict_json(content)
+    _object(value, ('contract', 'schema_revision', 'binding', 'registry_sha256', 'candidate_sha256', 'checks'))
+    if value['contract'] != SUPPORT_CONTRACT or type(value['schema_revision']) is not int or value['schema_revision'] != 1:
+        raise TypedError('typed_protocol_invalid')
+    validate_binding(value['binding'])
+    if (value['binding'] != prepared.binding or value['registry_sha256'] != prepared.registry_sha256
+            or value['candidate_sha256'] != prepared.candidate_sha256):
+        raise TypedError('typed_binding_invalid')
+    unwrapped = encoded({'checks': value['checks']}).decode()
+    try:
+        parse_checks(registry, unwrapped)
+    except WikiSupportError:
+        raise TypedError('typed_coverage_invalid') from None
+    return unwrapped
 
 
 def pump(process, prompt, final, *, timeout, cancelled, terminate):

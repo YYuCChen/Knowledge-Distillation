@@ -22,6 +22,64 @@ class WikiRunnerError(RuntimeError):
     """A fixed-code runner error safe to cross the application boundary."""
 
 
+class WikiSupportClient:
+    """Thin existing CompleteClient adapter, admitted before Gate reservation.
+
+    Call support_client immediately before Gate.review; do not keep an admitted
+    client across arbitrary task mutations. Trusted source_proof must recheck
+    current task/source CAS and canonical attachment qualification. There is no
+    default production capability. Gate alone owns durable requests/cache.
+    """
+
+    def __init__(self, runner, snapshot, runtime_root, *, task, registry, model, effort,
+                 source_proof, measure, skip_preflight):
+        self.runner, self.snapshot, self.runtime_root = runner, snapshot, runtime_root
+        self.task, self.registry = task, registry
+        self.model, self.effort = model, effort
+        self.source_proof, self.measure = source_proof, measure
+        self.skip_preflight = skip_preflight
+        self.prepared = self._freeze()
+        self.model_config_hash = self.prepared.model_config_hash
+
+    def _freeze(self):
+        from .wiki_typed import freeze_support, TypedError
+        try:
+            return freeze_support(self.task, self.snapshot, self.registry, self.source_proof, self.measure,
+                                  runtime_root=self.runtime_root, model=self.model, effort=self.effort)
+        except TypedError:
+            raise
+        except Exception:
+            raise TypedError('typed_input_invalid') from None
+
+    def verify_input(self):
+        from .wiki_typed import TypedError
+        if self._freeze() != self.prepared:
+            raise TypedError('typed_binding_invalid')
+
+    def checked_measure(self, prompt, schema):
+        from .wiki_typed import encoded, SUPPORT_SCHEMA, TypedError
+        if prompt != self.prepared.prompt or schema != encoded(SUPPORT_SCHEMA):
+            raise TypedError('typed_binding_invalid')
+        try:
+            value = self.measure(prompt, schema)
+        except Exception:
+            raise TypedError('input_budget_unavailable') from None
+        if value != self.prepared.measurement:
+            raise TypedError('typed_binding_invalid')
+        return value
+
+    def complete(self, *, system, user, max_tokens):
+        from .wiki_support import SYSTEM
+        from .wiki_typed import encoded, parse_support, TypedError
+        if (system != SYSTEM or user != encoded(self.registry.payload()).decode()
+                or type(max_tokens) is not int or max_tokens != 8192):
+            raise TypedError('typed_binding_invalid')
+        result = self.runner.check_support_json(self)
+        if not result.succeeded:
+            raise TypedError(result.error_code)
+        return parse_support(result.final_bytes, self.prepared, self.registry)
+
+
 @dataclass(frozen=True)
 class RunnerResult:
     error_code: str | None
@@ -331,8 +389,31 @@ class CodexWikiRunner:
             error = sys.exc_info()[1]
             return TypedRunnerResult(str(error) if isinstance(error, TypedError) else 'typed_input_invalid')
 
+    def support_client(self, snapshot, runtime_root, *, task, registry, model, effort,
+                       source_proof=None, measure=None, skip_preflight=False):
+        """Admit full trusted inputs BEFORE the caller constructs/reviews Gate."""
+        return WikiSupportClient(self, snapshot, runtime_root, task=task, registry=registry,
+                                 model=model, effort=effort, source_proof=source_proof,
+                                 measure=measure, skip_preflight=skip_preflight)
+
+    def check_support_json(self, client):
+        """Fixed R14 transport only; no Gate, repair loop, or acceptance here."""
+        from .wiki_typed import SUPPORT_SCHEMA, CHECK_TIMEOUT, TypedError, TypedRunnerResult, parse_support
+        if not isinstance(client, WikiSupportClient) or client.runner is not self:
+            return TypedRunnerResult('typed_input_invalid')
+        try:
+            client.verify_input()
+        except TypedError as error:
+            return TypedRunnerResult(str(error))
+        return self._run_typed(client.snapshot, client.runtime_root,
+            model=client.model, effort=client.effort, binding=client.prepared.binding,
+            schema=SUPPORT_SCHEMA, prompt=client.prepared.prompt,
+            parse=lambda content: parse_support(content, client.prepared, client.registry),
+            measure=client.checked_measure, check_only=True, timeout=CHECK_TIMEOUT,
+            skip_preflight=client.skip_preflight, verify_input=client.verify_input)
+
     def _run_typed(self, snapshot, runtime_root, *, model, effort, binding, schema,
-                   prompt, parse, measure, check_only, timeout, skip_preflight):
+                   prompt, parse, measure, check_only, timeout, skip_preflight, verify_input=None):
         from contextlib import ExitStack
         import math
         from .wiki_typed import (GENERATION_TIMEOUT, TypedError, TypedRunnerResult, artifact_directory,
@@ -345,6 +426,8 @@ class CodexWikiRunner:
             if self._cancel_requested.is_set():
                 return TypedRunnerResult('interrupted')
             codex = self.executable_resolver() if skip_preflight else self.preflight(model, effort)
+            if verify_input is not None:
+                verify_input()
             directory = artifact_directory(snapshot, runtime_root, binding, checker=check_only)
             schema_path = write_schema(directory, schema)
             final = directory / 'final.json'
@@ -368,6 +451,8 @@ class CodexWikiRunner:
                                  cancelled=self._cancel_requested, terminate=self._terminate_group)
                     content = read_final(directory, final.name)
                     parse(content)
+                    if verify_input is not None:
+                        verify_input()
                     if self._cancel_requested.is_set():
                         return TypedRunnerResult('interrupted')
                     return TypedRunnerResult(None, usage, content, digest(content))
