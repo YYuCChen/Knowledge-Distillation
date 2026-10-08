@@ -43,12 +43,12 @@ def test_multiple_links_require_choice_before_independent_items(intake):
 def test_bad_member_does_not_block_next_or_repeat_success_in_draft(intake):
     client, store = intake
     response = client.post('/submissions', data={'processing_mode':'separate','content':
-        'https://bad.test/one\nhttps://www.douyin.com/video/102'})
+        'https://www.douyin.com/unsupported\nhttps://www.douyin.com/video/102'})
     assert response.status_code == 400
     assert len(store.recent_items()) == 1
     assert '已接收 1 条' in response.text
     textarea = response.text.split('<textarea',1)[1].split('>',1)[1].split('</textarea>',1)[0]
-    assert textarea == 'https://bad.test/one'
+    assert textarea == 'https://www.douyin.com/unsupported'
 
 
 def test_mixed_platforms_are_independent_but_cannot_be_same_topic(intake):

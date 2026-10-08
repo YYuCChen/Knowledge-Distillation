@@ -1,4 +1,4 @@
-"""Internal R05 static reader. No routing, persistence, identity allocation or browser.
+"""R05 static reader and adapter for the existing material/media capture chain.
 
 HTML, metadata and extracted Markdown are untrusted source material. Nothing in
 them is executed or dereferenced. See docs/engineering/web-article.md.
@@ -8,6 +8,7 @@ from __future__ import annotations
 import codecs
 from collections import Counter
 from dataclasses import dataclass, replace
+from pathlib import Path
 import hashlib
 from html.parser import HTMLParser
 import importlib
@@ -92,6 +93,110 @@ class WebReadError(SourceReadError):
         super().__init__(code, retryable=retryable)
         self.capture = capture
         self.coverage = coverage
+
+
+def validate_web_url(value):
+    """Admission without DNS/network; the reader revalidates every actual hop."""
+    url, host, _ = _target(value)
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        _public_address(host)
+    return url
+
+
+@dataclass(frozen=True)
+class WebMediaMember:
+    member_id: str
+    kind: str
+    mime_type: str
+    path: Path
+    sha256: str
+
+
+@dataclass(frozen=True)
+class CapturedWebArticle:
+    source_kind: str
+    source_key: str
+    submitted_url: str
+    canonical_url: str
+    metadata: dict
+    members: tuple[WebMediaMember, ...]
+
+
+class WebArticleSource:
+    """No ASR, browser, credentials or generated replacement for page bytes."""
+    def __init__(self, reader=None):
+        self.reader = reader or read_web_article
+
+    @staticmethod
+    def _members(work_dir, values):
+        directory = work_dir / 'web-originals'
+        directory.mkdir(parents=True, exist_ok=True)
+        if directory.is_symlink():
+            raise WebReadError('web_originals_unsafe')
+        members = []
+        for identity, mime, content in values:
+            path = directory / identity
+            if path.is_symlink():
+                raise WebReadError('web_originals_unsafe')
+            path.write_bytes(content)
+            members.append(WebMediaMember(identity, identity, mime, path,
+                hashlib.sha256(content).hexdigest()))
+        return tuple(members)
+
+    def capture(self, submitted_url, work_dir):
+        try:
+            article = self.reader(submitted_url)
+        except WebReadError as error:
+            # Failed extraction is not a SourceFact. Preserve received originals
+            # for diagnosis/retry without manufacturing a successful material.
+            if error.capture is not None:
+                self._members(work_dir, (
+                    ('html-1', 'text/html', error.capture.raw_html),
+                    ('wire-1', 'application/octet-stream', error.capture.wire_body)))
+            raise
+        parsed, capture = article.parsed, article.capture
+        lineage = dict(parsed.lineage)
+        xml = lineage.pop('extracted_body_xml', b'')
+        values = [('html-1', 'text/html', capture.raw_html),
+                  ('wire-1', 'application/octet-stream', capture.wire_body),
+                  ('body-1', 'text/markdown', parsed.snapshot.encode('utf-8'))]
+        if xml:
+            values.append(('extraction-1', 'application/xml', xml))
+        members = self._members(work_dir, values)
+        lineage['original_members'] = [dict(member_id=m.member_id, mime_type=m.mime_type,
+                                           sha256=m.sha256) for m in members]
+        metadata = {**parsed.metadata, 'original_description': parsed.snapshot,
+                    'web_lineage': lineage,
+                    'native_content_version': hashlib.sha256(capture.raw_html).hexdigest()}
+        # A declared canonical is metadata only. It never rewrites source
+        # identity or causes an extra request (and may itself be a private URL).
+        key = hashlib.sha256(capture.final_url.encode('utf-8')).hexdigest()
+        return CapturedWebArticle('web_article', key, submitted_url, capture.final_url,
+                                  metadata, members)
+
+    def reuse_retained(self, *, source_key, submitted_url, canonical_url, metadata,
+                       work_dir, members):
+        expected = metadata.get('web_lineage', {}).get('original_members', [])
+        by_id = {m['member_id']: m for m in members}
+        values = []
+        for entry in expected:
+            member = by_id.get(entry['member_id'])
+            if (member is None or member['mime_type'] != entry['mime_type']
+                    or hashlib.sha256(member['content']).hexdigest() != entry['sha256']):
+                raise WebReadError('web_originals_invalid')
+            values.append((entry['member_id'], entry['mime_type'], member['content']))
+        body = by_id.get('body-1', {}).get('content')
+        html = by_id.get('html-1', {}).get('content')
+        if (not values or body != metadata.get('original_description', '').encode('utf-8')
+                or html is None or hashlib.sha256(html).hexdigest() != metadata.get('native_content_version')
+                or source_key != hashlib.sha256(canonical_url.encode('utf-8')).hexdigest()):
+            raise WebReadError('web_originals_invalid')
+        return CapturedWebArticle('web_article', source_key, submitted_url, canonical_url,
+                                  metadata, self._members(work_dir, values))
 
 
 class _Deadline:

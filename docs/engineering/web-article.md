@@ -60,7 +60,7 @@ agent-reach 的 GitHub/gh 后端只读以下固定 tag 官方源码；没有读�
 由 Luna 使用已核验 CPython 3.11.16 环境执行（下面 `TEST_PYTHON` 必须由主控指定真实已有路径，不安装依赖）：
 
 ```bash
-cd /Users/chen./Documents/知识蒸馏器/V3.0开发/source
+cd "$PROJECT_SOURCE"
 R05_TEST_ROOT=$(mktemp -d /tmp/kd-v3-r05-test-20261008.XXXXXX)
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src "$TEST_PYTHON" -m pytest -p no:cacheprovider \
   tests/v1/test_web_article.py --basetemp "$R05_TEST_ROOT" \
@@ -96,7 +96,7 @@ PyPI wheel `trafilatura-2.3.1-py3-none-any.whl` SHA-256：`f86bad2ee36f82884e14d
 Luna 的下一次单项真实库验收命令（Sol 未执行）：
 
 ```bash
-cd /Users/chen./Documents/知识蒸馏器/V3.0开发/source
+cd "$PROJECT_SOURCE"
 R05_REAL_ROOT=$(mktemp -d /private/tmp/kd-v3-r05-real-20261008.XXXXXX)
 env -i PATH=/usr/bin:/bin TZ=Asia/Taipei TMPDIR="$R05_REAL_ROOT" \
   PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH="$PWD/src" \

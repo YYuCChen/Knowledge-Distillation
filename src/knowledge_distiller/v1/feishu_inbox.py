@@ -161,7 +161,7 @@ class FeishuInbox:
             except (ValueError, TypeError, KeyError):
                 error = '这条消息的文字格式无法读取，请重新发送。'
         from .captures import record_adjacency, record_capture, now_ms, DEFAULT_WINDOW_MINUTES, WINDOW_SETTING
-        from .intake import links_in
+        from .intake import message_links
         with connect(self.store.path) as db:
             db.execute('BEGIN IMMEDIATE')
             inserted = db.execute('''INSERT INTO feishu_receipts
@@ -182,7 +182,8 @@ class FeishuInbox:
                                    created_ms=message.created_ms, received_ms=now_ms(), file_key=voice['file_key'],
                                    duration_ms=voice.get('duration') if isinstance(voice.get('duration'), int) else None,
                                    vault=vault)
-                elif (message.message_type == 'text' or plain is not None) and not same_topic and not links_in(text):
+                elif (message.message_type == 'text' or plain is not None) and not same_topic and not message_links(
+                        text, message_type=message.message_type, content=message.content):
                     record_capture(db, self.app_id, message.message_id, message_type='text',
                                    created_ms=message.created_ms, received_ms=now_ms(), text=text, vault=vault)
             return dict(db.execute('SELECT * FROM feishu_receipts WHERE app_id=? AND message_id=?',
