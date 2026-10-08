@@ -76,7 +76,7 @@ def _formal(tmp_path: Path) -> Path:
     return tmp_path / "formal-never-opened"
 
 
-def test_schema21_copy_upgrades_to_23_without_changing_legacy_rows_or_vault(tmp_path):
+def test_schema21_copy_upgrades_to_24_without_changing_legacy_rows_or_vault(tmp_path):
     database, vault = _prepare(tmp_path / "attempt")
     _, report = _report_parent(tmp_path)
     vault_before = probe._digest_tree(vault)
@@ -84,7 +84,7 @@ def test_schema21_copy_upgrades_to_23_without_changing_legacy_rows_or_vault(tmp_
     result = json.loads(report.read_text(encoding="utf-8"))
     assert result["ok"] is True and result["error_code"] is None
     assert result["database"]["schema_before"] == 21
-    assert result["database"]["schema_after"] == 23
+    assert result["database"]["schema_after"] == 24
     assert result["database"]["quick_check_before"] is True
     assert result["database"]["quick_check_after"] is True
     assert result["database"]["foreign_key_violations_before"] == 0
@@ -99,12 +99,12 @@ def test_schema21_copy_upgrades_to_23_without_changing_legacy_rows_or_vault(tmp_
     assert SENTINEL not in report.read_text(encoding="utf-8")
     assert report.stat().st_mode & 0o777 == 0o600
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 23
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 24
         assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
         assert connection.execute("PRAGMA foreign_key_check").fetchone() is None
         assert {row[0] for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'wiki_%'"
-        )} == {"wiki_tasks", "wiki_task_batches", "wiki_task_raw", "wiki_observations"}
+        )} == {"wiki_tasks", "wiki_task_batches", "wiki_task_raw", "wiki_observations", "wiki_outcome_receipts"}
 
 
 def test_mac_dispatch_is_early_and_accepts_equals_data_dir(tmp_path, monkeypatch):
@@ -142,11 +142,9 @@ def test_marker_binds_database_bytes_and_schema21(tmp_path):
     assert sqlite3.connect(database).execute("PRAGMA user_version").fetchone()[0] == 21
 
     database, _ = _prepare(tmp_path / "schema-attempt")
-    with sqlite3.connect(database) as connection:
-        connection.execute("PRAGMA user_version=22")
     marker_path = database.parent / probe.MARKER_NAME
     marker = json.loads(marker_path.read_text())
-    marker["database_before_sha256"] = probe._digest_file(database)
+    marker["expected_schema"] = 22  # Real schema21 remains unchanged; only the declaration is wrong.
     marker_path.write_text(json.dumps(marker));marker_path.chmod(0o600)
     _, schema_report = _report_parent(tmp_path, "schema-evidence")
     assert probe.run(database.parent, schema_report, formal_root=_formal(tmp_path)) == 1
