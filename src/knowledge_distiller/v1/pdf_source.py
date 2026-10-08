@@ -26,7 +26,7 @@ def qualify_pdf(content: bytes) -> None:
         raise SourceReadError("pdf_protection_unknown") from error
 
 
-def parse_pdf(content: bytes, label: str, source_key: str, *, converter=None, ocr=None) -> ParsedSource:
+def parse_pdf(content: bytes, label: str, source_key: str, *, converter=None, ocr=None, _collector=None) -> ParsedSource:
     if hashlib.sha256(content).hexdigest() != source_key:
         raise SourceReadError("file_snapshot_mismatch")
     qualify_pdf(content)
@@ -35,23 +35,33 @@ def parse_pdf(content: bytes, label: str, source_key: str, *, converter=None, oc
     if any(key in root for key in ("/AcroForm", "/OCProperties", "/OpenAction", "/AA")):
         raise SourceReadError("pdf_content_unsupported")
     seen = set()
+    page_references = []
     for page in reader.pages:
         reference = page.indirect_reference
         identity = (reference.idnum, reference.generation) if reference else id(page)
         if identity in seen:
             raise SourceReadError("pdf_reading_order_uncertain")
         seen.add(identity)
+        if _collector is not None:
+            page_references.append({'physical_page': len(page_references)+1,
+                'object_number': reference.idnum if reference else None,
+                'generation': reference.generation if reference else None,
+                'locator_capability': 'indirect_reference' if reference else 'unknown'})
     metadata = _metadata(reader)
     from .document_source import convert_document, compose_document
     converted = convert_document(content, 'pdf', converter)
     if converted.page_count != len(reader.pages):
         raise SourceReadError('pdf_pages_incomplete')
-    composed = compose_document(converted, ocr=ocr)
+    if _collector is not None:
+        _collector.begin(content, 'pdf', converted, None)
+    composed = compose_document(converted, ocr=ocr, _collector=_collector)
     snapshot = composed.snapshot
     if not snapshot.strip() or (not any(any(c.isalnum() for c in e.text) for e in converted.entries) and not any(i['lines'] for i in composed.images)):
         raise SourceReadError('pdf_empty_content')
     metadata.update({'submitted_name': label, 'byte_length': len(content),
                      'parser': 'docling', 'parser_version': converted.runtime_version})
+    if _collector is not None:
+        _collector.finish(composed, 0, references=page_references)
     return ParsedSource(snapshot, metadata,
         {'version': 2, 'kind': 'pdf-pages', 'source_key': source_key,
          'snapshot_sha256': hashlib.sha256(snapshot.encode()).hexdigest(),
