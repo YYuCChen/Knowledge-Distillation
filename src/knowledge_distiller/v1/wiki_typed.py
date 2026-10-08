@@ -865,3 +865,287 @@ def pump(process, prompt, final, *, timeout, cancelled, terminate):
             for stream, _event, _tag in streams:
                 if not stream.closed:
                     stream.close()
+
+
+# Host audit evidence, independently bounded. Not a model/token/input budget.
+STAGE_METADATA_LIMIT = 32 * 1024 * 1024
+STAGE_CONTRACT = 'wiki-outcome-stage-v1'
+REFRESH_CONTRACT = 'wiki-outcome-hash-refresh-v1'
+
+
+@dataclass(frozen=True)
+class FrozenOutcomeStage:
+    binding_json: bytes
+    proposal: bytes
+    check_result: TypedRunnerResult
+    changes_json: bytes
+    documents_json: bytes
+    tree_json: bytes
+    source_sha256: str
+    receipt_json: bytes
+
+
+@dataclass(frozen=True)
+class RefreshedOutcomeCandidate:
+    proposal: bytes
+    receipt_json: bytes
+    changes_json: bytes
+    documents_json: bytes
+    tree_json: bytes
+    reusable_check: TypedRunnerResult | None
+
+
+def _stage_decode(content):
+    """Only canonical host JSON; model final parsing keeps its own limit."""
+    if type(content) is not bytes or not content or len(content) > STAGE_METADATA_LIMIT:
+        raise TypedError('typed_input_limit')
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise TypedError('typed_binding_invalid')
+            result[key] = value
+        return result
+    def invalid(_value):
+        raise TypedError('typed_binding_invalid')
+    try:
+        value = json.loads(content.decode('utf-8'), object_pairs_hook=pairs,
+                           parse_constant=invalid, parse_float=invalid)
+        if encoded(value) != content:
+            raise TypedError('typed_binding_invalid')
+        return value
+    except (ValueError, UnicodeError, RecursionError):
+        raise TypedError('typed_binding_invalid') from None
+
+
+def _stage_size(*parts):
+    if any(type(p) is not bytes for p in parts) or sum(map(len, parts)) > STAGE_METADATA_LIMIT:
+        raise TypedError('typed_input_limit')
+
+
+def _stage_path(path):
+    if (type(path) is not str or path.startswith('/') or ':' in path or '\\' in path
+            or '\0' in path or any(p in {'', '.', '..'} for p in path.split('/'))):
+        raise TypedError('typed_path_invalid')
+
+
+def _stage_changes(snapshot, tree):
+    """Reconstruct full D from one complete tree and the same pre-batch baseline."""
+    from .wiki_staging import REGENERABLE_GRAPH
+    baseline = {f.relative_path: f for f in snapshot.files}
+    if len(baseline) != len(snapshot.files) or type(tree) is not list:
+        raise TypedError('typed_binding_invalid')
+    current, changes = {}, []
+    for row in tree:
+        if type(row) is not list or len(row) != 3:
+            raise TypedError('typed_binding_invalid')
+        path, sha, size = row
+        _stage_path(path)
+        _hash(sha)
+        if path in current or type(size) is not int or size < 0:
+            raise TypedError('typed_binding_invalid')
+        current[path] = (sha, size)
+        before = baseline.get(path)
+        if before is not None and (before.sha256, before.byte_count) == (sha, size):
+            continue
+        if ((before is not None and before.role == 'raw')
+                or (not path.startswith('wiki/') and path not in REGENERABLE_GRAPH)
+                or (path.startswith('wiki/') and not path.endswith('.md'))):
+            raise TypedError('typed_binding_invalid')
+        changes.append({'path': path, 'before_sha256': before.sha256 if before else None,
+                        'after_sha256': sha, 'byte_count': size})
+    if set(baseline) - set(current) or list(current) != sorted(current):
+        raise TypedError('typed_binding_invalid')
+    return changes
+
+
+def _outcome_tree(snapshot, task, batch_no, validated):
+    from .wiki_staging import _all_files, ValidatedBatch, WikiStagingError
+    if (not isinstance(validated, ValidatedBatch) or type(batch_no) is not int
+            or type(validated.batch_no) is not int
+            or validated.task_id != task.task_id or validated.batch_no != batch_no
+            or validated.staging_vault != snapshot.workspace):
+        raise TypedError('typed_binding_invalid')
+    batch_paths = {r.relative_path for r in task.raw if r.batch_no == batch_no}
+    if (not batch_paths or not batch_paths <= set(snapshot.pending_before)
+            or len(set(snapshot.pending_before)) != len(snapshot.pending_before)
+            or len(set(validated.pending_after)) != len(validated.pending_after)
+            or set(validated.pending_after) != set(snapshot.pending_before) - batch_paths):
+        raise TypedError('typed_binding_invalid')
+    for path in (*snapshot.pending_before, *validated.pending_after):
+        _stage_path(path)
+    def observe():
+        try:
+            paths = _all_files(snapshot.workspace)
+            tree = [[p, *_input_digest(snapshot.workspace, p)] for p in sorted(paths)]
+            content = encoded(tree)
+            _stage_size(content)
+            if paths != _all_files(snapshot.workspace):
+                raise TypedError('typed_binding_invalid')
+            return content
+        except (WikiStagingError, OSError):
+            raise TypedError('typed_binding_invalid') from None
+    tree = observe()
+    changes = _stage_changes(snapshot, _stage_decode(tree))
+    for change in validated.changes:
+        _stage_path(change.relative_path)
+        _hash(change.after_sha256)
+        if change.before_sha256 is not None:
+            _hash(change.before_sha256)
+    supplied = sorted((c.relative_path, c.before_sha256, c.after_sha256) for c in validated.changes)
+    if (len({c.relative_path for c in validated.changes}) != len(validated.changes)
+            or supplied != [(c['path'], c['before_sha256'], c['after_sha256']) for c in changes]
+            or observe() != tree):
+        raise TypedError('typed_binding_invalid')
+    return encoded(changes), tree
+
+
+def _stage_documents(snapshot, changes_json):
+    changes = _stage_decode(changes_json)
+    wiki = {c['path']: c['after_sha256'] for c in changes if c['path'].startswith('wiki/')}
+    try:
+        result = encoded(checked_documents(snapshot, wiki))
+    except (OSError, UnicodeError):
+        raise TypedError('typed_binding_invalid') from None
+    _stage_size(result)
+    return result
+
+
+def _stage_check(task, result, binding, rows, payload, proposal, documents):
+    if (not isinstance(result, TypedRunnerResult) or not result.succeeded
+            or type(result.final_bytes) is not bytes
+            or result.final_sha256 != digest(result.final_bytes)
+            or not isinstance(result.input_binding, InputBinding)
+            or result.input_binding.schema_sha256 != digest(encoded(CHECK_SCHEMA))
+            or result.input_binding.schema_bytes != len(encoded(CHECK_SCHEMA))):
+        raise TypedError('typed_binding_invalid')
+    content = {c['frozen']['raw_id']: c['full_raw'].encode('utf-8') for c in payload['context_raw']}
+    whole = tuple((r, content[r.raw_id]) for r in task.raw)
+    review = parse_check(result.final_bytes, binding, rows,
+        proposal_sha256=digest(proposal), changes_sha256=digest(documents),
+        source_proof_sha256=payload['source_proof_sha256'], full_context=whole)
+    if any(r['status'] != 'verified' or r['source_check']['status'] != 'complete'
+           or any(d['status'] == 'unknown' for d in r['dimensions']) for r in review['reviews']):
+        raise TypedError('typed_protocol_invalid')
+
+
+def _stage_receipt(binding, proposal, check, changes, documents, tree, source):
+    return encoded({'contract': STAGE_CONTRACT, 'binding': binding,
+        'proposal_sha256': digest(proposal), 'check_sha256': check.final_sha256,
+        'check_input': check.input_binding.__dict__,
+        'changes_sha256': digest(changes), 'documents_sha256': digest(documents),
+        'protected_tree_sha256': digest(tree), 'source_proof_sha256': source})
+
+
+def _old_stage_evidence(snapshot, stage, binding):
+    _stage_size(stage.binding_json, stage.proposal, stage.check_result.final_bytes,
+                stage.changes_json, stage.documents_json, stage.tree_json, stage.receipt_json)
+    if _stage_decode(stage.binding_json) != binding:
+        raise TypedError('typed_binding_invalid')
+    tree = _stage_decode(stage.tree_json)
+    changes = _stage_changes(snapshot, tree)
+    if _stage_decode(stage.changes_json) != changes:
+        raise TypedError('typed_binding_invalid')
+    documents = _stage_decode(stage.documents_json)
+    if type(documents) is not list:
+        raise TypedError('typed_binding_invalid')
+    wiki = {c['path']: c for c in changes if c['path'].startswith('wiki/')}
+    seen = set()
+    for doc in documents:
+        _object(doc, ('path', 'sha256', 'content'))
+        path = doc['path']
+        _stage_path(path)
+        if path in seen or path not in wiki or type(doc['content']) is not str:
+            raise TypedError('typed_binding_invalid')
+        seen.add(path)
+        try:
+            body = doc['content'].encode('utf-8')
+        except UnicodeError:
+            raise TypedError('typed_binding_invalid') from None
+        if (digest(body) != doc['sha256'] or doc['sha256'] != wiki[path]['after_sha256']
+                or len(body) != wiki[path]['byte_count']):
+            raise TypedError('typed_binding_invalid')
+    if [d['path'] for d in documents] != sorted(wiki):
+        raise TypedError('typed_binding_invalid')
+    expected = _stage_receipt(binding, stage.proposal, stage.check_result, stage.changes_json,
+                              stage.documents_json, stage.tree_json, stage.source_sha256)
+    if encoded(_stage_decode(stage.receipt_json)) != expected:
+        raise TypedError('typed_binding_invalid')
+    return {c['path']: c['after_sha256'] for c in changes}
+
+
+def freeze_outcome_stage(snapshot, runtime_root, *, task, batch_no, proposal,
+                         check_result, validated, source_proof):
+    """Save P0/Q0/full D0 before health. This grants no publication capability.
+
+    validated must come from actual validate_staging; this helper rechecks its
+    full content boundary, not the kit's execution or health truthfulness.
+    """
+    binding, rows, payload = freeze_input(task, snapshot, batch_no, source_proof, runtime_root=runtime_root)
+    parsed = parse_proposal(proposal, binding, rows)
+    if any(o['status'] == 'unknown' for o in parsed['outcomes']):
+        raise TypedError('typed_protocol_invalid')
+    changes, tree = _outcome_tree(snapshot, task, batch_no, validated)
+    documents = _stage_documents(snapshot, changes)
+    wiki = {d['path']: d['sha256'] for d in _stage_decode(documents)}
+    if any(wiki.get(d['path']) != d['sha256'] for o in parsed['outcomes'] for d in o['documents']):
+        raise TypedError('typed_binding_invalid')
+    _stage_check(task, check_result, binding, rows, payload, proposal, documents)
+    receipt = _stage_receipt(binding, proposal, check_result, changes, documents, tree,
+                             payload['source_proof_sha256'])
+    stage = FrozenOutcomeStage(encoded(binding), proposal, check_result, changes, documents,
+                               tree, payload['source_proof_sha256'], receipt)
+    _old_stage_evidence(snapshot, stage, binding)
+    if (freeze_input(task, snapshot, batch_no, source_proof, runtime_root=runtime_root)[2] != payload
+            or _outcome_tree(snapshot, task, batch_no, validated) != (changes, tree)):
+        raise TypedError('typed_binding_invalid')
+    return stage
+
+
+def refresh_outcome_documents(snapshot, runtime_root, *, task, batch_no, stage,
+                              validated, source_proof):
+    """Only replace existing cited hashes at identical paths; return unverified P1.
+
+    Changed D always needs an independent final check and whole-D R14 support.
+    The receipt is host evidence, not accepted/main DB authority. It is not a
+    recovery journal and cannot resurrect old files from the new workspace.
+    """
+    if not isinstance(stage, FrozenOutcomeStage):
+        raise TypedError('typed_binding_invalid')
+    binding, rows, payload = freeze_input(task, snapshot, batch_no, source_proof, runtime_root=runtime_root)
+    if encoded(binding) != stage.binding_json or payload['source_proof_sha256'] != stage.source_sha256:
+        raise TypedError('typed_binding_invalid')
+    parsed = parse_proposal(stage.proposal, binding, rows)
+    if any(o['status'] == 'unknown' for o in parsed['outcomes']):
+        raise TypedError('typed_protocol_invalid')
+    _stage_check(task, stage.check_result, binding, rows, payload, stage.proposal, stage.documents_json)
+    old = _old_stage_evidence(snapshot, stage, binding)
+    changes, tree = _outcome_tree(snapshot, task, batch_no, validated)
+    documents = _stage_documents(snapshot, changes)
+    new = {d['path']: d['sha256'] for d in _stage_decode(documents)}
+    mapping = []
+    for outcome in parsed['outcomes']:
+        for document in outcome['documents']:
+            path, prior = document['path'], document['sha256']
+            if path not in new or old.get(path) != prior:
+                raise TypedError('typed_binding_invalid')
+            mapping.append([path, prior, new[path]])
+            document['sha256'] = new[path]
+    unchanged = (changes, tree, documents) == (stage.changes_json, stage.tree_json, stage.documents_json)
+    candidate = stage.proposal if unchanged else encoded(parsed)
+    parse_proposal(candidate, binding, rows)
+    receipt = encoded({'contract': REFRESH_CONTRACT, 'binding': binding,
+        'parent_stage_sha256': digest(stage.receipt_json),
+        'parent_proposal_sha256': digest(stage.proposal), 'parent_check_sha256': stage.check_result.final_sha256,
+        'before_changes_sha256': digest(stage.changes_json), 'before_documents_sha256': digest(stage.documents_json),
+        'before_protected_tree_sha256': digest(stage.tree_json),
+        'final_changes_sha256': digest(changes), 'final_documents_sha256': digest(documents),
+        'protected_tree_sha256': digest(tree), 'source_proof_sha256': stage.source_sha256,
+        'proposal_sha256': digest(candidate), 'document_mapping': mapping})
+    _stage_size(stage.binding_json, candidate, stage.check_result.final_bytes, changes, documents, tree, receipt)
+    _stage_decode(receipt)
+    if (freeze_input(task, snapshot, batch_no, source_proof, runtime_root=runtime_root)[2] != payload
+            or _outcome_tree(snapshot, task, batch_no, validated) != (changes, tree)):
+        raise TypedError('typed_binding_invalid')
+    return RefreshedOutcomeCandidate(candidate, receipt, changes, documents, tree,
+                                     stage.check_result if unchanged else None)
