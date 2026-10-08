@@ -158,12 +158,350 @@ def validate_conversion_receipt(result, data, kind):
                 or receipt._seal is not _RECEIPT_SEAL or receipt._result() is not result):
             raise ValueError
         audit = json.loads(receipt.audit_json)
+        protocol = _check_execution_protocol(audit)
+        if protocol == 'document-conversion-execution-v2':
+            _validate_observations(audit)
         if (audit['input'] != {'kind': kind, 'sha256': _sha(data), 'byte_count': len(data)}
                 or audit['output'] != _result_fingerprints(result)):
             raise ValueError
         return audit
     except (AttributeError, TypeError, ValueError, KeyError) as error:
         raise DoclingSourceError('docling_receipt_invalid') from error
+
+
+def _check_execution_protocol(audit):
+    protocol = audit.get('protocol')
+    if (protocol not in {'document-conversion-execution-v1', 'document-conversion-execution-v2'}
+            or audit['recipe'].get('adapter_revision') != protocol
+            or set(audit) != {'protocol', 'input', 'recipe', 'pages', 'output'}):
+        raise ValueError
+    return protocol
+
+
+_OBSERVATION_REASONS = {'unsupported_backend', 'missing_segmented_page',
+    'unsupported_cell_type', 'invalid_cell_fields', 'association_mismatch',
+    'selection_identity_unknown', 'prepost_not_observed'}
+_RECT_KEYS = {'r_x0', 'r_y0', 'r_x1', 'r_y1', 'r_x2', 'r_y2', 'r_x3', 'r_y3', 'coord_origin'}
+_CELL_KEYS = {'index', 'rgba', 'rect', 'text', 'orig', 'text_direction', 'confidence', 'from_ocr'}
+_PDF_CELL_KEYS = {'rendering_mode', 'widget', 'font_key', 'font_name'}
+_GEOMETRY_KEYS = {'angle', 'rect', 'boundary_type', 'art_bbox', 'bleed_bbox',
+                  'crop_bbox', 'media_bbox', 'trim_bbox'}
+
+
+def _finite(value):
+    if type(value) not in (int, float) or not math.isfinite(value):
+        raise ValueError
+    return value
+
+
+def _finite_float(value):
+    if type(value) is not float:
+        raise ValueError
+    return _finite(value)
+
+
+def _check_rect(value, *, box=False):
+    keys = {'l', 't', 'r', 'b', 'coord_origin'} if box else _RECT_KEYS
+    if type(value) is not dict or set(value) != keys or value['coord_origin'] not in {'TOPLEFT', 'BOTTOMLEFT'}:
+        raise ValueError
+    for key in keys-{'coord_origin'}:
+        _finite_float(value[key])
+
+
+def _check_cell(fields, name):
+    pdf = name == 'docling_core.types.doc.page.PdfTextCell'
+    if name not in {'docling_core.types.doc.page.TextCell', 'docling_core.types.doc.page.PdfTextCell'}:
+        raise ValueError
+    if type(fields) is not dict or set(fields) != _CELL_KEYS | (_PDF_CELL_KEYS if pdf else set()):
+        raise ValueError
+    if type(fields['index']) is not int or type(fields['from_ocr']) is not bool:
+        raise ValueError
+    if (any(type(fields[k]) is not str for k in ('text', 'orig'))
+            or fields['text_direction'] not in {'left_to_right', 'right_to_left', 'unspecified'}
+            or not 0 <= _finite_float(fields['confidence']) <= 1):
+        raise ValueError
+    _check_rect(fields['rect'])
+    rgba = fields['rgba']
+    if (type(rgba) is not dict or set(rgba) != {'r', 'g', 'b', 'a'}
+            or any(type(v) is not int or not 0 <= v <= 255 for v in rgba.values())):
+        raise ValueError
+    if pdf and (type(fields['rendering_mode']) is not int or fields['rendering_mode'] not in range(-1, 8)
+            or type(fields['widget']) is not bool or fields['from_ocr']
+            or any(type(fields[k]) is not str for k in ('font_key', 'font_name'))):
+        raise ValueError
+    _json_bytes(fields)
+
+
+def _raw_rect(value, cls, *, box=False):
+    from docling_core.types.doc.base import CoordOrigin
+    if type(value) is not cls or type(value.coord_origin) is not CoordOrigin:
+        raise ValueError
+    keys = {'l', 't', 'r', 'b'} if box else _RECT_KEYS-{'coord_origin'}
+    if set(value.__dict__) != keys | {'coord_origin'}:
+        raise ValueError
+    result = {k: _finite(getattr(value, k)) for k in keys}
+    result['coord_origin'] = value.coord_origin.value
+    _check_rect(result, box=box)
+    return result
+
+
+def _cell_rows(record, cells):
+    from docling_core.types.doc.page import (TextCell, PdfTextCell, BoundingRectangle,
+        ColorRGBA, TextDirection, PdfCellRenderingMode)
+    rows = []
+    for ordinal, cell in enumerate(cells):
+        if type(cell) not in (TextCell, PdfTextCell):
+            raise TypeError('unsupported_cell_type')
+        if set(cell.__dict__) != _CELL_KEYS | (_PDF_CELL_KEYS if type(cell) is PdfTextCell else set()):
+            raise ValueError
+        if type(cell.rgba) is not ColorRGBA or type(cell.text_direction) is not TextDirection:
+            raise ValueError
+        if set(cell.rgba.__dict__) != {'r', 'g', 'b', 'a'}:
+            raise ValueError
+        fields = {k: getattr(cell, k) for k in ('index', 'text', 'orig', 'confidence', 'from_ocr')}
+        fields.update(rgba={k: getattr(cell.rgba, k) for k in ('r', 'g', 'b', 'a')},
+            rect=_raw_rect(cell.rect, BoundingRectangle), text_direction=cell.text_direction.value)
+        if type(cell) is PdfTextCell:
+            if type(cell.rendering_mode) is not PdfCellRenderingMode:
+                raise ValueError
+            fields.update(rendering_mode=cell.rendering_mode.value, widget=cell.widget,
+                          font_key=cell.font_key, font_name=cell.font_name)
+        name = 'docling_core.types.doc.page.'+type(cell).__name__
+        _check_cell(fields, name)
+        refs = record['_cell_refs']
+        found = next((i for i, existing in enumerate(refs) if existing is cell), None)
+        if found is None:
+            found = len(refs); refs.append(cell)
+        rows.append({'ordinal': ordinal, 'local_ref': found, 'type': name, 'fields': fields})
+    # Freeze before upstream can mutate/re-index the held instances.
+    return json.loads(_json_bytes(rows))
+
+
+def _observation_unknown(record, reason):
+    observation = record['observation']
+    observation['status'] = 'unknown'
+    if reason not in observation['reason_codes']:
+        observation['reason_codes'].append(reason)
+
+
+def _observe_native(audit, record, page, selected, basis):
+    reason = 'unsupported_backend'
+    try:
+        from docling.backend.docling_parse_backend import ThreadedDoclingParsePageBackend
+        from docling_parse.pdf_parser import PageParseResult
+        from docling.datamodel.base_models import Page
+        from docling_core.types.doc.page import SegmentedPdfPage, PdfPageGeometry, BoundingRectangle
+        from docling_core.types.doc.base import BoundingBox
+        backend = page._backend
+        if type(page) is not Page or type(backend) is not ThreadedDoclingParsePageBackend:
+            raise ValueError
+        reason = 'association_mismatch'
+        parse = backend._result
+        document_backend = record['_conv'].input._backend
+        with audit.lock:
+            registered = any(parent is document_backend and child is backend
+                             for parent, child in audit.backend_pages)
+        if (not registered or record['_page'] is not page or type(parse) is not PageParseResult
+                or type(page.page_no) is not int or page.page_no < 1
+                or type(backend.page_no) is not int or type(parse.page_number) is not int
+                or page.page_no != backend.page_no or page.page_no != parse.page_number
+                or type(parse.doc_key) is not str or not parse.doc_key or parse.doc_key != document_backend.doc_key):
+            raise ValueError
+        reason = 'missing_segmented_page'
+        segmented = backend._seg_page  # Already read by the real selected-cells getter.
+        if (type(segmented) is not SegmentedPdfPage or type(segmented.dimension) is not PdfPageGeometry
+                or segmented.has_lines is not True):
+            raise ValueError
+        reason = 'invalid_cell_fields'
+        dimension = segmented.dimension
+        from docling_core.types.doc.page import PdfPageBoundaryType
+        if type(dimension.boundary_type) is not PdfPageBoundaryType or set(dimension.__dict__) != _GEOMETRY_KEYS:
+            raise ValueError
+        geometry = {'angle': _finite_float(dimension.angle), 'rect': _raw_rect(dimension.rect, BoundingRectangle),
+                    'boundary_type': dimension.boundary_type.value}
+        for key in _GEOMETRY_KEYS-{'angle', 'rect', 'boundary_type'}:
+            geometry[key] = _raw_rect(getattr(dimension, key), BoundingBox, box=True)
+        association = {'page_no': page.page_no, 'backend_page_no': backend.page_no,
+            'parser_page_number': parse.page_number, 'numbering': 'docling-threaded-physical-one-based',
+            'parser_document_key': parse.doc_key, 'page_size': {
+                'width': _finite_float(page.size.width), 'height': _finite_float(page.size.height)}, 'geometry': geometry}
+        if any(v <= 0 for v in association['page_size'].values()):
+            raise ValueError
+        record['observation']['association'] = json.loads(_json_bytes(association))
+        all_cells = list(segmented.textline_cells)
+        reason = 'selection_identity_unknown'
+        positions = []
+        for cell in selected:
+            matches = [i for i, candidate in enumerate(all_cells) if candidate is cell]
+            if len(matches) != 1:
+                raise ValueError
+            positions.append(matches[0])
+        reason = 'invalid_cell_fields'
+        native = {'selection_basis': basis, 'all_textline_cells': _cell_rows(record, all_cells),
+                  'selected_cells': _cell_rows(record, selected), 'selected_all_ordinals': positions}
+        record['observation']['native'] = native
+    except Exception as error:
+        _observation_unknown(record, 'unsupported_cell_type' if isinstance(error, TypeError)
+                             and str(error) == 'unsupported_cell_type' else reason)
+
+
+def _observe_prepost(record, page, cells, *, before):
+    try:
+        if record['_page'] is not page:
+            raise ValueError
+        if before:
+            record['observation']['prepost'] = {'primary_cells': _cell_rows(record, list(page.cells)),
+                'ocr_cells': _cell_rows(record, list(cells)), 'final_cells': None}
+        else:
+            value = record['observation']['prepost']
+            if value is None:
+                raise ValueError
+            value['final_cells'] = _cell_rows(record, list(page.cells))
+    except Exception as error:
+        record['observation']['prepost'] = None
+        _observation_unknown(record, 'unsupported_cell_type' if isinstance(error, TypeError)
+                             and str(error) == 'unsupported_cell_type' else 'invalid_cell_fields')
+
+
+def _reader_observation(result):
+    value = {'scope': 'consumed_fields_only', 'status': 'unknown', 'fields': None}
+    try:
+        from rapidocr.utils.output import RapidOCROutput
+        if type(result) is not RapidOCROutput:
+            return value
+        if result.boxes is None or len(result.boxes) == 0:
+            value['status'] = 'empty'
+            return value
+        fields = {'boxes': result.boxes.tolist(), 'txts': list(result.txts),
+                  'scores': result.scores.tolist() if hasattr(result.scores, 'tolist') else list(result.scores)}
+        _check_reader_fields(fields)
+        value.update(status='captured', fields=json.loads(_json_bytes(fields)))
+    except Exception:
+        pass
+    return value
+
+
+def _check_reader_fields(fields):
+    if (type(fields) is not dict or set(fields) != {'boxes', 'txts', 'scores'}
+            or any(type(v) is not list for v in fields.values())
+            or not len(fields['boxes']) == len(fields['txts']) == len(fields['scores'])
+            or not fields['boxes']):
+        raise ValueError
+    for box, text, score in zip(fields['boxes'], fields['txts'], fields['scores']):
+        if (type(box) is not list or len(box) != 4 or type(text) is not str
+                or not 0 <= _finite_float(score) <= 1):
+            raise ValueError
+        for point in box:
+            if type(point) is not list or len(point) != 2:
+                raise ValueError
+            for number in point:
+                _finite(number)
+    _json_bytes(fields)
+
+
+def _validate_observations(audit):
+    if audit['recipe']['format'] not in {'pdf', 'epub'} or type(audit['pages']) is not list:
+        raise ValueError
+    if audit['recipe']['format'] == 'epub' and audit['pages']:
+        raise ValueError
+    if audit['recipe']['format'] != audit['input']['kind']:
+        raise ValueError
+    if audit['recipe']['format'] == 'pdf' and (not audit['pages'] or any(
+            type(p['physical_page']) is not int or p['physical_page'] != i
+            for i, p in enumerate(audit['pages'], 1))):
+        raise ValueError
+    for page in audit['pages']:
+        observation = page['observation']
+        if (type(observation) is not dict or set(observation) != {'status', 'reason_codes', 'association', 'native', 'prepost'}
+                or observation['status'] not in {'captured', 'unknown'}
+                or type(observation['reason_codes']) is not list
+                or any(type(r) is not str or r not in _OBSERVATION_REASONS for r in observation['reason_codes'])
+                or len(set(observation['reason_codes'])) != len(observation['reason_codes'])):
+            raise ValueError
+        if observation['status'] == 'captured':
+            if observation['reason_codes'] or any(observation[k] is None for k in ('association', 'native', 'prepost')):
+                raise ValueError
+        elif not observation['reason_codes']:
+            raise ValueError
+        association = observation['association']
+        if association is not None:
+            if (type(association) is not dict or set(association) != {'page_no', 'backend_page_no', 'parser_page_number',
+                    'numbering', 'parser_document_key', 'page_size', 'geometry'}
+                    or any(type(association[k]) is not int or association[k] != page['physical_page']
+                           for k in ('page_no', 'backend_page_no', 'parser_page_number'))
+                    or page['physical_page'] < 1 or association['numbering'] != 'docling-threaded-physical-one-based'
+                    or type(association['parser_document_key']) is not str):
+                raise ValueError
+            size, geometry = association['page_size'], association['geometry']
+            if type(size) is not dict or set(size) != {'width', 'height'}:
+                raise ValueError
+            for v in size.values():
+                if _finite_float(v) <= 0:
+                    raise ValueError
+            if (type(geometry) is not dict or set(geometry) != _GEOMETRY_KEYS
+                    or geometry['boundary_type'] not in {'art_box', 'bleed_box', 'crop_box', 'media_box', 'trim_box'}):
+                raise ValueError
+            _finite_float(geometry['angle']); _check_rect(geometry['rect'])
+            for k in _GEOMETRY_KEYS-{'angle', 'rect', 'boundary_type'}:
+                _check_rect(geometry[k], box=True)
+        refs = {}
+        def rows(value):
+            if type(value) is not list:
+                raise ValueError
+            for i, row in enumerate(value):
+                if (type(row) is not dict or set(row) != {'ordinal', 'local_ref', 'type', 'fields'}
+                        or type(row['ordinal']) is not int or row['ordinal'] != i
+                        or type(row['local_ref']) is not int or row['local_ref'] < 0):
+                    raise ValueError
+                _check_cell(row['fields'], row['type'])
+                prior = refs.setdefault(row['local_ref'], row['type'])
+                if prior != row['type']:
+                    raise ValueError
+        native = observation['native']
+        if native is not None:
+            if (type(native) is not dict or set(native) != {'selection_basis', 'all_textline_cells', 'selected_cells', 'selected_all_ordinals'}
+                    or native['selection_basis'] not in {'visible_cells', 'fallback_cells'}):
+                raise ValueError
+            rows(native['all_textline_cells']); rows(native['selected_cells'])
+            positions = native['selected_all_ordinals']
+            if type(positions) is not list or len(positions) != len(native['selected_cells']):
+                raise ValueError
+            for selected, i in zip(native['selected_cells'], positions):
+                if (type(i) is not int or not 0 <= i < len(native['all_textline_cells'])
+                        or selected['local_ref'] != native['all_textline_cells'][i]['local_ref']
+                        or sum(r['local_ref'] == selected['local_ref'] for r in native['all_textline_cells']) != 1
+                        or selected['type'] != native['all_textline_cells'][i]['type']
+                        or selected['fields'] != native['all_textline_cells'][i]['fields']):
+                    raise ValueError
+            if (page['native_cell_count'] != len(native['selected_cells'])
+                    or page['native_cells_sha256'] != _sha(_json_bytes([r['fields'] for r in native['selected_cells']]))):
+                raise ValueError
+        prepost = observation['prepost']
+        if prepost is not None:
+            if type(prepost) is not dict or set(prepost) != {'primary_cells', 'ocr_cells', 'final_cells'}:
+                raise ValueError
+            for value in prepost.values():
+                rows(value)
+            for key, prefix in (('primary_cells', 'native'), ('ocr_cells', 'ocr'), ('final_cells', 'final')):
+                if (page['post_process'][prefix+'_count'] != len(prepost[key])
+                        or page['post_process'][prefix+'_sha256'] != _sha(_json_bytes([r['fields'] for r in prepost[key]]))):
+                    raise ValueError
+        for call in page['region_calls']:
+            reader = call['reader_output']
+            if (type(reader) is not dict or set(reader) != {'scope', 'status', 'fields'}
+                    or reader['scope'] != 'consumed_fields_only' or reader['status'] not in {'captured', 'unknown', 'empty'}):
+                raise ValueError
+            if reader['status'] == 'captured':
+                _check_reader_fields(reader['fields'])
+                fields = reader['fields']
+                legacy_output = {'boxes': fields['boxes'], 'texts': fields['txts'],
+                                 'scores': fields['scores']}
+                if (call['status'] != 'completed' or call['output_count'] != len(reader['fields']['txts'])
+                        or call['output_sha256'] != _sha(_json_bytes(legacy_output))):
+                    raise ValueError
+            elif reader['fields'] is not None:
+                raise ValueError
+        _json_bytes(observation)
 
 
 def _component_config(value, root, files):
@@ -193,6 +531,7 @@ class _ConversionAudit:
         self.component = None
         self.stages = []
         self.producers = []
+        self.backend_pages = []
 
     def begin(self):
         with self.lock:
@@ -201,6 +540,7 @@ class _ConversionAudit:
             self.records = []
             self.stages = []
             self.producers = []
+            self.backend_pages = []
             self.open = True
 
     def enter(self, conv_res, page):
@@ -210,6 +550,9 @@ class _ConversionAudit:
             if any(r['_page'] is page or (r['_conv'] is not conv_res) for r in self.records):
                 raise ValueError
             record = {'_conv': conv_res, '_page': page, 'physical_page': page.page_no,
+                      '_cell_refs': [],
+                      'observation': {'status': 'unknown', 'reason_codes': [],
+                          'association': None, 'native': None, 'prepost': None},
                       'planned_regions': [], 'region_calls': [], 'post_process': None,
                       'scan_decision': 'unknown', 'stage_outcome': 'unknown'}
             self.records.append(record)  # Strong references survive all worker calls.
@@ -265,7 +608,7 @@ class _ControlledHandle:
             'docling-parse', 'docling-ibm-models', 'rapidocr', 'onnxruntime')}
         if distributions['docling'] != DOCLING_VERSION:
             raise ValueError
-        recipe = {'adapter_revision': 'document-conversion-execution-v1', 'format': kind,
+        recipe = {'adapter_revision': 'document-conversion-execution-v2', 'format': kind,
             'backend': fmt.backend.__module__ + '.' + fmt.backend.__qualname__,
             'pipeline': fmt.pipeline_cls.__module__ + '.' + fmt.pipeline_cls.__qualname__,
             'allowed_formats': [getattr(value, 'value', value) for value in self.converter.allowed_formats],
@@ -326,9 +669,11 @@ class _ControlledHandle:
                             raise ValueError
                 elif pages:
                     raise ValueError
-                audit = {'protocol': 'document-conversion-execution-v1',
+                audit = {'protocol': 'document-conversion-execution-v2',
                     'input': {'kind': kind, 'sha256': _sha(data), 'byte_count': len(data)},
                     'recipe': recipe, 'pages': pages, 'output': _result_fingerprints(result)}
+                _check_execution_protocol(audit)
+                _validate_observations(audit)
                 receipt = object.__new__(DocumentConversionReceipt)
                 result = replace(result, receipt=receipt)
                 object.__setattr__(receipt, '_seal', _RECEIPT_SEAL)
@@ -496,7 +841,10 @@ def _build_converter(components_root=None):
                 if not audit.open:
                     raise DoclingSourceError('docling_conversion_failed')
                 audit.producers.append(threading.current_thread())
-            yield from super().iter_pages()
+            for page_backend in super().iter_pages():
+                with audit.lock:
+                    audit.backend_pages.append((self, page_backend))
+                yield page_backend
 
     options = PdfPipelineOptions()
     options.artifacts_path = artifacts
@@ -605,6 +953,7 @@ class _AuditedReader:
                     output_sha256=_sha(_json_bytes({'boxes': boxes, 'texts': texts, 'scores': scores})))
         except Exception:
             call['status'] = 'unknown'
+        call['reader_output'] = _reader_observation(result)
         return result  # Observation never substitutes OCR output.
 
 
@@ -641,6 +990,12 @@ def _scan_aware_pipeline(audit=None):
                     if count != 1:
                         raise ValueError
                     record['configuration_after'] = _ocr_configuration(self, audit) if self.enabled else None
+                    observation = record['observation']
+                    if observation['prepost'] is None:
+                        _observation_unknown(record, 'prepost_not_observed')
+                    if not observation['reason_codes'] and all(observation[k] is not None
+                            for k in ('association', 'native', 'prepost')):
+                        observation['status'] = 'captured'
                 except Exception:
                     record['stage_outcome'] = 'failed'
                     raise
@@ -664,6 +1019,7 @@ def _scan_aware_pipeline(audit=None):
                 record['scan_basis'] = basis
                 record['native_cell_count'] = len(cells)
                 record['native_cells_sha256'] = _cell_fingerprint(cells)
+                _observe_native(audit, record, page, cells, basis)
                 # An absent segmented parse returning [] cannot prove a scan.
                 if record['backend_valid'] and page.parsed_page is not None:
                     record['scan_decision'] = 'scan' if scan else 'native'
@@ -680,10 +1036,13 @@ def _scan_aware_pipeline(audit=None):
             record = getattr(audit.local, 'record', None) if audit is not None else None
             before = {'ocr_count': len(ocr_cells), 'ocr_sha256': _cell_fingerprint(ocr_cells),
                       'native_count': len(page.cells), 'native_sha256': _cell_fingerprint(page.cells)} if record is not None else None
+            if record is not None:
+                _observe_prepost(record, page, ocr_cells, before=True)
             result = super().post_process_cells(ocr_cells, page, conv_res, priority)
             if record is not None:
                 record['post_process'] = {**before, 'final_count': len(page.cells),
                                          'final_sha256': _cell_fingerprint(page.cells)}
+                _observe_prepost(record, page, ocr_cells, before=False)
             return result
 
     class ScanAwarePipeline(StandardPdfPipeline):
