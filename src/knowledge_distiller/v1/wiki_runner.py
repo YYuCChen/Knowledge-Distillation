@@ -243,11 +243,15 @@ class CodexWikiRunner:
     def __init__(self, *, timeout_seconds: float = 900,
                  executable_resolver: Callable[[], str] = executable,
                  model_probe: Callable[[], list[dict]] = subscription_models,
-                 kit_runtime: WikiKitRuntime | None = None):
+                 kit_runtime: WikiKitRuntime | None = None, recording=None):
         self.timeout_seconds = timeout_seconds
         self.executable_resolver = executable_resolver
         self.model_probe = model_probe
         self.kit_runtime = kit_runtime
+        self.recording = recording
+        self._active_recording_call = None
+        self._active_recording_cleanup = None
+        self._recorded_cleanup_guard = threading.Lock()
         self._active_guard = threading.Lock()
         self._active_process: subprocess.Popen[str] | None = None
         self._cancel_requested = threading.Event()
@@ -256,8 +260,13 @@ class CodexWikiRunner:
         self._cancel_requested.set()
         with self._active_guard:
             process = self._active_process
+            call = self._active_recording_call
+            cleanup = self._active_recording_cleanup
         if process is not None:
-            self._terminate_group(process)
+            if call is None:
+                self._terminate_group(process)
+            else:
+                self._terminate_recorded(process, call.deadline, cleanup, phase='cancel')
 
     def reset_cancellation(self) -> None:
         """Begin one worker lifetime; individual runs never erase cancellation."""
@@ -481,6 +490,10 @@ class CodexWikiRunner:
             with ExitStack() as stack:
                 session = None if check_only else stack.enter_context(WikiSessionBroker(snapshot.workspace, runtime_root))
                 session_environment = session.environment() if session is not None else {}
+                if self.recording is not None:
+                    return self._run_recorded_typed(snapshot, runtime_root, codex, session,
+                        session_environment, schema_path, final, prompt, parse, admission,
+                        verify_admission, verify_input, check_only, model, effort, timeout)
                 with self._active_guard:
                     if self._cancel_requested.is_set():
                         return TypedRunnerResult('interrupted')
@@ -517,6 +530,221 @@ class CodexWikiRunner:
             return TypedRunnerResult(str(TypedError(str(error))))
         except (OSError, ValueError, UnicodeError, TypeError):
             return TypedRunnerResult('typed_output_invalid')
+
+    @staticmethod
+    def _recording_code(code):
+        if code in {'recording_output_limit', 'runner_output_limit'}:
+            return 'runner_output_limit'
+        if code in {'recording_deadline', 'runner_timeout'}:
+            return 'runner_timeout'
+        return 'interrupted' if code == 'interrupted' else 'agent_failed'
+
+    def _run_recorded_typed(self, snapshot, runtime_root, codex, session, environment,
+                            schema_path, final, prompt, parse, admission, verify_admission,
+                            verify_input, check_only, model, effort, timeout):
+        from .wiki_exec_recording import ExecRecordingV1, RecordingError, ERRORS
+        from .wiki_typed import TypedError, TypedRunnerResult, pump, read_final, digest
+        process = call = None
+        cleanup = {'process': None, 'succeeded': False, 'failed': False, 'permission_probe_used': False}
+        diagnostic = {'original_transport_error_code': None, 'cleanup_observation_v1': {
+            'phase': 'not_observed', 'leader_returncode_before': None,
+            'term': 'not_observed', 'kill': 'not_observed', 'probe': 'not_observed',
+            'lock': 'not_observed', 'wait': 'not_observed', 'first_result': None,
+            'failure_code': None}}
+        cleanup['observation'] = diagnostic['cleanup_observation_v1']
+        def pump_terminate(child):
+            # pump invokes this inside its except; capture the original fixed
+            # reason BEFORE a cleanup exception can replace it. Never retain str
+            # from a host exception, prompt, command or model output.
+            failure = sys.exc_info()[1]
+            if isinstance(failure, (TypedError, RecordingError)):
+                code = str(failure)
+                code = code if code in ERRORS else 'recording_external_failure'
+            else:
+                code = 'typed_output_invalid'
+            if diagnostic['original_transport_error_code'] is None:
+                diagnostic['original_transport_error_code'] = code
+            return self._terminate_recorded(child, call.deadline, cleanup, phase='pump')
+        error = terminal_error = None
+        usage, content = (), b''
+        try:
+            if not isinstance(self.recording, ExecRecordingV1):
+                raise RecordingError('recording_unsafe_path')
+            workspace, runtime = snapshot.workspace.resolve(strict=True), Path(runtime_root).resolve(strict=True)
+            if (runtime != self.recording.runtime or
+                    not (workspace == self.recording.workspace or workspace.is_relative_to(self.recording.workspace))):
+                raise RecordingError('recording_unsafe_path')
+            with self._active_guard:
+                if self._cancel_requested.is_set():
+                    raise TypedError('interrupted')
+                if self._active_process is not None:
+                    raise TypedError('runner_unavailable')
+                verify_admission()
+                argv = _command(codex, snapshot.workspace, model, effort, environment,
+                                check_only=check_only, final_schema=schema_path, final_path=final)
+                call = self.recording.begin(argv=tuple(argv), stdin_bytes=prompt,
+                    schema_bytes=read_final(schema_path.parent, schema_path.name), timeout_seconds=timeout)
+                try:
+                    process = subprocess.Popen(argv, cwd=snapshot.workspace, env=_environment(session),
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        start_new_session=True, umask=0o077)
+                except OSError:
+                    terminal_error = 'recording_spawn_failed'
+                    raise
+                cleanup['process'] = process
+                call.mark_spawned(process.pid)
+                self._active_process, self._active_recording_call = process, call
+                self._active_recording_cleanup = cleanup
+            usage = pump(process, prompt, final, timeout=call.remaining_seconds,
+                cancelled=self._cancel_requested,
+                terminate=pump_terminate, recording_call=call)
+            content = read_final(schema_path.parent, final.name)
+            parse(content)
+            verify_admission()
+            if verify_input is not None:
+                verify_input()
+            if self._cancel_requested.is_set():
+                raise TypedError('interrupted')
+        except RecordingError as failure:
+            terminal_error = str(failure)
+            error = self._recording_code(terminal_error)
+        except TypedError as failure:
+            error = terminal_error = str(failure)
+        except BaseException as failure:
+            error = ('interrupted' if isinstance(failure, KeyboardInterrupt) else
+                     self._recording_code(terminal_error) if terminal_error else 'typed_output_invalid')
+            terminal_error = terminal_error or error
+        finally:
+            timed_out = error == 'runner_timeout'
+            if diagnostic['original_transport_error_code'] is None and terminal_error is not None:
+                diagnostic['original_transport_error_code'] = (
+                    terminal_error if terminal_error in ERRORS else 'recording_external_failure')
+            if process is not None:
+                # Even an interruption immediately after Popen leaves a real
+                # local child to clean; never infer ownership from a PID alone.
+                if cleanup['process'] is None:
+                    cleanup['process'] = process
+                try:
+                    if not self._terminate_recorded(process, call.deadline, cleanup, phase='finally'):
+                        error, terminal_error = 'agent_failed', 'recording_incomplete'
+                except BaseException as failure:
+                    error = 'interrupted' if isinstance(failure, KeyboardInterrupt) else 'agent_failed'
+                    terminal_error = 'interrupted' if error == 'interrupted' else 'recording_failed'
+                finally:
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        try:
+                            if stream is not None and not stream.closed:
+                                stream.close()
+                        except BaseException as failure:
+                            error = 'interrupted' if isinstance(failure, KeyboardInterrupt) else 'agent_failed'
+                            terminal_error = 'interrupted' if error == 'interrupted' else 'recording_failed'
+            try:
+                if call is not None:
+                    try:
+                        call.finish(returncode=process.returncode if process is not None else None,
+                            usage=call.usage, error_code=terminal_error,
+                            cancelled=self._cancel_requested.is_set(), timed_out=timed_out,
+                            diagnostic=diagnostic)
+                    except BaseException as failure:
+                        if error is None:
+                            error = (self._recording_code(str(failure)) if isinstance(failure, RecordingError) else
+                                     'interrupted' if isinstance(failure, KeyboardInterrupt) else 'agent_failed')
+            finally:
+                with self._active_guard:
+                    if self._active_process is process:
+                        self._active_process = self._active_recording_call = None
+                        self._active_recording_cleanup = None
+        return TypedRunnerResult(error, usage if error is None else (),
+            content if error is None else None, digest(content) if error is None else None, admission)
+
+    def _terminate_recorded(self, process, deadline, cleanup, *, phase):
+        """Only recorded owned groups; no unbounded wait, no claim of hard real time."""
+        if cleanup['process'] is not process:
+            cleanup['failed'] = True
+            if cleanup['observation']['phase'] == 'not_observed':
+                cleanup['observation'].update(phase=phase, first_result=False,
+                                               failure_code='context_mismatch')
+            return False
+        remaining = max(0.0, deadline - time.monotonic())
+        if not self._recorded_cleanup_guard.acquire(timeout=remaining):
+            cleanup['failed'] = True
+            if cleanup['observation']['phase'] == 'not_observed':
+                cleanup['observation'].update(phase=phase, lock='deadline', first_result=False,
+                                               failure_code='lock_deadline')
+            return False
+        observed = cleanup['observation'] if cleanup['observation']['phase'] == 'not_observed' else None
+        if observed is not None:
+            observed.update(phase=phase, lock='acquired')
+        def note(**values):
+            if observed is not None:
+                observed.update(values)
+        try:
+            if cleanup['succeeded'] and not cleanup['failed']:
+                return True
+            # Reap an already exited leader first, but do NOT infer PG absence
+            # from its return code or the pipe EOFs (descendants may survive).
+            note(leader_returncode_before=process.poll())
+            signals_ok, group_absent = True, False
+            def send(sig, field):
+                nonlocal signals_ok, group_absent
+                try:
+                    os.killpg(process.pid, sig)
+                    note(**{field: 'sent'})
+                except ProcessLookupError:
+                    group_absent = True
+                    note(**{field: 'absent'})
+                except PermissionError:
+                    note(**{field: 'denied'})
+                    # One fresh absence probe per actual Popen context; a denied
+                    # signal is NOT success unless this exact probe says ESRCH.
+                    if not cleanup['permission_probe_used']:
+                        cleanup['permission_probe_used'] = True
+                        try:
+                            os.killpg(process.pid, 0)
+                            note(probe='present')
+                        except ProcessLookupError:
+                            group_absent = True
+                            note(probe='absent')
+                        except PermissionError:
+                            note(probe='denied')
+                    if not group_absent:
+                        signals_ok = False
+                        note(failure_code='signal_denied')
+            send(signal.SIGTERM, 'term')
+            grace = min(2.0, max(0.0, deadline - time.monotonic()) / 2)
+            grace_end = time.monotonic() + grace
+            while not group_absent and time.monotonic() < grace_end:
+                process.poll()  # Reap a dead leader even when descendants retain the group.
+                try:
+                    os.killpg(process.pid, 0)
+                except (ProcessLookupError, PermissionError):
+                    break
+                time.sleep(min(.02, max(0.0, grace_end - time.monotonic())))
+            if not group_absent:
+                send(signal.SIGKILL, 'kill')
+            try:
+                process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                cleanup['failed'] = True
+                note(wait='timeout', first_result=False, failure_code='wait_timeout')
+                return False
+            note(wait='completed')
+            if not signals_ok:
+                cleanup['failed'] = True
+            # A prior failure remains a failure even if a bounded later attempt
+            # manages to reap the child. Only actual first successful cleanup
+            # can be reused by pump/cancel/finally for this exact Popen object.
+            cleanup['succeeded'] = signals_ok and not cleanup['failed']
+            if cleanup['failed'] and signals_ok:
+                note(failure_code='prior_failure')
+            note(first_result=cleanup['succeeded'])
+            return cleanup['succeeded']
+        except BaseException:
+            cleanup['failed'] = True
+            note(first_result=False, failure_code='cleanup_exception')
+            raise
+        finally:
+            self._recorded_cleanup_guard.release()
 
     def _prompt_commands(self, root: Path) -> dict[str, str]:
         if self.kit_runtime is None:

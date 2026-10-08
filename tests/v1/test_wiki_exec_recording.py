@@ -300,3 +300,111 @@ def test_existing_terminal_is_not_overwritten_and_unknown_error_is_fixed(roots):
             call.finish(returncode=None, usage={}, error_code="SECRET-MATERIAL")
         assert terminal(call)["error_code"] == "recording_external_failure"
         assert b"SECRET-MATERIAL" not in (call.path / "terminal.json").read_bytes()
+
+
+def test_usage_progress_snapshot_copies_and_does_not_invent_missing_counters(roots):
+    with recorder(roots) as session:
+        call = begin(session)
+        call.mark_spawned(os.getpid())
+        assert call.usage == {}
+        observed = {"input_tokens": 17, "credential": "DO-NOT-KEEP"}
+        call.progress(usage=observed)
+        observed["input_tokens"] = 999
+        exposed = call.usage
+        exposed["input_tokens"] = 888
+        assert call.usage == {"input_tokens": 17} and "output_tokens" not in call.usage
+        call.progress(stdin_written=len(PROMPT), stdout_eof=True, stderr_eof=True)
+        result = call.finish(returncode=0, usage=call.usage)
+        assert result["usage"] == {"input_tokens": 17}
+
+
+@pytest.mark.parametrize("invalid", [True, -1])
+def test_invalid_usage_progress_stops_without_overwriting_last_observation(roots, invalid):
+    with recorder(roots) as session:
+        call = begin(session)
+        call.mark_spawned(os.getpid())
+        call.progress(usage={"input_tokens": 3})
+        with pytest.raises(RecordingError, match="^recording_invalid_metadata$"):
+            call.progress(usage={"input_tokens": invalid})
+        assert call.usage == {"input_tokens": 3} and call._streams == {}
+        with pytest.raises(RecordingError, match="^recording_invalid_metadata$"):
+            call.finish(returncode=-15, usage=call.usage)
+        assert terminal(call)["usage"] == {"input_tokens": 3}
+
+
+def diagnostic_observation():
+    return {"original_transport_error_code": "typed_output_invalid", "cleanup_observation_v1": {
+        "phase": "pump", "leader_returncode_before": 0, "term": "denied",
+        "kill": "not_observed", "probe": "absent", "lock": "acquired",
+        "wait": "completed", "first_result": True, "failure_code": None}}
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_private_diagnostic_is_copied_before_callback_and_durable_with_original_reason(roots, failed):
+    diagnostic = diagnostic_observation()
+    if failed:
+        diagnostic["cleanup_observation_v1"].update(
+            probe="present", first_result=False, failure_code="signal_denied")
+    else:
+        diagnostic["original_transport_error_code"] = None
+        diagnostic["cleanup_observation_v1"].update(phase="finally", term="absent", probe="not_observed")
+    expected = json.loads(json.dumps(diagnostic))
+    def mutate_input(**_kwargs):
+        diagnostic["original_transport_error_code"] = "SECRET-NOT-A-CODE"
+        diagnostic["cleanup_observation_v1"]["phase"] = "SECRET-NOT-A-PHASE"
+    with recorder(roots, after_finish=mutate_input) as session:
+        call = begin(session)
+        call.mark_spawned(os.getpid())
+        call.progress(stdin_written=len(PROMPT), stdout_eof=True, stderr_eof=True)
+        if failed:
+            with pytest.raises(RecordingError, match="^agent_failed$"):
+                call.finish(returncode=0, usage={}, error_code="agent_failed", diagnostic=diagnostic)
+        else:
+            call.finish(returncode=0, usage={}, diagnostic=diagnostic)
+        result = terminal(call)
+        assert result["diagnostic"] == expected
+        assert result["error_code"] == ("agent_failed" if failed else None)
+        assert b"SECRET" not in (call.path / "terminal.json").read_bytes()
+        assert call._streams == {} and call._dir is None
+
+
+@pytest.mark.parametrize("invalid", ["outer_key", "inner_key", "bool_leader", "large_leader",
+    "integer_result", "bad_phase", "bad_failure", "bad_original", "nested_value"])
+def test_invalid_private_diagnostic_rejects_fixed_reason_and_closes_fds(roots, invalid):
+    diagnostic = diagnostic_observation()
+    observed = diagnostic["cleanup_observation_v1"]
+    if invalid == "outer_key":
+        diagnostic["arbitrary_material"] = "SECRET"
+    elif invalid == "inner_key":
+        observed["arbitrary_material"] = "SECRET"
+    elif invalid == "bad_original":
+        diagnostic["original_transport_error_code"] = "SECRET"
+    else:
+        field, value = {"bool_leader": ("leader_returncode_before", True),
+            "large_leader": ("leader_returncode_before", 2 ** 31),
+            "integer_result": ("first_result", 1), "bad_phase": ("phase", "SECRET"),
+            "bad_failure": ("failure_code", "SECRET"), "nested_value": ("kill", {"SECRET": 1})}[invalid]
+        observed[field] = value
+    with recorder(roots) as session:
+        call = begin(session)
+        with pytest.raises(RecordingError, match="^recording_invalid_metadata$"):
+            call.finish(returncode=None, usage={}, diagnostic=diagnostic)
+        assert call._streams == {} and call._dir is None and session._fd is None
+        assert not (call.path / "terminal.json").exists()
+
+
+def test_none_diagnostic_preserves_exact_default_terminal_bytes(roots):
+    with recorder(roots) as session:
+        call = begin(session)
+        completed(call)
+        default_bytes = (call.path / "terminal.json").read_bytes()
+    second = roots["evidence"].with_name("none-diagnostic-evidence")
+    second.mkdir(mode=0o700)
+    roots["evidence"] = second
+    with recorder(roots) as session:
+        call = begin(session)
+        call.mark_spawned(os.getpid())
+        call.progress(stdin_written=len(PROMPT), stdout_eof=True, stderr_eof=True)
+        call.finish(returncode=0, usage={"input_tokens": 9, "output_tokens": 2}, diagnostic=None)
+        assert (call.path / "terminal.json").read_bytes() == default_bytes
+        assert "diagnostic" not in terminal(call)

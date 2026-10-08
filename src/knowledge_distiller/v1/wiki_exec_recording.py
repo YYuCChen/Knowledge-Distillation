@@ -42,6 +42,38 @@ def _json(value):
                       separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
+def _diagnostic(value):
+    """Finite private host observations, never exception text or caller material."""
+    if value is None:
+        return None
+    _require(type(value) is dict and set(value) == {
+        "original_transport_error_code", "cleanup_observation_v1"}, "recording_invalid_metadata")
+    code, observed = value["original_transport_error_code"], value["cleanup_observation_v1"]
+    _require(code is None or (type(code) is str and code in ERRORS), "recording_invalid_metadata")
+    choices = {
+        "phase": {"pump", "cancel", "finally", "not_observed"},
+        "term": {"sent", "absent", "denied", "not_observed"},
+        "kill": {"sent", "absent", "denied", "not_observed"},
+        "probe": {"present", "absent", "denied", "not_observed"},
+        "lock": {"acquired", "deadline", "not_observed"},
+        "wait": {"completed", "timeout", "not_observed"},
+        "failure_code": {None, "context_mismatch", "lock_deadline", "signal_denied",
+                         "wait_timeout", "cleanup_exception", "prior_failure"},
+    }
+    _require(type(observed) is dict and set(observed) == set(choices) | {
+        "leader_returncode_before", "first_result"}, "recording_invalid_metadata")
+    for key, allowed in choices.items():
+        item = observed[key]
+        _require((item is None and key == "failure_code") or
+                 (type(item) is str and item in allowed), "recording_invalid_metadata")
+    leader = observed["leader_returncode_before"]
+    _require(leader is None or (type(leader) is int and -(2 ** 31) <= leader < 2 ** 31),
+             "recording_invalid_metadata")
+    result = observed["first_result"]
+    _require(result is None or type(result) is bool, "recording_invalid_metadata")
+    return {"original_transport_error_code": code, "cleanup_observation_v1": dict(observed)}
+
+
 def _seconds(value, maximum):
     _require(type(value) in (int, float) and math.isfinite(value) and 0 < value <= maximum,
              "recording_invalid_input")
@@ -246,6 +278,7 @@ class _ExecCall:
         self.reserved = self.actual_spawned = self.finished = False
         self.pid = None
         self.stdin_size, self.stdin_written = len(stdin), 0
+        self._usage = {}
         self.eof = {"out": False, "err": False}
         self.observed = {"out": 0, "err": 0}
         self.retained = {"out": 0, "err": 0}
@@ -311,11 +344,24 @@ class _ExecCall:
         self.actual_spawned, self.pid = True, pid
         self.session.actual_spawned += 1
 
-    def progress(self, *, stdin_written=None, stdout_eof=False, stderr_eof=False):
+    @property
+    def usage(self):
+        return dict(self._usage)
+
+    def progress(self, *, stdin_written=None, stdout_eof=False, stderr_eof=False, usage=None):
         try:
             _require(self.actual_spawned and not self.finished and self.fault is None,
                      "recording_invalid_state")
             _require(type(stdout_eof) is bool and type(stderr_eof) is bool, "recording_invalid_metadata")
+            if usage is not None:
+                _require(type(usage) is dict, "recording_invalid_metadata")
+                counters = {}
+                for key in USAGE_KEYS:
+                    if key in usage:
+                        _require(type(usage[key]) is int and usage[key] >= 0,
+                                 "recording_invalid_metadata")
+                        counters[key] = usage[key]
+                self._usage = counters
             if stdin_written is not None:
                 _require(type(stdin_written) is int and self.stdin_written <= stdin_written <= self.stdin_size,
                          "recording_invalid_metadata")
@@ -347,13 +393,15 @@ class _ExecCall:
                 raise RecordingError(self.fault) from None
             self._failed(str(error) if isinstance(error, RecordingError) else "recording_failed")
 
-    def finish(self, *, returncode, usage, error_code=None, cancelled=False, timed_out=False):
+    def finish(self, *, returncode, usage, error_code=None, cancelled=False, timed_out=False,
+               diagnostic=None):
         _require(not self.finished, "recording_invalid_state")
         code = self.fault or (error_code if type(error_code) is str and error_code in ERRORS
                              else "recording_external_failure" if error_code is not None else None)
         terminal_fd = None
         parent_fd = None
         try:
+            private_diagnostic = _diagnostic(diagnostic)
             _require(returncode is None or type(returncode) is int, "recording_invalid_metadata")
             _require(type(cancelled) is bool and type(timed_out) is bool, "recording_invalid_metadata")
             _require(type(usage) is dict, "recording_invalid_metadata")
@@ -407,6 +455,8 @@ class _ExecCall:
                 "truncated_due_to_overflow": self.overflow,
                 "observed_bytes": dict(self.observed), "retained_bytes": dict(self.retained),
                 "timeout_seconds": self.timeout_seconds, "cancelled": cancelled, "timed_out": timed_out}
+            if private_diagnostic is not None:
+                result["diagnostic"] = private_diagnostic
             _save(terminal_fd, "terminal.json", _json(result))
             os.fsync(terminal_fd)
             os.fsync(parent_fd)

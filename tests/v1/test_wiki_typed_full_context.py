@@ -315,8 +315,9 @@ def test_legacy_default_no_knowledge_keeps_batch_context_without_new_gate(files,
 
 def test_actual_callback_receives_whole_c_and_all_no_knowledge_still_checks_d(tmp_path):
     # Actual existing writers/events/lock/proof; no SQL proof or complete bool.
-    from knowledge_distiller.v1.database import connect
-    from knowledge_distiller.v1.captures import record_capture
+    from unittest.mock import patch
+    from knowledge_distiller.v1.feishu_inbox import FeishuInbox, Message
+    from knowledge_distiller.v1.feishu_intake import FeishuIntake
     from knowledge_distiller.v1.store import Store
     from knowledge_distiller.v1.ingestion import Ingestion
     from knowledge_distiller.v1.wiki_source_proof import trusted_source_callback
@@ -330,12 +331,18 @@ def test_actual_callback_receives_whole_c_and_all_no_knowledge_still_checks_d(tm
     ingestion, records = Ingestion(store), []
     for index, text in enumerate(('独立完整原文第一条。', '完整投递文本仅表示感谢。')):
         app, message = f'synthetic-self-{index}', f'synthetic-message-{index}'
-        with connect(store.path) as db:
-            record_capture(db, app, message, message_type='text',
-                created_ms=1790000000000, received_ms=1790000000000,
-                text=text, vault=vault)
+        inbox = FeishuInbox(store, app)
+        inbox.bind(bot_open_id='synthetic-bot', user_open_id='synthetic-user',
+                   chat_id='synthetic-chat', start_ms=0)
+        actual = Message(message, 'synthetic-chat', 'synthetic-user', 'user', 'p2p',
+            1790000000000, 'text', json.dumps({'text': text}, ensure_ascii=False), (),
+            {'fixture_contract': 'controlled-authenticated-synthetic-message-v1'})
+        # Preserve the original received_ms too; only the fixture clock is fixed.
+        with patch('knowledge_distiller.v1.captures.now_ms', return_value=1790000000000):
+            assert inbox.receive(actual)['state'] == 'received'
         cid = ingestion.captures.for_message(app, message)['capture_id']
         ingestion.captures.decide(cid, 'my_thought')  # actual synthetic user action
+        FeishuIntake(inbox, links=None, wake=None, api=None, jev=None).process(message)
         receipt = ingestion.capture(cid, vault)
         records.append(ingestion.ledger.record(receipt.raw_id))
     runtime = root / 'runtime'

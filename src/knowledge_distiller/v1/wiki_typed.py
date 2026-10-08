@@ -768,9 +768,16 @@ def _observable_failure(event):
     return None
 
 
-def pump(process, prompt, final, *, timeout, cancelled, terminate):
+def pump(process, prompt, final, *, timeout, cancelled, terminate, recording_call=None):
     """Nonblocking POSIX pipe pump; bounded memory and no communicate()."""
     deadline = time.monotonic() + timeout
+    from .wiki_exec_recording import RecordingError
+    cleanup_reserve = 0 if recording_call is None else min(2.0, recording_call.timeout_seconds / 4)
+    if recording_call is not None:
+        deadline = min(deadline, recording_call.deadline - cleanup_reserve)
+    def remaining():
+        value = deadline - time.monotonic()
+        return value if recording_call is None else min(value, recording_call.remaining_seconds - cleanup_reserve)
     usage, line, offset = {}, bytearray(), 0
     totals = {'out': 0, 'err': 0}
     decoders = {k: codecs.getincrementaldecoder('utf-8')('strict') for k in totals}
@@ -785,6 +792,8 @@ def pump(process, prompt, final, *, timeout, cancelled, terminate):
             if failure is not None:
                 raise TypedError(failure)
             usage.update(_usage(data.decode('utf-8')))
+            if recording_call is not None:
+                recording_call.progress(usage=dict(usage))
         except RecursionError:
             raise TypedError('agent_failed') from None
     def check_final():
@@ -805,15 +814,17 @@ def pump(process, prompt, final, *, timeout, cancelled, terminate):
             while selector.get_map():
                 if cancelled.is_set():
                     raise TypedError('interrupted')
-                if time.monotonic() >= deadline:
+                if remaining() <= 0:
                     raise TypedError('runner_timeout')
                 check_final()
-                for key, _events in selector.select(min(.05, max(0, deadline - time.monotonic()))):
+                for key, _events in selector.select(min(.05, max(0, remaining()))):
                     stream, tag = key.fileobj, key.data
                     if tag == 'in':
                         try:
                             wrote = os.write(stream.fileno(), prompt[offset:offset + 65536])
                             offset += wrote
+                            if recording_call is not None:
+                                recording_call.progress(stdin_written=offset)
                         except BlockingIOError:
                             continue
                         except BrokenPipeError:
@@ -828,12 +839,16 @@ def pump(process, prompt, final, *, timeout, cancelled, terminate):
                     except BlockingIOError:
                         continue
                     if not data:
+                        if recording_call is not None:
+                            recording_call.progress(stdout_eof=(tag == 'out'), stderr_eof=(tag == 'err'))
                         decoders[tag].decode(b'', final=True)
                         if tag == 'out' and line:
                             consume_line(bytes(line))
                         selector.unregister(stream)
                         stream.close()
                         continue
+                    if recording_call is not None:
+                        recording_call.write(tag, data)
                     totals[tag] += len(data)
                     if totals[tag] > (STDOUT_LIMIT if tag == 'out' else STDERR_LIMIT):
                         raise TypedError('runner_output_limit')
@@ -849,7 +864,7 @@ def pump(process, prompt, final, *, timeout, cancelled, terminate):
             while process.poll() is None:
                 if cancelled.is_set():
                     raise TypedError('interrupted')
-                if time.monotonic() >= deadline:
+                if remaining() <= 0:
                     raise TypedError('runner_timeout')
                 check_final()
                 time.sleep(.01)
@@ -858,7 +873,7 @@ def pump(process, prompt, final, *, timeout, cancelled, terminate):
             if process.returncode:
                 raise TypedError('agent_failed')
             return tuple(sorted(usage.items()))
-        except (TypedError, UnicodeError, OSError):
+        except (TypedError, UnicodeError, OSError, RecordingError):
             terminate(process)
             raise
         finally:
