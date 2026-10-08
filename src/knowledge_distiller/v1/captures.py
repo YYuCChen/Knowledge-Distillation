@@ -11,8 +11,11 @@ to raw/自述. Third-party text follows the existing direct-text material path.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 import re
 import time
@@ -28,12 +31,6 @@ SETTLE_HOURS = 24
 DEFAULT_WINDOW_MINUTES = 30
 WINDOW_SETTING = 'capture_adjacency_minutes'
 JEV_FAILED = 'Jev 失败·'  # Basis prefix of a pending event after a Jev error.
-
-_ANNOTATION = re.compile(r'(这篇|这个视频|这条|这期|这段|这本|这集|这个链接|上面|刚才那|刚发的|重点看|前半|后半|'
-                         r'第.{1,3}(段|分钟|部分|章)|注意看|值得看|可以看看|先存着|回头看)')
-_REPOST = re.compile(r'(转自|转载|来源[:：]|原文[:：]|作者[:：]|出处[:：]|原标题|via\s*@|#\S+#)')
-_FORMAT = re.compile(r'^\s*(#{1,6}\s|>\s|[-*•]\s|\d+[.、)]\s)', re.M)
-
 
 def now_ms() -> int:
     return int(time.time() * 1000)
@@ -97,50 +94,87 @@ def rule_judgment(capture, *, recent_delivery):
     """(result, basis, confidence, target) or None when rules cannot decide."""
     if capture['message_type'] == 'audio':
         return 'my_thought', '规则·语音默认本人', 1.0, None
-    text = capture['text'].strip()
-    lines = text.count('\n')
-    if (len(text) >= 300 or (lines >= 5 and len(text) >= 120) or _REPOST.search(text)
-            or (len(_FORMAT.findall(text)) >= 2 and len(text) >= 80)):
-        return 'third_party', '规则·大段、带格式或标明转载的文本', 0.9, None
-    if recent_delivery is not None and len(text) <= 80 and _ANNOTATION.search(text):
-        return 'annotation', '规则·紧随投递的附言', 0.85, recent_delivery
+    # Length, formatting, quotations and adjacency do not establish authorship
+    # or a unique annotation target. Text goes through the bounded candidate.
     return None
 
 
 class JevIdentityJudge:
-    """The same decision as a closed choice on TypeSafe Jev (v1/jev.py).
+    """Two independent dimensions through the existing active/legacy ask API.
 
-    Jev's probabilities are calibrated, so the thresholds keep their meaning:
-    a note becomes "mine" only when Jev is right about such answers >=90% of the time.
+    Jev retains the approved selected-probability thresholds. Clef confidence
+    is not a calibrated Jev probability and cannot reuse that automatic policy.
     """
-
-    INSTRUCTIONS = ('这是用户发给自己私聊机器人的一条消息（state.message）。判断这条消息是谁的话。'
-                    'just_after_a_delivery 为 true 表示用户刚刚投递过一条链接或材料。拿不准时选 unknown。')
-    OPTIONS = {
-        'my_thought': '用户自己的想法、感受、计划、反思或决定，是用户本人说的话',
-        'third_party': '转发或粘贴的他人内容，例如文章段落、别人说的话、新闻、引用或摘录',
-        'annotation': '对刚刚投递的那条链接或材料的附言，例如"这篇重点看后半段"',
-        'unknown': '无法判断这条消息是谁的话',
-    }
 
     def __init__(self, client):
         self.client = client
         self.last = None
+        self.answers = None
+        self.prepared = None
 
-    def judge(self, text, *, recent_delivery):
-        options = dict(self.OPTIONS)
-        if recent_delivery is None:
-            options.pop('annotation')
-        answer = self.last = self.client.choose(
-            {'message': text, 'just_after_a_delivery': recent_delivery is not None},
-            instructions=self.INSTRUCTIONS, options=options)
-        basis = 'Jev·' + answer.model
-        if answer.choice == 'my_thought' and answer.probability >= 0.9:
-            return 'my_thought', basis, answer.probability, None
-        if answer.choice == 'third_party' and answer.probability >= 0.8:
-            return 'third_party', basis, answer.probability, None
-        if answer.choice == 'annotation' and answer.probability >= 0.8 and recent_delivery is not None:
-            return 'annotation', basis, answer.probability, recent_delivery
+    def judge(self, source, *, targets=(), scope_complete=True):
+        from .capture_identity_context import CaptureSource, prepare_identity_context
+        from .decision_client import DecisionProfile, JEV_ENDPOINT
+        from .jev import JevChoice, JevError
+        if not isinstance(source, CaptureSource):
+            raise JevError('decision_request_invalid')
+        active = getattr(self.client, 'client', None)
+        profile = getattr(active, 'profile', None)
+        if profile is None:
+            profile = DecisionProfile('jev', getattr(self.client, 'endpoint', JEV_ENDPOINT),
+                getattr(self.client, 'model', 'jev-latest'), auth_ref='jev-api-key')
+        self.prepared = prepare_identity_context(source, targets, profile=profile,
+            profile_version=getattr(self.client, 'profile_id', 'legacy-jev'),
+            scope_complete=scope_complete, excluded_count=int(not scope_complete))
+        request = self.prepared.request()
+        if request is None:
+            raise JevError('decision_budget_exceeded')
+        state, questions = request
+        answers, model = self.client.ask(state, {key: q.wire() for key, q in questions.items()})
+        try:
+            if set(answers) != set(questions) or not isinstance(model, str) or not model:
+                raise ValueError
+            if profile.provider == 'clef' and model != profile.model:
+                raise ValueError
+            parsed = {}
+            semantics = ('clef-max-probability' if profile.provider == 'clef'
+                         else 'jev-normalized-concentration')
+            for key, question in questions.items():
+                answer = answers[key]
+                probabilities = answer['probabilities']
+                confidence = answer['confidence']
+                if (answer.get('type') != 'choice' or set(probabilities) != set(question.criteria)
+                        or answer['choice'] not in probabilities
+                        or any(type(p) not in (int, float) or not math.isfinite(p) or not 0 <= p <= 1
+                               for p in probabilities.values())
+                        or abs(sum(probabilities.values()) - 1) > .02
+                        or type(confidence) not in (int, float) or not math.isfinite(confidence)
+                        or not 0 <= confidence <= 1
+                        or answer.get('provider', profile.provider) != profile.provider
+                        or answer.get('confidence_semantics', semantics) != semantics):
+                    raise ValueError
+                parsed[key] = JevChoice(answer['choice'], probabilities[answer['choice']],
+                    dict(probabilities), confidence, model, profile.provider, semantics)
+            self.answers = parsed
+            self.last = parsed['author_identity']
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise JevError('decision_response_invalid') from None
+        author, relation = parsed['author_identity'], parsed['relation_target']
+        if profile.provider != 'jev' or not self.prepared.scope_complete or relation.probability < .8:
+            return None
+        basis = 'Jev·' + model
+        if relation.choice == 'independent':
+            if author.choice == 'self' and author.probability >= .9:
+                return 'my_thought', basis, author.probability, None
+            if author.choice == 'third_party' and author.probability >= .8:
+                return 'third_party', basis, author.probability, None
+        elif author.choice == 'self' and author.probability >= .8:
+            # A selected stable ID is necessary, but recency cannot resolve a
+            # multi-target ambiguity. No fallback to recent_delivery here.
+            if len(self.prepared.targets) == 1:
+                target = self.prepared.targets[0]
+                if relation.choice == target.candidate_id and target.item_id is not None:
+                    return 'annotation', basis, relation.probability, target.message_id
         return None
 
 
@@ -186,14 +220,76 @@ class Captures:
         return [self.get(row['capture_id']) for row in rows]
 
     def recent_delivery(self, capture):
-        """The latest earlier non-capture delivery in the window (a possible annotation target)."""
+        """The latest earlier non-capture delivery (existing UI/default behavior)."""
         with connect(self.store.path) as db:
             row = db.execute('''SELECT a.earlier_message_id FROM delivery_adjacency a
                 JOIN feishu_receipts r ON r.app_id=a.app_id AND r.message_id=a.earlier_message_id
                 WHERE a.app_id=? AND a.message_id=? AND r.state IN ('received','waiting_input','accepted','needs_desktop')
                 AND NOT EXISTS (SELECT 1 FROM captures c WHERE c.app_id=a.app_id AND c.message_id=a.earlier_message_id)
-                ORDER BY a.gap_seconds LIMIT 1''', (capture['app_id'], capture['message_id'])).fetchone()
+                ORDER BY a.gap_seconds LIMIT 1''',
+                (capture['app_id'], capture['message_id'])).fetchone()
         return row['earlier_message_id'] if row else None
+
+    def identity_context(self, capture):
+        """At most eight same-app adjacent parts; ninth marks an incomplete scope.
+
+        Titles/summaries are excerpts of existing fields, never generated here.
+        Candidate version binds part/item and the supplied context snapshot.
+        """
+        from .capture_identity_context import CaptureSource, TargetCandidate, ReferenceEvidence
+        data = capture['text'].encode('utf-8')
+        digest = hashlib.sha256(data).hexdigest()
+        source = CaptureSource(capture['app_id'], capture['message_id'], str(capture['capture_id']),
+            digest, data, digest)
+        with connect(self.store.path) as db:
+            rows = db.execute('''SELECT a.earlier_message_id, p.position, p.item_id,
+                    i.submitted_title, i.submitted_url, m.metadata_json,
+                    k.knowledge_result_id, k.payload_json
+                FROM delivery_adjacency a
+                JOIN feishu_receipts r ON r.app_id=a.app_id AND r.message_id=a.earlier_message_id
+                LEFT JOIN feishu_parts p ON p.app_id=r.app_id AND p.message_id=r.message_id
+                LEFT JOIN distill_items i ON i.item_id=p.item_id
+                LEFT JOIN materials m ON m.material_id=i.material_id
+                LEFT JOIN source_facts f ON f.material_id=m.material_id
+                LEFT JOIN knowledge_results k ON k.source_fact_id=f.source_fact_id
+                WHERE a.app_id=? AND a.message_id=?
+                AND r.state IN ('received','waiting_input','accepted','needs_desktop')
+                AND NOT EXISTS(SELECT 1 FROM captures c WHERE c.app_id=r.app_id AND c.message_id=r.message_id)
+                ORDER BY a.gap_seconds, a.earlier_message_id, p.position LIMIT 9''',
+                (capture['app_id'], capture['message_id'])).fetchall()
+        targets = []
+        for row in rows[:8]:
+            def fields(value):
+                try:
+                    value = json.loads(value or '{}')
+                    return value if type(value) is dict else {}
+                except (ValueError, TypeError):
+                    return {}
+            payload, metadata = fields(row['payload_json']), fields(row['metadata_json'])
+            title = next((v for v in (payload.get('title'), row['submitted_title'], metadata.get('title'))
+                          if isinstance(v, str) and v.strip()), None)
+            summary = payload.get('summary')
+            summary = summary[:1024] if isinstance(summary, str) and summary.strip() else None
+            title = title[:256] if title else None
+            part = str(row['position']) if row['position'] is not None else 'message'
+            version = hashlib.sha256(json.dumps([capture['app_id'], row['earlier_message_id'], part,
+                row['item_id'], title, summary, row['knowledge_result_id']],
+                ensure_ascii=False, separators=(',', ':')).encode('utf-8')).hexdigest()
+            ref = f"feishu:{capture['app_id']}:{row['earlier_message_id']}:{part}"
+            url = row['submitted_url']
+            literals = (url,) if isinstance(url, str) and re.fullmatch(r'https?://[^\s]+', url) else ()
+            target = TargetCandidate(capture['app_id'], row['earlier_message_id'], part, version, ref,
+                title=title, summary=summary,
+                summary_provenance=f"knowledge-result:{row['knowledge_result_id']}:summary:prefix1024" if summary else None,
+                literal_refs=literals, item_id=row['item_id'])
+            evidence = [ReferenceEvidence('adjacency', digest, target.candidate_id, version, ref)]
+            for literal in literals:
+                start = capture['text'].find(literal)
+                if start >= 0:
+                    evidence.append(ReferenceEvidence('literal', digest, target.candidate_id,
+                        version, ref, start, start + len(literal)))
+            targets.append(replace(target, evidence=tuple(evidence)))
+        return source, tuple(targets), len(rows) <= 8
 
     # ── decisions ──
     def _event(self, capture_id, result, basis, confidence=None, target=None):
@@ -202,35 +298,55 @@ class Captures:
                           created_at) VALUES (?,?,?,?,?,?)''',
                        (capture_id, result, basis, confidence, target, datetime.now(UTC).isoformat()))
 
-    def judge(self, capture):
-        """Rules first; then Jev when a key is saved (user decision 2026-09-30).
+    def _first_judgment(self, capture_id, result, basis, confidence=None, target=None, *, prepared=None):
+        """Do not overwrite a user decision or another judgment made in flight."""
+        with connect(self.store.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM capture_identity_events WHERE capture_id=?', (capture_id,)).fetchone():
+                return
+            if prepared is not None:
+                # The write lock excludes target changes while the current
+                # source/candidate versions are read back before accepting Jev.
+                source, targets, complete = self.identity_context(self.get(capture_id))
+                if (source != prepared.source or not complete or
+                        {t.candidate_id: t.version for t in targets} !=
+                        {t.candidate_id: t.version for t in prepared.targets}):
+                    result, target, confidence = 'pending', None, None
+            db.execute('''INSERT INTO capture_identity_events(capture_id,result,basis,confidence,target_message_id,created_at)
+                VALUES(?,?,?,?,?,?)''', (capture_id, result, basis, confidence, target, datetime.now(UTC).isoformat()))
 
-        Without Jev the desk decides whatever the rules cannot. A Jev failure is
-        an error to fix: it is logged and shown on the desk card, never replaced
-        by a guess or another model.
+    def judge(self, capture):
+        """Only new captures: voice rule or bounded two-dimensional judgment.
+
+        Existing events, including old pending, are never automatically retried.
+        Jev may decide at approved thresholds; ambiguity/Clef remain pending.
         """
         if self.identity(capture['capture_id']) is not None:
             return self.identity(capture['capture_id'])
-        target = self.recent_delivery(capture)
-        decided = rule_judgment(capture, recent_delivery=target)
+        decided = rule_judgment(capture, recent_delivery=None)
+        prepared = None
         client = self.jev() if decided is None and self.jev is not None else None
         if decided is None and client is not None:
             from .jev import JevError
             judge = JevIdentityJudge(client)
             try:
-                decided = judge.judge(capture['text'], recent_delivery=target)
+                source, targets, complete = self.identity_context(capture)
+                decided = judge.judge(source, targets=targets, scope_complete=complete)
+                prepared = judge.prepared
             except JevError as error:
                 logger.error('capture %s Jev judgment failed (%s)', capture['capture_id'], error)
-                self._event(capture['capture_id'], 'pending', JEV_FAILED + str(error))
+                self._first_judgment(capture['capture_id'], 'pending', JEV_FAILED + str(error))
                 return self.identity(capture['capture_id'])
             if decided is None:
-                self._event(capture['capture_id'], 'pending', f'Jev·{judge.last.model}·把握不足·{judge.last.choice}',
+                provider = 'Jev' if judge.last.provider == 'jev' else 'Clef'
+                self._first_judgment(capture['capture_id'], 'pending', f'{provider}·{judge.last.model}',
                             judge.last.probability)
                 return self.identity(capture['capture_id'])
         if decided is None:
-            self._event(capture['capture_id'], 'pending', '规则未决·未配置 Jev')
+            self._first_judgment(capture['capture_id'], 'pending', '规则未决·未配置 Jev')
         else:
-            self._event(capture['capture_id'], decided[0], decided[1], decided[2], decided[3])
+            self._first_judgment(capture['capture_id'], decided[0], decided[1], decided[2], decided[3],
+                                prepared=prepared)
         return self.identity(capture['capture_id'])
 
     def decide(self, capture_id, result, *, target=None):
@@ -246,9 +362,17 @@ class Captures:
             target = target or self.recent_delivery(capture)
             if target is None:
                 raise ValueError('这条随手记前面没有可附言的投递。')
+            with connect(self.store.path) as db:
+                if not db.execute('SELECT 1 FROM feishu_receipts WHERE app_id=? AND message_id=?',
+                                  (capture['app_id'], target)).fetchone():
+                    raise ValueError('这条随手记前面没有可附言的投递。')
+        else:
+            target = None
         written = self._written(capture_id)
+        previous = self.identity(capture_id)
         self._event(capture_id, result, '用户', 1.0, target)
-        if written is not None and IDENTITIES[result] != written['identity']:
+        if written is not None and (IDENTITIES[result] != written['identity'] or
+                (result == 'annotation' and previous and previous['target_message_id'] != target)):
             self._supersede(capture, written, result)
         self.advance(capture)
 

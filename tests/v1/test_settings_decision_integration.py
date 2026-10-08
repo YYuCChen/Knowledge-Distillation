@@ -10,6 +10,7 @@ from tests.v1.test_settings_web import Settings
 from knowledge_distiller.v1.settings_web import settings_blueprint
 from knowledge_distiller.v1.jev import JevError
 from knowledge_distiller.v1.captures import JevIdentityJudge
+from knowledge_distiller.v1.capture_identity_context import CaptureSource
 from knowledge_distiller.v1.jev_recall import JevRecallRuntime
 from knowledge_distiller.growth_modeling import GrowthRuntimeFailed
 
@@ -70,8 +71,9 @@ def test_approved_form_and_explicit_activation_reaches_business_apis(browser):
         for qid, question in body['questions'].items():
             if question['type'] == 'choice':
                 options = question['criteria']
-                probabilities = {k: (0.92 if k == 'my_thought' else 0.04) for k in options}
-                answers[qid] = dict(type='choice', choice='my_thought', probabilities=probabilities, confidence=0.92)
+                choice = 'self' if qid == 'author_identity' else 'independent'
+                probabilities = {k: .92 if k == choice else .08 / (len(options) - 1) for k in options}
+                answers[qid] = dict(type='choice', choice=choice, probabilities=probabilities, confidence=0.92)
             else:
                 answers[qid] = dict(type='noul', noul=0.7)
         from types import SimpleNamespace
@@ -79,10 +81,17 @@ def test_approved_form_and_explicit_activation_reaches_business_apis(browser):
             usage=dict(input_tokens=100, output_tokens=3)))
     service._decision_post = business_post
     judge = JevIdentityJudge(service.jev_client())
-    judge.judge('合成短消息', recent_delivery=None)
+    import hashlib
+    original = '合成短消息'.encode('utf-8')
+    digest = hashlib.sha256(original).hexdigest()
+    source = CaptureSource('synthetic-app', 'synthetic-message', 'capture-1', digest, original, digest)
+    assert judge.judge(source) is None  # Clef does not inherit Jev automatic acceptance.
     # Transport integration only. Clef auto-acceptance/threshold policy belongs
     # to the captures owner, and must not inherit a Jev calibration assertion.
-    assert judge.last.choice == 'my_thought' and judge.last.probability == 0.92
+    assert judge.last.choice == 'self' and judge.last.probability == 0.92
+    assert judge.answers['relation_target'].choice == 'independent'
+    assert calls[0][1]['state']['message'] == source.text()
+    assert set(calls[0][1]['questions']) == {'author_identity', 'relation_target'}
     assert judge.last.provider == 'clef' and judge.last.confidence_semantics == 'clef-max-probability'
     payload = dict(codec='historical-recall-input-v1', frozen_new=[{'text': '合成新素材'}],
         eligible_history=[{'knowledge_result_id': 3}], accepted_current=[], relation_current=[], reconsideration_hints=[])

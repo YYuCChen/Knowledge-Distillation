@@ -78,6 +78,7 @@ class TargetCandidate:
     summary_provenance: str | None = None
     literal_refs: tuple[str, ...] = ()
     evidence: tuple[ReferenceEvidence, ...] = ()
+    item_id: int | None = None
 
     @property
     def candidate_id(self):
@@ -250,6 +251,8 @@ def prepare_identity_context(source: CaptureSource, targets: tuple[TargetCandida
         for value in (target.title, target.summary):
             if value is not None and not isinstance(value, str):
                 raise IdentityContextError('invalid_context_text')
+        if target.item_id is not None and (type(target.item_id) is not int or target.item_id < 1):
+            raise IdentityContextError('invalid_item_id')
         if target.summary is not None:
             _required(target.summary_provenance)
         for literal in target.literal_refs:
@@ -295,7 +298,7 @@ def prepare_identity_context(source: CaptureSource, targets: tuple[TargetCandida
                   'reason': None if complete else 'bounded_candidate_scope'},
         'user_locks': {'author': author, 'relation': relation, 'target_id': target_id},
         'targets': [{'id': t.candidate_id, 'version': t.version, 'message_id': t.message_id,
-                     'part_id': t.part_id, 'title': t.title, 'summary': t.summary,
+                     'part_id': t.part_id, 'item_id': t.item_id, 'title': t.title, 'summary': t.summary,
                      'summary_provenance': t.summary_provenance, 'provenance_ref': t.provenance_ref,
                      'evidence': [e.__dict__ for e in t.evidence]} for t in selected]}
     questions = {

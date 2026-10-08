@@ -47,7 +47,7 @@ def world(tmp_path):
 
 
 class FakeJev:
-    """Stands in for JevClient.choose; synthetic answers only."""
+    """Stands in for the existing JevClient.ask transport; synthetic only."""
 
     def __init__(self):
         self.configured, self.calls, self.answer, self.error = False, [], ('my_thought', 0.95), None
@@ -59,6 +59,23 @@ class FakeJev:
         choice, probability = self.answer
         rest = {name: round((1 - probability) / (len(options) - 1), 4) for name in options if name != choice}
         return JevChoice(choice, probability, {choice: probability, **rest}, probability, 'jev-1.13.0')
+
+    def ask(self, state, questions):
+        self.calls.append((state, questions))
+        if self.error:
+            raise JevError(self.error)
+        identity, probability = self.answer
+        author = {'my_thought': 'self', 'annotation': 'self', 'third_party': 'third_party'}.get(identity, 'unknown')
+        relation = (state['targets'][0]['id'] if identity == 'annotation' and state['targets']
+                    else 'independent' if identity in {'my_thought', 'third_party'} else 'unknown')
+        answers = {}
+        for key, question in questions.items():
+            choice = author if key == 'author_identity' else relation
+            options = question['criteria']
+            rest = {name: (1 - probability) / (len(options) - 1) for name in options if name != choice}
+            answers[key] = {'type': 'choice', 'choice': choice,
+                'probabilities': {choice: probability, **rest}, 'confidence': probability}
+        return answers, 'jev-1.13.0'
 
 
 def link_submit(store):
@@ -124,7 +141,7 @@ def test_undecided_short_text_waits_for_the_desk_and_is_never_assumed_mine(world
     env = envelope(raw_files(world, '自述')[0])
     assert env['身份判定']['依据'] == '用户' and env['身份判定']['用户改判'] == '有'
     events = world.captures.events(capture['capture_id'])
-    assert [(e['result'], e['basis']) for e in events] == [('pending', 'Jev·jev-1.13.0·把握不足·my_thought'),
+    assert [(e['result'], e['basis']) for e in events] == [('pending', 'Jev·jev-1.13.0'),
                                                            ('my_thought', '用户')]
     assert events[0]['confidence'] == 0.7
     assert '身份待定' not in client.get('/').get_data(as_text=True)
@@ -157,7 +174,9 @@ def test_large_pasted_third_party_text_never_enters_the_personal_layer(world):
     assert send(world, 'om_p1', text=pasted) == 'accepted'
     capture = capture_of(world, 'om_p1')
     event = world.captures.identity(capture['capture_id'])
-    assert event['result'] == 'third_party' and event['basis'].startswith('规则')
+    assert event['result'] == 'pending' and capture['item_id'] is None
+    world.captures.decide(capture['capture_id'], 'third_party')
+    capture = capture_of(world, 'om_p1')
     item = world.store.item_bundle(capture['item_id'])
     assert item['input_kind'] == 'direct_text'
     # The existing direct-text material path: its raw goes to raw/外部 with the capture's id and time.
@@ -247,6 +266,8 @@ def test_link_then_annotation_records_adjacency_and_target(world):
     link_item = world.store.recent_items()[0]['item_id']
     assert send(world, 'om_a1', text='这篇重点看后半段', at=95) == 'accepted'
     capture = capture_of(world, 'om_a1')
+    assert world.captures.identity(capture['capture_id'])['result'] == 'pending'
+    world.captures.decide(capture['capture_id'], 'annotation', target='om_l1')
     assert world.captures.identity(capture['capture_id'])['result'] == 'annotation'
     assert raw_files(world, '自述') == []  # Waits for the link's raw id.
     material_raw = finish_link(world, link_item)
@@ -318,6 +339,7 @@ def test_changing_a_written_decision_supersedes_and_keeps_the_old_file(world):
     world.jev.configured = True
     send(world, 'om_l2', text='https://www.douyin.com/video/101', at=0)
     finish_link(world, world.store.recent_items()[0]['item_id'])
+    world.jev.answer = ('annotation', .95)
     send(world, 'om_c1', text='这条先存着以后看', at=30)
     capture = capture_of(world, 'om_c1')
     old = raw_files(world, '自述')
@@ -328,7 +350,7 @@ def test_changing_a_written_decision_supersedes_and_keeps_the_old_file(world):
     new = [f for f in external if envelope(f).get('取代') == envelope(old[0])['编号']]
     assert len(new) == 1 and old[0].read_text(encoding='utf-8') == old_text
     events = [e['result'] for e in world.captures.events(capture['capture_id'])]
-    assert events[0] in {'annotation', 'my_thought'} and events[-1] == 'third_party'
+    assert events == ['annotation', 'third_party']
 
 
 def test_adjacency_is_fixed_when_captured(world):
@@ -414,7 +436,10 @@ def test_pasted_markdown_arrives_as_a_post_and_is_read_as_text(world):
         receipt = db.execute("SELECT state, error, text FROM feishu_receipts WHERE message_id='om_md1'").fetchone()
     assert receipt['state'] != 'rejected' and receipt['error'] is None and receipt['text'].startswith('反馈回路越短')
     capture = capture_of(world, 'om_md1')
-    assert world.captures.identity(capture['capture_id'])['result'] == 'third_party'  # Long pasted text, by rule.
+    assert world.captures.identity(capture['capture_id'])['result'] == 'pending'
+    assert capture['item_id'] is None  # Length/format does not establish authorship.
+    world.captures.decide(capture['capture_id'], 'third_party')
+    capture = capture_of(world, 'om_md1')
     run_material(world, capture['item_id'])
     env = envelope(raw_files(world, '外部')[0])
     assert env['身份'] == '第三方' and env['标题'].startswith('反馈回路越短，学习越快')
