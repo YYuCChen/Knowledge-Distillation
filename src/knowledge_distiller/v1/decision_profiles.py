@@ -129,7 +129,7 @@ class DecisionProfiles:
         try:
             fd = os.open(_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         except FileNotFoundError:
-            return {'version': 1, 'active': None, 'profiles': {}}
+            return {'version': 2, 'active': None, 'profiles': {}, 'current_cloud_profile_id': None}
         try:
             self._safe_file(fd)
             with os.fdopen(fd, 'rb', closefd=False) as handle:
@@ -139,6 +139,12 @@ class DecisionProfiles:
             state = json.loads(encoded, object_pairs_hook=_pairs,
                                parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
             self._validate(state)
+            if state['version'] == 1:
+                # In-memory projection only. Reads never rewrite the old file
+                # or guess a cloud binding from inactive draft order.
+                active = state['active']
+                cloud = active if active is not None and state['profiles'][active]['profile']['provider'] == 'jev' else None
+                state = {**state, 'version': 2, 'current_cloud_profile_id': cloud}
             return state
         except (ValueError, TypeError, KeyError, UnicodeError, DecisionError, RecursionError):
             raise DecisionProfileError('decision_store_invalid') from None
@@ -147,8 +153,10 @@ class DecisionProfiles:
 
     @staticmethod
     def _validate(state: dict) -> None:
-        if (not isinstance(state, dict) or set(state) != {'version', 'active', 'profiles'}
-                or type(state['version']) is not int or state['version'] != 1
+        if (not isinstance(state, dict) or type(state.get('version')) is not int
+                or state['version'] not in (1, 2)
+                or set(state) != ({'version', 'active', 'profiles'} if state['version'] == 1 else
+                                  {'version', 'active', 'profiles', 'current_cloud_profile_id'})
                 or not isinstance(state['profiles'], dict)):
             raise ValueError('shape')
         for identity, row in state['profiles'].items():
@@ -171,6 +179,14 @@ class DecisionProfiles:
         if active is not None and (not isinstance(active, str) or active not in state['profiles']
                                    or state['profiles'][active]['validation'] is None):
             raise ValueError('active')
+        if state['version'] == 2:
+            cloud = state['current_cloud_profile_id']
+            if cloud is not None and (not isinstance(cloud, str) or cloud not in state['profiles']
+                    or state['profiles'][cloud]['profile']['provider'] != 'jev'
+                    or state['profiles'][cloud]['validation'] is None):
+                raise ValueError('cloud')
+            if active is not None and state['profiles'][active]['profile']['provider'] == 'jev' and cloud != active:
+                raise ValueError('active_cloud')
 
     def _write(self, directory: int, state: dict) -> None:
         self._validate(state)
@@ -228,6 +244,15 @@ class DecisionProfiles:
     def client(self, identity: str) -> DecisionClient:
         return DecisionClient(self.get(identity), secret=self._secret, post=self._post, get=self._get)
 
+    def bindings(self) -> dict:
+        """Read both references from one locked snapshot; never load secrets."""
+        with self._locked() as directory:
+            state = self._read(directory)
+            def descriptor(identity):
+                return None if identity is None else (identity, DecisionProfile(**state['profiles'][identity]['profile']))
+            return {'active': descriptor(state['active']),
+                    'current_cloud': descriptor(state['current_cloud_profile_id'])}
+
     def qualification(self, identity: str) -> dict:
         """Read this immutable draft's eligibility without checking any service."""
         with self._locked() as directory:
@@ -244,7 +269,7 @@ class DecisionProfiles:
         with self._locked() as directory:
             state = self._read(directory)
             row = self._row(state, identity)
-            if state['active'] == identity:
+            if identity in (state['active'], state['current_cloud_profile_id']):
                 raise DecisionProfileError('decision_active_immutable')
             row['validation'] = None
             self._write(directory, state)
@@ -267,13 +292,27 @@ class DecisionProfiles:
             self._write(directory, state)
         return result
 
-    def activate(self, identity: str, *, expected_active_id=_UNSPECIFIED_ACTIVE) -> None:
+    def activate(self, identity: str, *, expected_active_id=_UNSPECIFIED_ACTIVE,
+                 expected_current_cloud_profile_id=_UNSPECIFIED_ACTIVE) -> None:
+        if expected_current_cloud_profile_id is not _UNSPECIFIED_ACTIVE and expected_active_id is _UNSPECIFIED_ACTIVE:
+            raise DecisionProfileError('decision_active_conflict')
         with self._locked() as directory:
             state = self._read(directory)
             if expected_active_id is not _UNSPECIFIED_ACTIVE and state['active'] != expected_active_id:
                 raise DecisionProfileError('decision_active_conflict')
+            if (expected_current_cloud_profile_id is not _UNSPECIFIED_ACTIVE
+                    and state['current_cloud_profile_id'] != expected_current_cloud_profile_id):
+                raise DecisionProfileError('decision_cloud_conflict')
             row = self._row(state, identity)
             if row['validation'] is None:
                 raise DecisionProfileError('decision_profile_unvalidated')
             state['active'] = identity
+            if row['profile']['provider'] == 'jev':
+                state['current_cloud_profile_id'] = identity
             self._write(directory, state)
+
+    def activate_bound(self, identity: str, *, expected_active_id,
+                       expected_current_cloud_profile_id) -> None:
+        """New activation requires both CAS bases; old activate stays compatible."""
+        self.activate(identity, expected_active_id=expected_active_id,
+                      expected_current_cloud_profile_id=expected_current_cloud_profile_id)

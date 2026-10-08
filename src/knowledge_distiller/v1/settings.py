@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 # A live login check launches the dedicated browser; reuse its answer briefly.
 HEALTH_TTL_SECONDS = 60
+_UNSPECIFIED_CLOUD = object()
 
 PLATFORMS = (
     ("douyin", "抖音"),
@@ -117,7 +118,7 @@ class SettingsService:
         from .decision_profiles import DecisionProfileError
         allowed = {
             'decision_profile_invalid', 'decision_profile_missing', 'decision_profile_unvalidated',
-            'decision_active_conflict', 'decision_active_immutable', 'decision_probe_failed',
+            'decision_active_conflict', 'decision_cloud_conflict', 'decision_active_immutable', 'decision_probe_failed',
             'decision_store_full', 'decision_store_invalid', 'decision_store_io_failed',
             'decision_store_root_invalid', 'decision_store_unsafe', 'decision_budget_exceeded',
             'decision_busy', 'decision_model_mismatch', 'decision_probe_transport_required',
@@ -201,12 +202,55 @@ class SettingsService:
         except Exception as error:
             raise self._decision_failure(error) from None
 
-    def activate_decision_profile(self, draft_id, *, expected_active_id):
+    def check_decision_candidate(self, profile_fields, *, api_key=None):
+        """Explicit backend check with host defaults; never changes either binding.
+
+        Empty cloud keys reuse the retained cloud reference, or copy the old
+        application-local Jev key into a fresh immutable reference at this
+        explicit check only. No legacy Keychain import or read-time copying.
+        """
+        try:
+            if (type(profile_fields) is not dict
+                    or set(profile_fields) != {'provider', 'endpoint', 'model'}
+                    or profile_fields['provider'] not in {'jev', 'clef'}):
+                raise SettingsError('decision_profile_invalid')
+            if api_key is not None and not isinstance(api_key, str):
+                raise SettingsError('decision_key_invalid')
+            fields = dict(profile_fields)
+            bindings = self._decision_profiles().bindings()
+            key = api_key or None
+            if fields['provider'] == 'jev' and key is None:
+                cloud = bindings['current_cloud']
+                if cloud is not None:
+                    fields['auth_ref'] = cloud[1].auth_ref
+                else:
+                    from .jev import SECRET_ACCOUNT
+                    try:
+                        factory = self._decision_secret_factory or self.local_secrets
+                        key = factory(SECRET_ACCOUNT).load()
+                    except Exception:
+                        raise SettingsError('decision_secret_unavailable') from None
+                    if not isinstance(key, str) or not key:
+                        raise SettingsError('decision_secret_unavailable')
+            identity = self.save_decision_draft(fields, api_key=key)
+            result = self.check_decision_draft(identity)
+            return {**result,
+                    'expected_active_id': bindings['active'][0] if bindings['active'] else None,
+                    'expected_current_cloud_profile_id': bindings['current_cloud'][0] if bindings['current_cloud'] else None}
+        except Exception as error:
+            raise self._decision_failure(error) from None
+
+    def activate_decision_profile(self, draft_id, *, expected_active_id,
+                                  expected_current_cloud_profile_id=_UNSPECIFIED_CLOUD):
         """Return the committed immutable snapshot, not a permanent active state."""
         try:
             profiles = self._decision_profiles()
             profile = profiles.get(draft_id)
-            profiles.activate(draft_id, expected_active_id=expected_active_id)
+            if expected_current_cloud_profile_id is _UNSPECIFIED_CLOUD:
+                profiles.activate(draft_id, expected_active_id=expected_active_id)
+            else:
+                profiles.activate_bound(draft_id, expected_active_id=expected_active_id,
+                    expected_current_cloud_profile_id=expected_current_cloud_profile_id)
             return self._decision_descriptor(draft_id, profile)
         except Exception as error:
             raise self._decision_failure(error) from None
@@ -216,12 +260,21 @@ class SettingsService:
         from dataclasses import asdict
         return {'profile_id': identity, 'profile': asdict(profile)}
 
-    def decision_state(self, draft_id=None):
+    def activate_decision_candidate(self, draft_id, *, expected_active_id,
+                                    expected_current_cloud_profile_id):
+        return self.activate_decision_profile(draft_id, expected_active_id=expected_active_id,
+            expected_current_cloud_profile_id=expected_current_cloud_profile_id)
+
+    def decision_state(self, draft_id=None, *, include_cloud=False):
         """Read configuration eligibility; no key load or implicit check."""
         try:
             profiles = self._decision_profiles()
-            active = profiles.active()
+            bindings = profiles.bindings() if include_cloud else None
+            active = bindings['active'] if bindings is not None else profiles.active()
             result = {'active': self._decision_descriptor(*active) if active else None}
+            if bindings is not None:
+                cloud = bindings['current_cloud']
+                result['current_cloud'] = self._decision_descriptor(*cloud) if cloud else None
             if draft_id is not None:
                 result['draft'] = {**self._decision_descriptor(draft_id, profiles.get(draft_id)),
                                    **profiles.qualification(draft_id)}
