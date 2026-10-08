@@ -32,6 +32,46 @@ class OutcomeError(ValueError):
     pass
 
 
+def _publication_journal(content: bytes):
+    """Strict finite publisher JSON; the existing loader still checks paths."""
+    def pairs(entries):
+        result = {}
+        for key, value in entries:
+            if key in result:
+                raise OutcomeError("journal_duplicate_key")
+            result[key] = value
+        return result
+
+    def invalid(_value):
+        raise OutcomeError("journal_invalid")
+
+    try:
+        value = json.loads(content.decode("utf-8"), object_pairs_hook=pairs,
+                           parse_float=invalid, parse_constant=invalid)
+    except (ValueError, UnicodeError, RecursionError) as error:
+        if isinstance(error, OutcomeError):
+            raise
+        raise OutcomeError("journal_invalid") from None
+    if (type(value) is not dict
+            or set(value) != {"version", "target_key", "state", "created_dirs", "items"}
+            or type(value["version"]) is not int
+            or type(value["target_key"]) is not str
+            or type(value["state"]) is not str
+            or type(value["created_dirs"]) is not list
+            or any(type(p) is not str for p in value["created_dirs"])
+            or type(value["items"]) is not list):
+        raise OutcomeError("journal_invalid")
+    for item in value["items"]:
+        if (type(item) is not dict
+                or set(item) != {"path", "before", "after", "before_mode", "backup", "temporary", "status"}
+                or any(type(item[k]) is not str for k in ("path", "after", "temporary", "status"))
+                or any(item[k] is not None and type(item[k]) is not str for k in ("before", "backup"))
+                or (item["before_mode"] is not None and
+                    (type(item["before_mode"]) is not int or not 0 <= item["before_mode"] <= 0o7777))):
+            raise OutcomeError("journal_invalid")
+    return value
+
+
 @dataclass(frozen=True)
 class Outcome:
     raw_id: str
@@ -433,6 +473,21 @@ class WikiOutcomes:
 
     def accept(self, receipt_id: str, *, task_store: WikiTaskStore,
                snapshot: StagingSnapshot, journal: Path, lock):
+        accepted = self._verified_publication(receipt_id, task_store=task_store,
+            snapshot=snapshot, journal=journal, lock=lock, require_completed_batch=True)
+        self._save(receipt_id, "accepted", accepted)
+        return accepted
+
+    def _verified_publication(self, receipt_id: str, *, task_store: WikiTaskStore,
+                              snapshot: StagingSnapshot, journal: Path, lock,
+                              require_completed_batch=True):
+        """Readback information only, never an acceptance/DB capability.
+
+        The publishing-only branch is for a future formal caller. It does not
+        establish full C/D1, R14, or same-transaction source authority.
+        """
+        if type(require_completed_batch) is not bool:
+            raise OutcomeError("readback_required")
         payload = self.get(receipt_id)
         if digest(encoded(payload).encode()) != receipt_id or payload["contract"] != CONTRACT:
             raise OutcomeError("receipt_binding_invalid")
@@ -444,7 +499,8 @@ class WikiOutcomes:
             # JSON normalizes tuple-free FrozenRaw dictionaries exactly.
             raise OutcomeError("task_binding_invalid")
         batch = next((b for b in task.batches if b.batch_no == payload["batch_no"]), None)
-        if batch is None or batch.state != "succeeded":
+        required_state = "succeeded" if require_completed_batch else "publishing"
+        if batch is None or batch.state != required_state:
             raise OutcomeError("readback_required")
         root = Path(task.vault_path)
         if Path(journal).absolute() != snapshot.control / f"publish-{payload['batch_no']}":
@@ -452,7 +508,10 @@ class WikiOutcomes:
         # Same strict loader and formal input verifier as the existing publisher
         # recovery path. No caller supplied 'published=True' certificate.
         journal_bytes = read_regular(Path(journal), "journal.json")
+        strict_data = _publication_journal(journal_bytes)
         data = _load_journal(Path(journal), root)
+        if data != strict_data:
+            raise OutcomeError("journal_changed")
         if (data.get("state") != PublishState.COMMITTED.value or not data["items"]
                 or any(entry.get("status") != "verified" for entry in data["items"])):
             raise OutcomeError("committed_publish_required")
@@ -477,5 +536,4 @@ class WikiOutcomes:
             raise OutcomeError("journal_changed")
         accepted = {**payload, "journal_sha256": digest(journal_bytes),
                     "published_after": after}
-        self._save(receipt_id, "accepted", accepted)
         return accepted
