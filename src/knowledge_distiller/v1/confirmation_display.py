@@ -36,6 +36,65 @@ def concern_total(pending):
     return len(pending.get('concerns', []))+len(pending.get('deferred_concerns', []))+resolved
 
 
+def english_candidate_display(snapshot, concern):
+    """Project a verified sentence without changing candidate callback values.
+
+    Sentence boundaries, translations and independent bases are prepared by the
+    producer. This function neither guesses boundaries nor generates evidence.
+    A missing/inconsistent contract raises ValueError for the caller to handle.
+    """
+    import hashlib
+    import json
+
+    if not isinstance(snapshot, str) or not isinstance(concern, dict):
+        raise ValueError('invalid English display source')
+    span = concern.get('sentence_span')
+    if not isinstance(span, dict) or set(span) != {'start', 'end'}:
+        raise ValueError('invalid sentence span')
+    left, right = span['start'], span['end']
+    start, end = concern.get('start'), concern.get('end')
+    if (any(type(value) is not int for value in (left, right, start, end))
+            or not 0 <= left <= start < end <= right <= len(snapshot)):
+        raise ValueError('invalid sentence span')
+    original = concern.get('text')
+    if not isinstance(original, str) or snapshot[start:end] != original:
+        raise ValueError('concern does not match sentence source')
+    clusters = _clusters(snapshot)
+    boundaries = {0, len(snapshot), *(a for a, _ in clusters),
+                  *(b for _, b in clusters)}
+    if any(value not in boundaries for value in (left, right, start, end)):
+        raise ValueError('sentence span splits a display cluster')
+    uid = concern.get('concern_uid')
+    values = concern.get('candidates')
+    if (not isinstance(uid, str) or not uid.strip()
+            or not isinstance(values, list) or not values
+            or any(not isinstance(value, str) or not value.strip() for value in values)):
+        raise ValueError('invalid candidate identity or values')
+    if len(set(values)) != len(values) or original not in values:
+        raise ValueError('candidate set must include the original exactly once')
+    translations = concern.get('candidate_translations')
+    bases = concern.get('candidate_basis')
+    for mapping in (translations, bases):
+        if (not isinstance(mapping, dict) or set(mapping) != set(values)
+                or any(not isinstance(mapping[value], str) or not mapping[value].strip()
+                       for value in values)):
+            raise ValueError('incomplete candidate translation or basis mapping')
+    sentence = snapshot[left:right]
+    candidates = []
+    for value in values:
+        text = sentence[:start-left] + value + sentence[end-left:]
+        meaning, basis = translations[value], bases[value]
+        # No ordinal/offset/token in the identity: unrelated decisions or a
+        # candidate reorder do not collapse unchanged evidence. Changed semantic
+        # content receives a different identity rather than inheriting old state.
+        payload = [uid, value, sentence, text, meaning, basis]
+        key = hashlib.sha256(json.dumps(payload, ensure_ascii=False,
+                                       separators=(',', ':')).encode()).hexdigest()
+        candidates.append({'value': value, 'text': text, 'meaning': meaning,
+                           'basis': basis, 'key': key})
+    return {'sentence': sentence, 'candidates': candidates}
+
+
 CONTEXT_ALGORITHM = 'context-v1-conservative-clusters'
 
 
