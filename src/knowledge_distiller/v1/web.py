@@ -5,6 +5,7 @@ from .vault_access import publication_status, open_saved_location
 import json
 import re
 import sqlite3
+from io import BytesIO
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
@@ -13,7 +14,7 @@ from urllib.parse import quote, urlsplit
 from flask import Flask, abort, g, redirect, render_template, request, send_file, url_for
 from .file_sources import prepare_direct_text, prepare_file
 
-from .confirmation_display import english_assistance, local_choices
+from .confirmation_display import english_assistance, english_candidate_display, local_choices
 from .chrome import ChromeSessionError
 from .bilibili import BilibiliSourceError
 from .pipeline import Distiller
@@ -668,7 +669,6 @@ def create_app(
 
     @app.get("/")
     def home():
-        store.expire_submitted_sources()
         if wiki_workflow is not None:
             try:
                 wiki_workflow.request_refresh(force=False)
@@ -764,10 +764,10 @@ def create_app(
 
     @app.get('/items/<int:item_id>/confirmation-context/<concern_id>')
     def confirmation_context(item_id, concern_id):
-        row = store.item_bundle(item_id)
-        if row is None or not row['confirmation_json']:
+        prepared = _ready_presentation_context(store, item_id)
+        if prepared is None:
             abort(404)
-        pending = store.confirmation_view(item_id)
+        pending = prepared['pending']
         concern = next((c for c in pending.get('concerns', [])
                         if concern_id in {c.get('concern_uid'), c.get('audio_name')}), None)
         if concern is None:
@@ -824,6 +824,18 @@ def create_app(
         action = 'candidate' if 'candidate_value' in request.form else request.form.get('action', '')
         value = request.form.get('candidate_value', request.form.get('value', ''))
         try:
+            submitted = dict(request_id=request.form.get('request_id', ''),
+                group_id=request.form.get('group_id', ''), group_revision=request.form.get('group_revision', ''),
+                selected_member_uids=request.form.getlist('selected_member_uids'), action=action, value=value)
+            # Parse the existing request shape; Store alone validates the
+            # authoritative payload/selection receipt. No new decision here.
+            if (submitted['request_id'] and len(submitted['request_id']) <= 128
+                    and submitted['selected_member_uids']
+                    and len(set(submitted['selected_member_uids'])) == len(submitted['selected_member_uids'])):
+                if store.group_decision(item_id, submitted) is not None:
+                    return redirect(url_for('home', item=item_id))
+            if _ready_presentation_context(store, item_id) is None:
+                abort(409)
             result = service().resolve_group(item_id, action, value,
                 token=request.form.get('token', ''), request_id=request.form.get('request_id', ''),
                 group_id=request.form.get('group_id', ''), group_revision=request.form.get('group_revision', ''),
@@ -851,6 +863,15 @@ def create_app(
                     if concern:
                         display = local_choices(concern)
                         submitted_value = display['prefix'] + value.strip() + display['suffix']
+            if request.form.get('concern_revision'):
+                try:
+                    prior = store.confirmation_decision(item_id, request.form['concern_revision'], action, submitted_value)
+                except ValueError:
+                    abort(409)
+                if prior is not None:
+                    return redirect(url_for('home', item=item_id))
+            if _ready_presentation_context(store, item_id) is None:
+                abort(409)
             result = service().resolve(
                 item_id, action, submitted_value, token=request.form.get("token", ""),
                 concern_id=request.form.get("concern_id", ""),
@@ -870,10 +891,24 @@ def create_app(
 
     @app.get("/items/<int:item_id>/confirmation-audio")
     def confirmation_audio(item_id: int):
-        path = service().confirmation_audio(item_id, request.args.get("concern_id", ""))
-        if path is None or not path.is_file():
-            abort(404)  # A missing clip is recorded as serve_failed by the distiller.
-        response = send_file(path, mimetype="audio/wav", conditional=True)
+        prepared = _ready_presentation_context(store, item_id)
+        if prepared is None:
+            abort(404)
+        pending = prepared['pending']
+        requested = request.args.get('concern_id', '')
+        matches = [c for c in pending.get('concerns', [])
+                   if requested in {c.get('concern_uid'), c.get('audio_name')}]
+        if len(matches) != 1:
+            abort(404)
+        from .confirmation_preparation import prepared_audio, PreparationError
+        try:
+            data = prepared_audio(pending, prepared['item_runtime_root'], matches[0]['concern_uid'],
+                                  source_descriptor=prepared['source_descriptor'])
+        except (PreparationError, OSError, ValueError, TypeError, KeyError):
+            abort(404)
+        if data is None:
+            abort(404)
+        response = send_file(BytesIO(data), mimetype="audio/wav", conditional=True)
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -990,6 +1025,27 @@ def create_app(
 from .link_intake import douyin_url
 
 
+def _ready_presentation_context(store, item_id):
+    """Read the whole current pending before any group/member projection."""
+    from .confirmation_preparation import ready, needs_sentence_fields
+    from .store import SourceReviewConflict
+    row = store.item_bundle(item_id)
+    if row is None or row['state'] != 'waiting_user' or not row['confirmation_json'] or row['dismissed_at'] is not None:
+        return None
+    try:
+        context = store.presentation_context(item_id)
+        pending = context['pending']
+        if not ready(pending, context['item_runtime_root'], source_descriptor=context['source_descriptor']):
+            return None
+        if pending.get('kind') != 'image':
+            for concern in pending.get('concerns', []):
+                if needs_sentence_fields(pending, concern):
+                    english_candidate_display(pending['snapshot'], concern)
+        return context
+    except (SourceReviewConflict, ValueError, TypeError, KeyError, OSError):
+        return None
+
+
 def _home_context(
     store: Store,
     selected: int | None,
@@ -1010,7 +1066,7 @@ def _home_context(
         rows.insert(0,selected_row)
     from .collections import Collections
     from .collection_web import cards
-    collection_cards = cards(Collections(store))
+    collection_cards = cards(Collections(store), store=store)
     selected_collection = next((c for c in collection_cards if any(m['item_id']==selected for m in c['members'])),None)
     processing = tuple(
         _item_view(row, vault_path, store.path.parent) for row in rows if row["state"] == "working"
@@ -1031,13 +1087,18 @@ def _home_context(
         row = row_by_id.get(entry['item_id'])
         if row is None or row['state'] != 'waiting_user':
             continue
-        pending = store.confirmation_view(row['item_id'])
+        prepared = _ready_presentation_context(store, row['item_id'])
+        if prepared is None:
+            continue
+        pending = prepared['pending']
         group = next((g for g in pending.get('groups', []) if g['group_id'] == entry['group_id']), None)
         if group is None:
             continue
         members = set(group['member_uids'])
         projected = {**pending, 'concerns': [c for c in pending.get('concerns', []) if c['concern_uid'] in members][:1]}
         view = _item_view({**dict(row), 'confirmation_json': json.dumps(projected)}, vault_path, store.path.parent)
+        if view['confirmation'] is None:
+            continue
         view['group'] = group
         view['enqueue_seq'] = entry['enqueue_seq']
         todo_cards.append(view)
@@ -1049,16 +1110,18 @@ def _home_context(
         for row in rows
         if row["state"] == "succeeded" and row["payload_json"] is not None
     )
+    selected_view = None
+    if selected_row is not None:
+        selected_data = dict(selected_row)
+        if selected_row['state'] == 'waiting_user' and _ready_presentation_context(store, selected_row['item_id']) is None:
+            selected_data['confirmation_json'] = None
+        selected_view = _item_view(selected_data, vault_path, store.path.parent)
     return {
         "collection_cards": collection_cards,
         "selected_collection": selected_collection,
         "collection_processing": sum(c['state']=='working' for c in collection_cards),
         "collection_waiting": sum(c['counts']['queued'] for c in collection_cards if c['state']=='queued'),
-        "selected": (
-            _item_view(selected_row, vault_path, store.path.parent)
-            if selected_row is not None
-            else None
-        ),
+        "selected": selected_view,
         "processing": processing,
         "waiting": waiting,
         "todo": todo,
@@ -1115,10 +1178,16 @@ def _item_view(row, vault_path: str | None, data_root=None) -> dict[str, object]
                 concern['context'] = None
         confirmation.setdefault("review_required", True)
         text = confirmation.get("snapshot", "")
-        confirmation["english_assistance"] = english_assistance(text)
-        if not confirmation["english_assistance"]:
-            for concern in confirmation.get("concerns", []):
-                concern["display"] = local_choices(concern)
+        confirmation["english_assistance"] = english_assistance(text) or any(
+            english_assistance(c.get('text', '')) for c in confirmation.get('concerns', []))
+        if row['state'] == 'waiting_user' and confirmation.get('kind') != 'image':
+            try:
+                for concern in confirmation.get('concerns', []):
+                    concern['display'] = (english_candidate_display(text, concern)
+                        if confirmation['english_assistance'] else local_choices(concern))
+            except (ValueError, TypeError, KeyError):
+                # No empty English header/candidates presented as a ready card.
+                confirmation = None
     author = metadata.get("author", {}) if isinstance(metadata, dict) else {}
     kind = row["source_kind"] or row["input_kind"] or platform_for_url(row["submitted_url"]) or "unknown"
     local = kind in {"direct_text", "markdown", "pdf", "epub"}

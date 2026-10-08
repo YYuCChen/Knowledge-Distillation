@@ -31,8 +31,22 @@ STATE_LABELS = {'queued':'等待中','working':'处理中','waiting_user':'待�
                 'failed':'需要处理','succeeded':'已完成','cancelled':'已停止'}
 
 
-def cards(service):
-    return [card(item) for item in service.list()]
+def cards(service, *, store=None):
+    return [card(_presentation_members(item, store)) for item in service.list()]
+
+
+def _presentation_members(item, store):
+    """Use the same full-member gate, without inventing a projected state."""
+    if store is None:
+        return item
+    from .web import _ready_presentation_context
+    members = []
+    for member in item['members']:
+        projected = dict(member)
+        if member['state'] != 'waiting_user' or _ready_presentation_context(store, member['item_id']) is None:
+            projected['confirmation_json'] = None
+        members.append(projected)
+    return {**item, 'members': members}
 
 
 def card(item):
@@ -96,7 +110,7 @@ def collection_blueprint(store, service, wake, error_text):
 
     def view(operation, error=None):
         try:
-            info=card(service.detail(operation))
+            info=card(_presentation_members(service.detail(operation), store))
         except LookupError:
             abort(404)
         titles={m['item_id']:m for m in info['manifest']['members']}

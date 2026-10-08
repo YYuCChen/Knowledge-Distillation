@@ -51,7 +51,7 @@ def create_application(
     selected_paths.runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
     canonical_vault(selected_paths.runtime)
     selected_paths.runtime.chmod(0o700)
-    store = Store(selected_paths.database)
+    store = Store(selected_paths.database, runtime_root=selected_paths.runtime)
     from .douyin_session import DouyinOwnedSession
     browser = chrome or DouyinOwnedSession(store, selected_paths.data_root / "browser-profiles" / "douyin")
     settings_service = settings or SettingsService(store, chrome=browser)
@@ -87,8 +87,16 @@ def create_application(
     from .temporary_artifacts import TemporaryArtifacts
     artifacts = TemporaryArtifacts(store, selected_paths.runtime)
     workflow_holder = {}
+    presentation_cursor = 0
 
     def maintenance():
+        # SingleWorker holds _activity and excludes _update_reserved here.
+        # One bounded page only enqueues; model/audio preparation belongs to
+        # the same durable FIFO, never to construction or a Web GET.
+        nonlocal presentation_cursor
+        page = store.discover_pending_presentations(after_item_id=presentation_cursor, limit=8)
+        presentation_cursor = page['after_item_id']
+        store.expire_submitted_sources()
         # Backfill raw/ first: a material's media is released only after its raw
         # file was written (media_lifecycle.RELEASABLE). Quick notes waiting for
         # earlier deliveries' raw ids are written once those settle.
