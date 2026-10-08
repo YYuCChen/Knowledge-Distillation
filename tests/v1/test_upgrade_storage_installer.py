@@ -1,4 +1,4 @@
-"""Real Store/SQLite/Mac rollback on SQL-built disposable 21/22/23 roots.
+"""Real Store/SQLite/Mac rollback on SQL-built disposable 21/22/23/25 roots.
 
 No App, native helper process, signing executable, HTTP server or download.
 Only external boundaries are fake; the existing installer function performs
@@ -25,7 +25,7 @@ from knowledge_distiller.v1.store import Store
 
 
 FIXTURES = Path(__file__).with_name('fixtures')
-VERSIONS = (21, 22, 23)
+VERSIONS = (21, 22, 23, 25)
 BODY = b'\x00\xff\r\nA'
 TEXT = 'synthetic-only 原件\r\ne\u0301，字节不重写'
 PARENT_PID = 987654320
@@ -133,15 +133,20 @@ def _sql_fixture(root, version):
                        ('1' * 32, 1, 1, 'R-20261008-0001', '第三方', 'raw/1.md',
                         len(TEXT.encode()), hashlib.sha256(TEXT.encode()).hexdigest()))
         db.commit()
-        if version == 23:
+        if version >= 23:
             db.executescript((FIXTURES / 'upgrade-probe-schema23.sql').read_text(encoding='utf-8'))
             db.execute('INSERT INTO wiki_observations VALUES(?,?,?,?,?,?,NULL)',
                        ('a' * 64, str(vault), '1' * 32, 2, 3, '2099-01-01T00:00:00Z'))
             db.commit()
+        if version == 25:
+            db.executescript((FIXTURES / 'upgrade-probe-schema25.sql').read_text(encoding='utf-8'))
         assert db.execute('PRAGMA user_version').fetchone()[0] == version
         # No expires-at cleanup or retained-file reconstruction in this fixture.
         assert db.execute('SELECT input_kind,retain_until FROM submitted_sources').fetchall() == [('direct_text', None)]
     database.chmod(0o600)
+    if version == 25:
+        from .test_data_upgrade_probe_versions import _seed_prior25
+        _seed_prior25(database, vault)
     assert database.stat().st_nlink == 1
     assert all(not Path(str(database) + suffix).exists() for suffix in ('-wal', '-shm'))
     return data, database, vault
@@ -149,7 +154,7 @@ def _sql_fixture(root, version):
 
 def _assert_upgraded(state):
     current = _snapshot(state.database, state.before['columns'])
-    assert current['version'] == 25
+    assert current['version'] == 26
     assert current['rows'] == state.before['rows']
     assert current['typed_rows'] == state.before['typed_rows']
     assert current['foreign_keys'] == state.before['foreign_keys']
@@ -306,7 +311,7 @@ def _case(tmp_path, monkeypatch, version):
             raise
         _assert_upgraded(state)
         state.committed_bytes = database.read_bytes()
-        state.events.append('store-committed-25')
+        state.events.append('store-committed-26')
         state.candidate_alive = True
         (data / '.desktop-instance.json').write_text(json.dumps({'pid': CANDIDATE_PID, 'port': FAKE_PORT}))
         return Process()
@@ -400,23 +405,23 @@ def test_real_store_and_backup_are_accepted_without_changing_originals(tmp_path,
     assert not (state.updates / 'synthetic.zip').exists()
     assert 'old-readonly-reopen' not in state.events
     assert 'terminate-candidate' not in state.events
-    assert state.events.index('verified-real-backup') < state.events.index('store-committed-25')
+    assert state.events.index('verified-real-backup') < state.events.index('store-committed-26')
 
 
 @pytest.mark.parametrize('version', VERSIONS)
 def test_real_migration_transaction_failure_restores_backup_and_old_schema(tmp_path, monkeypatch, version):
     state = _case(tmp_path, monkeypatch, version)
-    original = database_module.migrate_v24
+    original = database_module.migrate_v26
     def abort_after_ddl(db):
         original(db)
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='ingestion_events'").fetchone()
         raise RuntimeError('synthetic-migration-abort')
-    monkeypatch.setattr(database_module, 'migrate_v24', abort_after_ddl)
+    monkeypatch.setattr(database_module, 'migrate_v26', abort_after_ddl)
     assert installer.run(state.plan) == 1
     _assert_old_readable(state)
     _assert_result(state, 1)
     assert 'verified-migration-rollback' in state.events
-    assert 'store-committed-25' not in state.events
+    assert 'store-committed-26' not in state.events
     assert state.events[-1] == 'old-readonly-reopen'
     assert not (state.updates / 'startup-handshake').exists()
     assert not state.previous.exists()
@@ -435,7 +440,7 @@ def test_committed_store_then_startup_failure_restores_prior_database(tmp_path, 
     assert not state.previous.exists()
     assert state.backup.read_bytes() == state.backup_bytes
     events = state.events
-    assert events.index('store-committed-25') < events.index('synthetic-startup-failure')
+    assert events.index('store-committed-26') < events.index('synthetic-startup-failure')
     assert events.index('terminate-candidate') < events.index('wait-candidate') < events.index('copy-backup-to-stage')
     assert events.index('copy-backup-to-stage') < events.index('restore-stage-synced') < events.index('database-backup-published')
     assert events.index('database-backup-published') < events.index('database-parent-synced') < events.index('old-bundle-restored')
@@ -460,7 +465,7 @@ def test_restore_copy_failure_is_not_reported_as_old_database_recovered(tmp_path
     with pytest.raises(PermissionError, match='synthetic-restore-copy-refused'):
         installer.run(state.plan)
     _assert_result(state, 1)
-    _assert_upgraded(state)  # DB is still 25; this is NOT a restored old schema.
+    _assert_upgraded(state)  # DB is still 26; this is NOT a restored old schema.
     assert state.database.read_bytes() == state.committed_bytes
     assert (state.target / 'version').read_text() == 'new'
     assert (state.previous / 'version').read_text() == 'old'
@@ -537,7 +542,7 @@ def test_accepted_cleanup_failure_preserves_new_schema_and_new_work(tmp_path, mo
     assert 'old-readonly-reopen' not in state.events and 'terminate-candidate' not in state.events
     assert 'accepted-new-work' in state.events
     with _readonly(state.database) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 25
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 26
         assert db.execute('SELECT value FROM settings WHERE key=?', ('synthetic-after-accept',)).fetchone() == (TEXT,)
         approved_probe._check_after(db, state.prior)
     current = _snapshot(state.database, state.before['columns'])['rows']
@@ -550,7 +555,7 @@ def test_accepted_cleanup_failure_preserves_new_schema_and_new_work(tmp_path, mo
         k: v for k, v in state.before['typed_rows'].items() if k != 'settings'}
 
 
-@pytest.mark.parametrize('version', VERSIONS)
+@pytest.mark.parametrize('version', (21, 22, 23))
 def test_actual_v25_postcheck_failure_restores_backup_before_old_bundle(tmp_path, monkeypatch, version):
     state = _case(tmp_path, monkeypatch, version)
     actual = database_module._check_v25_preservation
@@ -563,7 +568,7 @@ def test_actual_v25_postcheck_failure_restores_backup_before_old_bundle(tmp_path
     _assert_old_readable(state)
     _assert_result(state, 1)
     assert 'verified-migration-rollback' in state.events
-    assert 'store-committed-25' not in state.events
+    assert 'store-committed-26' not in state.events
     assert not (state.updates / 'startup-handshake').exists()
     assert state.backup.read_bytes() == state.backup_bytes
     assert not state.previous.exists()

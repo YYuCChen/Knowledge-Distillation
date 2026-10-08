@@ -76,7 +76,7 @@ def _formal(tmp_path: Path) -> Path:
     return tmp_path / "formal-never-opened"
 
 
-def test_schema21_copy_upgrades_to_25_without_changing_legacy_rows_or_vault(tmp_path):
+def test_schema21_copy_upgrades_to_26_without_changing_legacy_rows_or_vault(tmp_path):
     database, vault = _prepare(tmp_path / "attempt")
     _, report = _report_parent(tmp_path)
     vault_before = probe._digest_tree(vault)
@@ -84,7 +84,7 @@ def test_schema21_copy_upgrades_to_25_without_changing_legacy_rows_or_vault(tmp_
     result = json.loads(report.read_text(encoding="utf-8"))
     assert result["ok"] is True and result["error_code"] is None
     assert result["database"]["schema_before"] == 21
-    assert result["database"]["schema_after"] == 25
+    assert result["database"]["schema_after"] == 26
     assert result["database"]["quick_check_before"] is True
     assert result["database"]["quick_check_after"] is True
     assert result["database"]["foreign_key_violations_before"] == 0
@@ -99,7 +99,7 @@ def test_schema21_copy_upgrades_to_25_without_changing_legacy_rows_or_vault(tmp_
     assert SENTINEL not in report.read_text(encoding="utf-8")
     assert report.stat().st_mode & 0o777 == 0o600
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 25
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 26
         assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
         assert connection.execute("PRAGMA foreign_key_check").fetchone() is None
         assert {row[0] for row in connection.execute(

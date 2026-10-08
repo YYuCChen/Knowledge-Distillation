@@ -22,10 +22,10 @@ DATABASE_NAME = "knowledge.sqlite3"
 VAULT_RELPATH = "synthetic-vault"
 _SHA256_LENGTH = 64
 
-# Frozen schema24 additions plus approved schema25 guards; no runtime target database.
+# Frozen historical storage plus the finite approved26 transform; no target DB oracle.
 IDENTITY_CONTRACT = 'all-prior-schema-and-columns-v2'
-_PRIOR_SCHEMAS = (21, 22, 23)
-_APPROVED_TARGET_SCHEMA = 25
+_PRIOR_SCHEMAS = (21, 22, 23, 25)
+_APPROVED_TARGET_SCHEMA = 26
 _PARENT_STATE_PATTERN = r"state IN \(\s*'queued',\s*'working',\s*'waiting_user',\s*'succeeded',\s*'failed'\s*\)"
 _PARENT_STATE_V25 = "state IN ('queued','working','waiting_user','succeeded','failed','raw_saved')"
 _PARENT_CHECK_V25 = ", CHECK(state!='raw_saved' OR (phase='done' AND ingestion_contract='raw-verified-v1')))"
@@ -106,6 +106,14 @@ _WIKI_V23 = {name: value for name, value in _APPROVED_DDL.items()
              and name not in ('wiki_task_outcome_binding_immutable', 'wiki_task_outcome_binding_required')}
 
 
+
+
+# Independent historical25 and current26 primary expressions, frozen as literals.
+_PRIOR25_BASE_DDL = {'distill_items': ('table', 'distill_items', 'CREATE TABLE "distill_items" (\n    item_id INTEGER PRIMARY KEY,\n    submitted_url TEXT NOT NULL,\n    state TEXT NOT NULL CHECK (\n        state IN (\'queued\',\'working\',\'waiting_user\',\'succeeded\',\'failed\',\'raw_saved\')\n    ),\n    phase TEXT NOT NULL CHECK (\n        phase IN (\'collecting\', \'reviewing\', \'distilling\', \'publishing\', \'done\')\n    ),\n    material_id INTEGER REFERENCES materials(material_id),\n    error_code TEXT,\n    rejection_reason TEXT,\n    dismissed_at TEXT,\n    confirmation_json TEXT,\n    queued_at TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL\n, platform_authority_json TEXT NOT NULL DEFAULT \'{}\', submitted_title TEXT NOT NULL DEFAULT \'\', review_revision INTEGER NOT NULL DEFAULT 0, ingestion_contract TEXT NOT NULL DEFAULT \'legacy\' CHECK (ingestion_contract IN (\'legacy\',\'raw-verified-v1\')), source_binding_sha256 TEXT CHECK (source_binding_sha256 IS NULL OR (length(source_binding_sha256)=64 AND source_binding_sha256 NOT GLOB \'*[^0-9a-f]*\')), relation_binding_sha256 TEXT CHECK (relation_binding_sha256 IS NULL OR (length(relation_binding_sha256)=64 AND relation_binding_sha256 NOT GLOB \'*[^0-9a-f]*\')), CHECK(state!=\'raw_saved\' OR (phase=\'done\' AND ingestion_contract=\'raw-verified-v1\')))'), 'submitted_sources': ('table', 'submitted_sources', "CREATE TABLE submitted_sources (\n    item_id INTEGER PRIMARY KEY REFERENCES distill_items(item_id),\n    input_kind TEXT NOT NULL CHECK (input_kind IN ('direct_text', 'markdown', 'pdf', 'epub', 'image')),\n    input_key TEXT NOT NULL,\n    input_label TEXT NOT NULL,\n    input_metadata TEXT NOT NULL,\n    content BLOB,\n    retain_until TEXT,\n    retryable INTEGER NOT NULL DEFAULT 1 CHECK (retryable IN (0, 1)),\n    UNIQUE(input_kind, input_key)\n)"), 'distill_review_revision': ('trigger', 'distill_items', 'CREATE TRIGGER distill_review_revision AFTER UPDATE ON distill_items\n                WHEN NEW.review_revision = OLD.review_revision AND (\n                    NEW.state IS NOT OLD.state OR NEW.phase IS NOT OLD.phase\n                    OR NEW.material_id IS NOT OLD.material_id\n                    OR NEW.submitted_url IS NOT OLD.submitted_url\n                    OR NEW.confirmation_json IS NOT OLD.confirmation_json\n                    OR NEW.platform_authority_json IS NOT OLD.platform_authority_json\n                ) BEGIN\n                UPDATE distill_items SET review_revision = OLD.review_revision + 1\n                WHERE item_id = NEW.item_id;\n            END'), 'source_media_no_update': ('trigger', 'source_media', "CREATE TRIGGER source_media_no_update BEFORE UPDATE ON source_media\n        WHEN EXISTS (SELECT 1 FROM source_facts WHERE material_id=OLD.material_id)\n        AND NOT (NEW.material_id=OLD.material_id AND NEW.member_id=OLD.member_id\n            AND NEW.position=OLD.position AND NEW.mime_type=OLD.mime_type\n            AND NEW.sha256=OLD.sha256 AND length(OLD.content)>0\n            AND typeof(NEW.content)='blob' AND length(NEW.content)=0\n            AND EXISTS (SELECT 1 FROM materials m WHERE m.material_id=OLD.material_id AND m.source_kind IN ('douyin','youtube','xiaohongshu','x','zhihu','weibo','bilibili','image')\n    AND EXISTS (SELECT 1 FROM distill_items i WHERE i.material_id=m.material_id)\n    AND NOT EXISTS (SELECT 1 FROM distill_items i WHERE i.material_id=m.material_id\n        AND (i.confirmation_json IS NOT NULL OR i.state='working'\n             OR (i.dismissed_at IS NULL AND i.state!='succeeded')))\n    AND EXISTS (SELECT 1 FROM source_facts sf WHERE sf.material_id=m.material_id) AND EXISTS (SELECT 1 FROM raw_records r WHERE r.subject_kind='material'\n        AND r.subject_id=m.material_id AND r.written_at IS NOT NULL)))\n        BEGIN SELECT RAISE(ABORT,'SourceFact media is immutable'); END"), 'confirmation_decisions': ('table', 'confirmation_decisions', 'CREATE TABLE confirmation_decisions (\n                item_id INTEGER NOT NULL REFERENCES distill_items(item_id),\n                revision TEXT NOT NULL, action TEXT NOT NULL, value TEXT NOT NULL,\n                state TEXT NOT NULL, PRIMARY KEY(item_id, revision))'), 'source_review_results': ('table', 'source_review_results', "CREATE TABLE source_review_results (\n                item_id INTEGER NOT NULL REFERENCES distill_items(item_id),\n                revision INTEGER NOT NULL, identity TEXT NOT NULL,\n                status TEXT NOT NULL CHECK(status IN ('complete','failed')),\n                result_json TEXT NOT NULL, created_at TEXT NOT NULL,\n                PRIMARY KEY(item_id, revision))"), 'collection_members': ('table', 'collection_members', 'CREATE TABLE collection_members (\n        operation_id INTEGER NOT NULL REFERENCES collection_operations(operation_id),\n        ordinal INTEGER NOT NULL,\n        native_id TEXT NOT NULL, native_version TEXT NOT NULL,\n        item_id INTEGER NOT NULL UNIQUE REFERENCES distill_items(item_id),\n        known_unsupported INTEGER NOT NULL CHECK(known_unsupported IN (0,1)),\n        source_fact_id INTEGER REFERENCES source_facts(source_fact_id),\n        knowledge_result_id INTEGER REFERENCES knowledge_results(knowledge_result_id),\n        PRIMARY KEY(operation_id,ordinal), UNIQUE(operation_id,native_id)\n    )'), 'manual_cards': ('table', 'manual_cards', "CREATE TABLE manual_cards (\n        enqueue_seq INTEGER PRIMARY KEY AUTOINCREMENT,\n        scope_kind TEXT NOT NULL, scope_id TEXT NOT NULL,\n        item_id INTEGER NOT NULL REFERENCES distill_items(item_id),\n        review_round_id TEXT NOT NULL, group_id TEXT NOT NULL,\n        lifecycle TEXT NOT NULL CHECK(lifecycle IN ('active','suspended','resolved','superseded')),\n        ordering_basis TEXT NOT NULL CHECK(ordering_basis IN ('observed','migration_inferred')),\n        ordering_reason TEXT NOT NULL, entered_at TEXT NOT NULL,\n        mapping_json TEXT NOT NULL,\n        UNIQUE(item_id,review_round_id,group_id))"), 'group_decisions': ('table', 'group_decisions', 'CREATE TABLE group_decisions (\n        item_id INTEGER NOT NULL REFERENCES distill_items(item_id),\n        request_id TEXT NOT NULL, group_id TEXT NOT NULL,\n        submitted_revision TEXT NOT NULL, selection_digest TEXT NOT NULL,\n        payload_digest TEXT NOT NULL, result_json TEXT NOT NULL,\n        audit_json TEXT NOT NULL, committed_at TEXT NOT NULL,\n        PRIMARY KEY(item_id,request_id),\n        UNIQUE(item_id,submitted_revision,selection_digest))'), 'capture_state': ('table', 'capture_state', 'CREATE TABLE capture_state (\n        capture_id INTEGER PRIMARY KEY REFERENCES captures(capture_id),\n        item_id INTEGER REFERENCES distill_items(item_id),\n        audio_path TEXT, audio_released_at TEXT\n    )'), 'feishu_parts': ('table', 'feishu_parts', 'CREATE TABLE feishu_parts (\n        app_id TEXT NOT NULL, message_id TEXT NOT NULL, position INTEGER NOT NULL,\n        item_id INTEGER REFERENCES distill_items(item_id),\n        error TEXT, preview_json TEXT,\n        PRIMARY KEY(app_id,message_id,position),\n        FOREIGN KEY(app_id,message_id) REFERENCES feishu_receipts(app_id,message_id)\n    )')}
+_PRIOR25_PARENT_CHILDREN = ('submitted_sources', 'confirmation_decisions', 'source_review_results', 'collection_members', 'manual_cards', 'group_decisions', 'capture_state', 'feishu_parts', 'ingestion_events')
+_PRIOR25_PARENT_DEPENDENTS = ('distill_review_revision', 'distill_items_ingestion_binding_immutable', 'distill_items_ingestion_binding_required', 'distill_items_ingestion_owner_immutable', 'distill_items_ingestion_no_delete', 'collection_members_ingestion_contract_match', 'ingestion_events_observation_typed', 'source_media_no_update', 'source_media_ingestion_no_update', 'source_media_ingestion_no_delete', 'submitted_sources_ingestion_no_release', 'submitted_sources_ingestion_no_delete', 'submitted_sources_ingestion_owner_immutable', 'source_media_ingestion_capture_binding', 'source_media_ingestion_capture_release', 'source_media_ingestion_capture_no_delete')
+_V26_DDL = {'submitted_sources_local_insert': ('trigger', 'submitted_sources', "CREATE TRIGGER submitted_sources_local_insert BEFORE INSERT ON submitted_sources\n        WHEN NEW.binding_scope!='legacy' AND (\n          typeof(NEW.binding_scope)!='text' OR\n          local_intake_insert(NEW.item_id,NEW.binding_scope,NEW.input_kind,NEW.input_key,\n                             NEW.input_label,NEW.input_metadata,NEW.content)!=1)\n        BEGIN SELECT RAISE(ABORT,'local intake input unverified'); END"), 'submitted_sources_local_tuple': ('trigger', 'submitted_sources', "CREATE TRIGGER submitted_sources_local_tuple BEFORE UPDATE ON submitted_sources\n        WHEN (OLD.binding_scope!='legacy' OR NEW.binding_scope!='legacy') AND (\n          NEW.item_id IS NOT OLD.item_id OR NEW.binding_scope IS NOT OLD.binding_scope\n          OR NEW.input_kind IS NOT OLD.input_kind OR NEW.input_key IS NOT OLD.input_key\n          OR NEW.input_label IS NOT OLD.input_label OR NEW.input_metadata IS NOT OLD.input_metadata\n          OR NEW.content IS NOT OLD.content OR NEW.retain_until IS NOT OLD.retain_until\n          OR NEW.retryable IS NOT OLD.retryable)\n        BEGIN SELECT RAISE(ABORT,'local intake input is immutable'); END"), 'submitted_sources_local_no_delete': ('trigger', 'submitted_sources', "CREATE TRIGGER submitted_sources_local_no_delete BEFORE DELETE ON submitted_sources\n        WHEN OLD.binding_scope!='legacy'\n        BEGIN SELECT RAISE(ABORT,'local intake input is retained'); END"), 'ingestion_events_observation_typed': ('trigger', 'ingestion_events', "CREATE TRIGGER ingestion_events_observation_typed\n        BEFORE INSERT ON ingestion_events WHEN NEW.kind IN ('source_ready','raw_pending')\n          AND COALESCE(NOT ((\n            NEW.subject_kind='item' AND NEW.subject_id=NEW.item_id\n            AND EXISTS (SELECT 1 FROM distill_items i WHERE i.item_id=NEW.item_id\n                        AND i.ingestion_contract=NEW.contract\n                        AND i.source_binding_sha256=json_extract(NEW.detail_json,'$.source_binding_sha256')\n                        AND i.relation_binding_sha256=json_extract(NEW.detail_json,'$.relation_binding_sha256'))\n            AND (SELECT count(*) FROM json_each(NEW.detail_json))=4\n            AND (SELECT count(DISTINCT key) FROM json_each(NEW.detail_json))=4\n            AND NOT EXISTS (SELECT 1 FROM json_each(NEW.detail_json)\n                            WHERE key NOT IN ('code','manifest','source_binding_sha256','relation_binding_sha256'))\n            AND json_type(NEW.detail_json,'$.manifest')='object'\n            AND (SELECT count(*) FROM json_each(NEW.detail_json,'$.manifest'))=2\n            AND (SELECT count(DISTINCT key) FROM json_each(NEW.detail_json,'$.manifest'))=2\n            AND NOT EXISTS (SELECT 1 FROM json_each(NEW.detail_json,'$.manifest')\n                            WHERE key NOT IN ('source_fact_id','snapshot_sha256'))\n            AND ((NEW.kind='source_ready' AND json_extract(NEW.detail_json,'$.code')='source_fact_ready')\n                 OR (NEW.kind='raw_pending' AND json_extract(NEW.detail_json,'$.code')\n                     IN ('context_pending','readback_pending','writer_pending')))\n            AND ((json_type(NEW.detail_json,'$.manifest.source_fact_id')='null'\n                  AND json_type(NEW.detail_json,'$.manifest.snapshot_sha256')='null'\n                  AND NEW.kind='raw_pending')\n                 OR (json_type(NEW.detail_json,'$.manifest.source_fact_id')='integer'\n                     AND json_extract(NEW.detail_json,'$.manifest.source_fact_id')>0\n                     AND json_type(NEW.detail_json,'$.manifest.snapshot_sha256')='text'\n                     AND length(json_extract(NEW.detail_json,'$.manifest.snapshot_sha256'))=64\n                     AND json_extract(NEW.detail_json,'$.manifest.snapshot_sha256') NOT GLOB '*[^0-9a-f]*'))\n          ) OR (NEW.kind='raw_pending' AND NEW.subject_kind='item'\n            AND NEW.subject_id=NEW.item_id AND json_extract(NEW.detail_json,'$.code')='intake_frozen'\n            AND (SELECT count(*) FROM json_each(NEW.detail_json))=4\n            AND (SELECT count(DISTINCT key) FROM json_each(NEW.detail_json))=4\n            AND NOT EXISTS(SELECT 1 FROM json_each(NEW.detail_json)\n                WHERE key NOT IN ('code','manifest','source_binding_sha256','relation_binding_sha256'))\n            AND json_type(NEW.detail_json,'$.manifest')='object'\n            AND (SELECT count(*) FROM json_each(NEW.detail_json,'$.manifest'))=1\n            AND json_type(NEW.detail_json,'$.manifest.intake_envelope_json')='text'\n            AND local_intake_event(NEW.event_key,NEW.contract,NEW.subject_kind,NEW.subject_id,\n                NEW.item_id,NEW.binding_sha256,NEW.detail_json)=1)),1)\n        BEGIN SELECT RAISE(ABORT,'ingestion observation invalid'); END"), 'ingestion_events_local_owner': ('index', 'ingestion_events', "CREATE UNIQUE INDEX ingestion_events_local_owner ON ingestion_events(item_id)\n    WHERE kind='raw_pending' AND json_extract(detail_json,'$.code')='intake_frozen'")}
+_SUBMITTED_V26_SQL = 'CREATE TABLE "submitted_sources" (\n    item_id INTEGER PRIMARY KEY REFERENCES distill_items(item_id),\n    input_kind TEXT NOT NULL CHECK (input_kind IN (\'direct_text\', \'markdown\', \'pdf\', \'epub\', \'image\')),\n    input_key TEXT NOT NULL,\n    input_label TEXT NOT NULL,\n    input_metadata TEXT NOT NULL,\n    content BLOB,\n    retain_until TEXT,\n    retryable INTEGER NOT NULL DEFAULT 1 CHECK (retryable IN (0, 1)),\n    binding_scope TEXT NOT NULL DEFAULT \'legacy\' CHECK(typeof(binding_scope)=\'text\'),\n    UNIQUE(input_kind, input_key, binding_scope)\n)'
 
 class UpgradeProbeError(RuntimeError):
     def __init__(self, code: str):
@@ -256,6 +264,130 @@ def _indices(connection, tables):
     return result
 
 
+def _added_columns(connection, table, definitions, *, code, check_defaults):
+    current = _columns(connection, table)
+    names = tuple(definition.split()[0] for definition in definitions)
+    defaults = ("'legacy'", "'{}'", None) if table == 'wiki_tasks' else ("'legacy'", None, None)
+    suffix = current[-len(definitions):]
+    if len(suffix) != len(definitions):
+        raise UpgradeProbeError(code)
+    for row, name, default in zip(suffix, names, defaults):
+        if tuple(row[1:]) != (name, 'TEXT', int(default is not None), default, 0, 0):
+            raise UpgradeProbeError(code)
+    if check_defaults:
+        selected = ','.join(_quote_identifier(name) for name in names)
+        wanted = ('legacy', '{}', None) if table == 'wiki_tasks' else ('legacy', None, None)
+        if any(tuple(row) != wanted for row in connection.execute(
+                f'SELECT {selected} FROM {_quote_identifier(table)}')):
+            raise UpgradeProbeError(code)
+
+
+def _full_autoindices(connection, indices, *, code):
+    for name, (table, names) in _AUTO_INDEX_COLUMNS.items():
+        columns = {row[1]: row[0] for row in _columns(connection, table)}
+        origin = 'u' if table == 'ingestion_events' or name.endswith('_2') else 'pk'
+        expected = tuple((position, columns[column], column, 0, 'BINARY', 1)
+                         for position, column in enumerate(names))
+        expected += ((len(names), -1, None, 0, 'BINARY', 0),)
+        if indices.get(name) != (1, origin, 0, expected):
+            raise UpgradeProbeError(code)
+
+
+def _input_index(*, target):
+    columns = ((1, 'input_kind'), (2, 'input_key'))
+    if target:
+        columns += ((8, 'binding_scope'),)
+    rows = tuple((position, cid, name, 0, 'BINARY', 1)
+                 for position, (cid, name) in enumerate(columns))
+    return (1, 'u', 0, rows + ((len(columns), -1, None, 0, 'BINARY', 0),))
+
+
+def _freeze25(connection, objects, columns):
+    code = 'precheck_failed'
+    expected = {**_APPROVED_DDL, **_PRIOR25_BASE_DDL}
+    kind, parent, sql = expected['wiki_tasks']
+    anchor = "        updated_at TEXT NOT NULL CHECK (TRIM(updated_at) != ''),"
+    if sql.count(anchor) != 1:
+        raise UpgradeProbeError(code)
+    expected['wiki_tasks'] = (kind, parent, sql.replace(
+        anchor, anchor[:-1] + ', ' + ', '.join(_OUTCOME_COLUMNS) + ',', 1))
+    for name, value in expected.items():
+        actual = objects.get(name)
+        # Historical initialization can keep this one unquoted input table header.
+        if name == 'submitted_sources' and actual is not None:
+            actual = (actual[0], actual[1], actual[2].replace(
+                'CREATE TABLE "submitted_sources"', 'CREATE TABLE submitted_sources', 1))
+        if actual != value:
+            raise UpgradeProbeError(code)
+    reserved = (set(_V26_DDL) - {'ingestion_events_observation_typed'}) | {
+        'submitted_sources_v26', 'distill_items_v25'}
+    if reserved & objects.keys():
+        raise UpgradeProbeError(code)
+    if connection.execute("SELECT 1 FROM ingestion_events WHERE "
+            "json_extract(detail_json,'$.code')='intake_frozen' LIMIT 1").fetchone():
+        raise UpgradeProbeError(code)
+    for table, definitions in _ADDITIONS.items():
+        _added_columns(connection, table, definitions, code=code, check_defaults=False)
+    input_columns = (
+        (0, 'item_id', 'INTEGER', 0, None, 1, 0),
+        (1, 'input_kind', 'TEXT', 1, None, 0, 0),
+        (2, 'input_key', 'TEXT', 1, None, 0, 0),
+        (3, 'input_label', 'TEXT', 1, None, 0, 0),
+        (4, 'input_metadata', 'TEXT', 1, None, 0, 0),
+        (5, 'content', 'BLOB', 0, None, 0, 0),
+        (6, 'retain_until', 'TEXT', 0, None, 0, 0),
+        (7, 'retryable', 'INTEGER', 1, '1', 0, 0),
+    )
+    if columns['submitted_sources'] != input_columns:
+        raise UpgradeProbeError(code)
+    if connection.execute("""SELECT 1 FROM submitted_sources WHERE typeof(item_id)!='integer'
+        OR typeof(input_kind)!='text' OR typeof(input_key)!='text' OR typeof(input_label)!='text'
+        OR typeof(input_metadata)!='text' OR typeof(content) NOT IN ('blob','null')
+        OR typeof(retain_until) NOT IN ('text','null') OR typeof(retryable)!='integer'
+        OR retryable NOT IN (0,1) LIMIT 1""").fetchone():
+        raise UpgradeProbeError(code)
+    incoming = set()
+    for table in columns:
+        fks = tuple(tuple(row) for row in connection.execute(
+            f'PRAGMA foreign_key_list({_quote_identifier(table)})'))
+        for fk in fks:
+            if fk[2] == 'submitted_sources':
+                raise UpgradeProbeError(code)
+            if fk[2] == 'distill_items':
+                if fk[3:] != ('item_id', 'item_id', 'NO ACTION', 'NO ACTION', 'NONE'):
+                    raise UpgradeProbeError(code)
+                incoming.add(table)
+    if incoming != set(_PRIOR25_PARENT_CHILDREN):
+        raise UpgradeProbeError(code)
+    for table, wanted in (
+            ('submitted_sources', ((0, 0, 'distill_items', 'item_id', 'item_id', 'NO ACTION', 'NO ACTION', 'NONE'),)),
+            ('distill_items', ((0, 0, 'materials', 'material_id', 'material_id', 'NO ACTION', 'NO ACTION', 'NONE'),))):
+        if tuple(tuple(row) for row in connection.execute(
+                f'PRAGMA foreign_key_list({_quote_identifier(table)})')) != wanted:
+            raise UpgradeProbeError(code)
+    parent_guards = set(_PRIOR25_PARENT_DEPENDENTS) | {
+        'distill_items_raw_terminal_no_insert', 'distill_items_raw_terminal_proof',
+        'distill_items_raw_terminal_no_reopen'}
+    input_guards = {name for name in _APPROVED_DDL if name.startswith('submitted_sources_')}
+    for table, allowed in (('submitted_sources', input_guards), ('distill_items', parent_guards)):
+        found = set()
+        for name, (kind, owner, sql) in objects.items():
+            if kind not in ('trigger', 'view', 'index'):
+                continue
+            if owner == table or (sql and re.search(r'\b' + table + r'\b', sql, re.IGNORECASE)):
+                if table == 'submitted_sources' and name == 'sqlite_autoindex_submitted_sources_1' and kind == 'index' and sql is None:
+                    continue
+                if kind != 'trigger' or name not in allowed:
+                    raise UpgradeProbeError(code)
+                found.add(name)
+        if found != allowed:
+            raise UpgradeProbeError(code)
+    indices = _indices(connection, columns)
+    if indices.get('sqlite_autoindex_submitted_sources_1') != _input_index(target=False):
+        raise UpgradeProbeError(code)
+    _full_autoindices(connection, indices, code=code)
+
+
 def _freeze(connection, version):
     objects = _objects(connection)
     columns = {name: _columns(connection, name) for name, value in objects.items()
@@ -278,6 +410,12 @@ def _freeze(connection, version):
     }
     if any(not names <= {row[1] for row in columns[table]} for table, names in required.items()):
         raise UpgradeProbeError('precheck_failed')
+    if version == 25:
+        _freeze25(connection, objects, columns)
+        return {'version': version, 'objects': objects, 'columns': columns,
+                'indices': _indices(connection, columns),
+                'foreign_keys': {name: tuple(tuple(row) for row in connection.execute(
+                    f'PRAGMA foreign_key_list({_quote_identifier(name)})')) for name in columns}}
     wiki = dict(_WIKI_V23)
     if version == 21:
         wiki = {}
@@ -330,22 +468,27 @@ def _check_after(connection, prior):
     if connection.execute('PRAGMA user_version').fetchone()[0] != _APPROVED_TARGET_SCHEMA:
         raise UpgradeProbeError('legacy_changed')
     actual = _objects(connection)
-    expected = {**prior['objects'], **_APPROVED_DDL}
+    expected = {**prior['objects'], **_APPROVED_DDL, **_V26_DDL}
+    if prior['version'] == 25:
+        expected = {**prior['objects'], **_V26_DDL}
+    expected['submitted_sources'] = ('table', 'submitted_sources', _SUBMITTED_V26_SQL)
     for name, (table, _) in _AUTO_INDEX_COLUMNS.items():
         expected[name] = ('index', table, None)
     if actual.keys() != expected.keys():
         raise UpgradeProbeError('legacy_changed')
     for name, wanted in expected.items():
         kind, parent, sql = actual[name]
-        if kind == 'table' and name in _ADDITIONS:
+        if kind == 'table' and name in _ADDITIONS and prior['version'] != 25:
             sql = _without_additions(sql, name)
-        if name == 'distill_items':
+        if name == 'distill_items' and prior['version'] != 25:
             wanted = (wanted[0], wanted[1], _parent_v25_sql(wanted[2]))
         if (kind, parent, sql) != wanted:
             raise UpgradeProbeError('legacy_changed')
     for table, old in prior['columns'].items():
         current = _columns(connection, table)
-        additions = _ADDITIONS.get(table, ())
+        additions = _ADDITIONS.get(table, ()) if prior['version'] != 25 else ()
+        if table == 'submitted_sources':
+            additions = ("binding_scope TEXT NOT NULL DEFAULT 'legacy' CHECK(typeof(binding_scope)='text')",)
         if current[:len(old)] != old or len(current) != len(old) + len(additions):
             raise UpgradeProbeError('legacy_changed')
         fks = tuple(tuple(row) for row in connection.execute(
@@ -353,35 +496,28 @@ def _check_after(connection, prior):
         if fks != prior['foreign_keys'][table]:
             raise UpgradeProbeError('legacy_changed')
     for table, definitions in _ADDITIONS.items():
-        current = _columns(connection, table)
-        suffix = current[-len(definitions):]
-        names = tuple(definition.split()[0] for definition in definitions)
-        defaults = ("'legacy'", "'{}'", None) if table == 'wiki_tasks' else ("'legacy'", None, None)
-        for row, name, default in zip(suffix, names, defaults):
-            if tuple(row[1:]) != (name, 'TEXT', int(default is not None), default, 0, 0):
-                raise UpgradeProbeError('legacy_changed')
-        selected = ','.join(_quote_identifier(name) for name in names)
-        wanted = ('legacy', '{}', None) if table == 'wiki_tasks' else ('legacy', None, None)
-        if any(tuple(row) != wanted for row in connection.execute(
-                f"SELECT {selected} FROM {_quote_identifier(table)}")):
-            raise UpgradeProbeError('legacy_changed')
+        _added_columns(connection, table, definitions, code='legacy_changed',
+                       check_defaults=prior['version'] != 25)
+    if _columns(connection, 'submitted_sources')[-1] != (8, 'binding_scope', 'TEXT', 1, "'legacy'", 0, 0):
+        raise UpgradeProbeError('legacy_changed')
+    if connection.execute("SELECT 1 FROM submitted_sources WHERE binding_scope IS NOT 'legacy' LIMIT 1").fetchone():
+        raise UpgradeProbeError('legacy_changed')
     indices = _indices(connection, [name for name, value in actual.items() if value[0] == 'table'])
     for name, old in prior['indices'].items():
+        if name == 'sqlite_autoindex_submitted_sources_1':
+            continue  # Only this exact full three-key index transform is allowed.
         if name == 'sqlite_autoindex_wiki_tasks_2' and prior['version'] == 22:
             continue  # Exact approved six-column uniqueness is checked below.
         if indices.get(name) != old:
             raise UpgradeProbeError('legacy_changed')
-    for name, (table, columns) in _AUTO_INDEX_COLUMNS.items():
-        meta = indices.get(name)
-        if meta is None or meta[:3] != (1, 'pk' if name.endswith('_1') and
-                table not in ('ingestion_events',) else 'u', 0):
-            raise UpgradeProbeError('legacy_changed')
-        # wiki_tasks_1/observations are PK; wiki_outcome_receipts_1 is composite PK.
-        keyed = tuple(row[2] for row in meta[3] if row[5])
-        if keyed != columns or any(row[3:5] != (0, 'BINARY') for row in meta[3]):
-            raise UpgradeProbeError('legacy_changed')
+    _full_autoindices(connection, indices, code='legacy_changed')
+    if indices.get('sqlite_autoindex_submitted_sources_1') != _input_index(target=True):
+        raise UpgradeProbeError('legacy_changed')
+    if indices.get('ingestion_events_local_owner') != (1, 'c', 1, (
+            (0, 5, 'item_id', 0, 'BINARY', 1), (1, -1, None, 0, 'BINARY', 0))):
+        raise UpgradeProbeError('legacy_changed')
     for table in ('ingestion_events', 'wiki_outcome_receipts'):
-        if connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]:
+        if table not in prior['columns'] and connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]:
             raise UpgradeProbeError('legacy_changed')
 
 
@@ -401,10 +537,11 @@ def _legacy_identity(connection, prior):
             for value in column:
                 _hash_value(digest, value)
         primary = [row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5]]
-        use_rowid = not primary
         order = ','.join(_quote_identifier(column) for column in primary) if primary else 'rowid'
         selected = ','.join(_quote_identifier(row[1]) for row in columns)
-        if use_rowid:
+        # Preserve physical row identities even on tables with a text/composite PK.
+        # WITHOUT ROWID tables have no physical rowid to preserve.
+        if not re.search(r'\bWITHOUT\s+ROWID\b', prior['objects'][name][2] or '', re.IGNORECASE):
             selected = 'rowid,' + selected
         query = f"SELECT {selected} FROM {_quote_identifier(name)} ORDER BY {order}"
         count = 0
