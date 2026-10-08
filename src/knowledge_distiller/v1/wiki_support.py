@@ -982,7 +982,8 @@ class WikiSupportGate:
         except OSError:
             raise WikiSupportError("storage_failure") from None
 
-    def _load(self, path):
+    @staticmethod
+    def _load(path):
         try:
             record = _strict(_read(path, private=True).decode("utf-8"))
             if (not isinstance(record, dict) or set(record) != {"payload", "sha256"}
@@ -991,6 +992,57 @@ class WikiSupportGate:
             return record["payload"]
         except (ValueError, UnicodeError, TypeError, KeyError):
             raise WikiSupportError("checkpoint_corrupt") from None
+
+    @classmethod
+    def cached_generated(cls, checkpoint_root, gate_id, staging_root, *, check_phase=None):
+        """Read certificates from this gate's last app-owned candidate only.
+
+        The caller must first verify the cached check/tree, then rebuild the
+        registry and match both returned hashes. This never creates state or
+        certifies fresh model bytes, and normal gate review still checks state.
+        """
+        directory = Path(checkpoint_root).absolute() / ('wiki-support-' + _hash(gate_id))
+        _safe(directory)
+        if not directory.exists():
+            return None
+        state = cls._load(directory / 'state.json')
+        try:
+            attempts = state['attempts']
+            if not attempts:
+                return None
+            attempt = attempts[-1]
+            if attempt['request_id'] != _hash([state['binding'], len(attempts) - 1,
+                                               attempt['candidate_hash'], attempt['parent_hash']]):
+                raise ValueError()
+            _digest(attempt['request_id'])
+            payload = cls._load(directory / ('candidate-' + attempt['request_id'] + '.json'))
+            if (payload['contract'] != CONTRACT_VERSION
+                    or payload['candidate_hash'] != attempt['candidate_hash']):
+                raise ValueError()
+            pending = state['repair']
+            if (isinstance(pending, dict) and pending.get('consumed') is False
+                    and pending.get('parent_hash') == attempt['candidate_hash']
+                    and type(pending.get('number')) is int
+                    and check_phase == f"repair-{pending['number']}-check"):
+                # The checked repair's final-stage can precede gate.review's
+                # candidate write. This record is still the parent, not the
+                # checked child; normal construction resumes the same token.
+                return None
+            proofs = []
+            for row in payload['generated']:
+                if (set(row) != {'path', 'document_sha256', 'heading', 'content'}
+                        or not isinstance(row['heading'], str) or not isinstance(row['content'], str)):
+                    raise ValueError()
+                path = _relative(row['path'], 'wiki')
+                _digest(row['document_sha256'])
+                content = _read(Path(staging_root) / path)
+                if sha256(content) != row['document_sha256']:
+                    raise WikiSupportError('hash_mismatch')
+                proofs.append(GeneratedSection(row['path'], row['document_sha256'],
+                                              row['heading'], row['content'].encode('utf-8')))
+            return tuple(proofs), payload, state['binding']['registry']
+        except (KeyError, TypeError, ValueError, IndexError):
+            raise WikiSupportError('checkpoint_corrupt') from None
 
     def _state(self):
         path = self.directory / "state.json"

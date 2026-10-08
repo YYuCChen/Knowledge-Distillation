@@ -518,16 +518,28 @@ class WikiWorker:
                 if feedback is None:
                     raise
 
-    def _typed_validate(self, snapshot, task, batch_no):
-        if not self._trusted_kb(snapshot, task):
-            raise WikiStagingError('validation_failed')
+    def _typed_validate(self, snapshot, task, batch_no, *, regenerate=True):
+        if regenerate:
+            if not self._trusted_kb(snapshot, task):
+                raise WikiStagingError('validation_failed')
+        else:
+            # A completed stage is an immutable candidate. Running kb here
+            # rewrites dated system pages before cached-check/CAS verification,
+            # making an otherwise unchanged next-day recovery fail its hashes.
+            verify_staging_protected(snapshot)
+            try:
+                manifest = verify_source_kit(self.store.kit_root)
+            except WikiKitError as error:
+                raise WikiStagingError('validation_failed') from error
+            if manifest.manifest_sha256 != task.kit_manifest_sha256:
+                raise WikiStagingError('validation_failed')
         return validate_staging(snapshot, batch_no,
             [r.relative_path for r in task.raw if r.batch_no == batch_no],
             python_executable=self.store.python_executable,
             source_kit_root=self.store.kit_root, kit_runtime=self.store.runtime)
 
     def _typed_candidate(self, task, snapshot, batch_no, validated, proposal, checked, source,
-                         *, parent_registry=None, reservation=None):
+                         *, parent_registry=None, reservation=None, reuse_generated=False, check_phase=None):
         from . import wiki_support as support
         from . import wiki_typed as t
         from .wiki_outcomes import WikiOutcomes, Outcome, CONTRACT
@@ -544,12 +556,22 @@ class WikiWorker:
             for f in snapshot.files if f.relative_path.startswith('wiki/') and f.relative_path.endswith('.md')
             and f.relative_path not in {c.path for c in changes})
         read_facts = lambda: self._program_facts(task, snapshot, batch_no)
+        cached = (support.WikiSupportGate.cached_generated(
+            snapshot.task_root.parent.parent / 'execution', f'batch-{batch_no}-final', snapshot.workspace,
+            check_phase=check_phase)
+            if reuse_generated else None)
         registry = support.build_registry(snapshot.workspace, changes,
             tuple(support.FrozenRaw(r.relative_path, r.raw_id, contents[r.raw_id], r.content_sha256) for r in task.raw),
-            pages=pages, generated=self._managed_sections(snapshot, task), parent_registry=parent_registry,
+            pages=pages, generated=(cached[0] if cached is not None else self._managed_sections(snapshot, task)),
+            parent_registry=parent_registry,
             program_facts=read_facts(), program_facts_readback=read_facts,
             claim_mapping=() if parent_registry is None else tuple(support.ClaimMapping(
                 c.block.claim_id, c.block.path, c.block.position) for c in parent_registry.claims))
+        if cached is not None:
+            _, original, binding_hash = cached
+            if (registry.binding_hash != binding_hash or registry.candidate_hash != original['candidate_hash']
+                    or registry.payload()['documents'] != original['documents']):
+                raise support.WikiSupportError('binding_mismatch')
         client = self.runner.support_client(snapshot, self.runtime_root, task=task,
             registry=registry, model=task.model, effort=task.effort, source_proof=source,
             input_policy=t.APPLICATION_UTF8_POLICY)
@@ -710,7 +732,7 @@ class WikiWorker:
                 batch_no = batch.batch_no
                 if batch.state == 'succeeded':
                     if any(r.relative_path in snapshot.pending_before for r in task.raw if r.batch_no == batch_no):
-                        validated = self._typed_validate(snapshot, task, batch_no)
+                        validated = self._typed_validate(snapshot, task, batch_no, regenerate=False)
                         snapshot = accept_validated_batch(snapshot, validated)
                     continue
                 root = container / 'execution' / f'batch-{batch_no}'
@@ -723,7 +745,7 @@ class WikiWorker:
                     receipt = _checkpoint_read(root / 'validated.json')['receipt_id']
                     task = self._accept_typed(task, batch_no, snapshot, journal, lock,
                         WikiOutcomes(snapshot.control / 'outcomes.sqlite3'), receipt)
-                    validated = self._typed_validate(snapshot, task, batch_no)
+                    validated = self._typed_validate(snapshot, task, batch_no, regenerate=False)
                     snapshot = accept_validated_batch(snapshot, validated)
                     continue
                 if batch.state != 'queued':
@@ -739,7 +761,7 @@ class WikiWorker:
                 if final_phase is not None:
                     saved = _checkpoint_read(final_phase)
                     proposal = saved['proposal'].encode('utf-8')
-                    validated = self._typed_validate(snapshot, task, batch_no)
+                    validated = self._typed_validate(snapshot, task, batch_no, regenerate=False)
                     changes = {c.relative_path: c.after_sha256 for c in validated.changes
                                if c.relative_path.startswith('wiki/') and c.relative_path.endswith('.md')}
                     checked = self._typed_call(task, snapshot, batch_no, saved['check_phase'], lock, source,
@@ -803,7 +825,9 @@ class WikiWorker:
                     while True:
                         try:
                             candidate, receipt = self._typed_candidate(task, snapshot, batch_no, validated,
-                                proposal, checked, source, parent_registry=parent, reservation=reservation)
+                                proposal, checked, source, parent_registry=parent, reservation=reservation,
+                                reuse_generated=final_phase is not None and parent is None and reservation is None,
+                                check_phase=saved['check_phase'] if final_phase is not None else None)
                             break
                         except WikiSupportError:
                             if self._support_failure is None:

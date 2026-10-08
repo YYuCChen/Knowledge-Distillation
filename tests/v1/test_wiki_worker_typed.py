@@ -275,7 +275,172 @@ def test_commit_then_receipt_failure_recovers_without_model_or_republish(world):
     assert tasks.get(task.task_id).batches[0].state == 'succeeded'
     assert (root / 'calls').read_text() == calls
     tasks.retry_failed(task.task_id)
-    assert worker(world).run_one().error_code is None
+    resumed = worker(world)
+    resumed._trusted_kb = lambda *_: pytest.fail('committed recovery must not regenerate staging')
+    assert resumed.run_one().error_code is None
+
+
+@pytest.mark.parametrize('tamper', [None, 'wiki/index.md', 'wiki/待确认.md', 'raw', 'kit_missing', 'kit_drift'])
+def test_final_stage_resume_preserves_dated_candidate_and_rejects_tampering(world, monkeypatch, tamper):
+    root, store, vault, runtime, tasks, task, runner = world
+    first = worker(world)
+    def crash(*_args, **_kwargs):
+        raise SystemExit('controlled crash after final stage, before support')
+    monkeypatch.setattr(first, '_typed_candidate', crash)
+    with pytest.raises(SystemExit):
+        first.run_one()
+    stage = next(runtime.rglob('final-stage-0.json'))
+    batch = stage.parent
+    workspace = next(runtime.rglob('workspace'))
+    cached = {p.name: p.read_bytes() for p in batch.glob('*check*json')}
+    if tamper in {'kit_missing', 'kit_drift'}:
+        from knowledge_distiller.v1 import wiki_worker as worker_module
+        from knowledge_distiller.v1.wiki_kit import WikiKitError
+        def rejected_kit(*_args):
+            raise WikiKitError(tamper)
+        monkeypatch.setattr(worker_module, 'verify_source_kit', rejected_kit)
+    elif tamper:
+        path = workspace / (task.raw[0].relative_path if tamper == 'raw' else tamper)
+        path.write_bytes(path.read_bytes() + '\n未授权正文变更。\n'.encode())
+    before = {p.relative_to(workspace): p.read_bytes() for p in workspace.rglob('*') if p.is_file()}
+    calls = (root / 'calls').read_bytes()
+    resumed = worker(world)
+    # This is the next-day writer that previously ran before cache validation.
+    # Refuse any invocation: even an unchanged page must retain its original
+    # complete bytes, including its dated display and system content.
+    def next_day_writer(*_args):
+        pytest.fail('cached final-stage recovery must not run the dated kit writer')
+    monkeypatch.setattr(resumed, '_trusted_kb', next_day_writer)
+    result = resumed.run_one()
+    assert {p.relative_to(workspace): p.read_bytes() for p in workspace.rglob('*') if p.is_file()} == before
+    assert {p.name: p.read_bytes() for p in batch.glob('*check*json')} == cached
+    with connect(store.path) as db:
+        accepted = db.execute("SELECT count(*) FROM wiki_outcome_receipts WHERE phase='accepted'").fetchone()[0]
+    if tamper:
+        assert result.error_code == 'validation_failed' and accepted == 0
+        assert (root / 'calls').read_bytes() == calls
+    else:
+        assert result.error_code is None and accepted == 1
+
+
+@pytest.mark.parametrize('tamper', [None, 'generated', 'record_hash', 'wiki/index.md', 'wiki/待确认.md'])
+def test_crossday_resume_reuses_only_bound_generated_candidate(world, monkeypatch, tamper):
+    import contextlib
+    import datetime
+    import io
+    from knowledge_distiller.v1 import wiki_kit_runtime as kit_module
+    from knowledge_distiller.v1 import wiki_support as support
+    root, store, vault, runtime, tasks, task, runner = world
+    original = tasks.set_batch_state
+    def crash(task_id, batch_no, state, **kwargs):
+        if state == 'validating':
+            raise SystemExit('controlled crash after app-owned candidate and cached support')
+        return original(task_id, batch_no, state, **kwargs)
+    monkeypatch.setattr(tasks, 'set_batch_state', crash)
+    with pytest.raises(SystemExit):
+        worker(world).run_one()
+    monkeypatch.setattr(tasks, 'set_batch_state', original)
+    workspace = next(runtime.rglob('workspace'))
+    directory = next(runtime.rglob('wiki-support-*'))
+    state = json.loads((directory / 'state.json').read_bytes())['payload']
+    candidate_path = directory / ('candidate-' + state['attempts'][-1]['request_id'] + '.json')
+    candidate_record = json.loads(candidate_path.read_bytes())
+    candidate = candidate_record['payload']
+    saved_hash = candidate['candidate_hash']
+    # Exercise the actual trusted renderer on two calendar days, with no kit
+    # changes and no writes. Only its loaded module's clock label is advanced.
+    real_load = kit_module.runpy.run_path
+    def render(day):
+        def load(*args, **kwargs):
+            module = real_load(*args, **kwargs)
+            module['Vault'].__init__.__globals__['TODAY'] = day.isoformat()
+            return module
+        with monkeypatch.context() as patch:
+            patch.syspath_prepend(str(KIT / 'tools'))
+            patch.setattr(kit_module.runpy, 'run_path', load)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                kit_module._describe_generated(KIT, workspace)
+        return {row[0]: row[2] for row in json.loads(output.getvalue()) if row[1] == '@system'}
+    day_a = datetime.date.today()
+    rendered_a = render(day_a)
+    rendered_b = render(day_a + datetime.timedelta(days=1))
+    for path in ('wiki/index.md', 'wiki/待确认.md'):
+        assert rendered_a[path] == (workspace / path).read_text()
+        assert rendered_b[path] != rendered_a[path]
+    if tamper == 'generated':
+        candidate['generated'][0]['content'] += '\n伪造受管区。\n'
+        # Rehashing an outer record cannot change its bound candidate identity.
+        candidate_record['sha256'] = support._hash(candidate)
+        candidate_path.write_text(json.dumps(candidate_record, ensure_ascii=False))
+    elif tamper == 'record_hash':
+        candidate_record['sha256'] = '0' * 64
+        candidate_path.write_text(json.dumps(candidate_record, ensure_ascii=False))
+    elif tamper:
+        path = workspace / tamper
+        path.write_bytes(path.read_bytes() + '\n未授权正文变更。\n'.encode())
+    before = {p.relative_to(workspace): p.read_bytes() for p in workspace.rglob('*') if p.is_file()}
+    evidence = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+    calls = (root / 'calls').read_bytes()
+    resumed = worker(world)
+    monkeypatch.setattr(resumed, '_trusted_kb', lambda *_: pytest.fail('must not rewrite cached candidate'))
+    monkeypatch.setattr(resumed, '_managed_sections', lambda *_: pytest.fail('must not certify using day B renderer'))
+    result = resumed.run_one()
+    assert (root / 'calls').read_bytes() == calls
+    assert {p.relative_to(workspace): p.read_bytes() for p in workspace.rglob('*') if p.is_file()} == before
+    assert {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()} == evidence
+    with connect(store.path) as db:
+        accepted = db.execute("SELECT count(*) FROM wiki_outcome_receipts WHERE phase='accepted'").fetchone()[0]
+    assert result.error_code == ('validation_failed' if tamper else None)
+    assert accepted == (0 if tamper else 1)
+    if not tamper:
+        assert json.loads(candidate_path.read_bytes())['payload']['candidate_hash'] == saved_hash
+
+
+@pytest.mark.parametrize('world', ['repair'], indirect=True)
+def test_checked_pending_repair_before_gate_candidate_resumes_original_reservation(world, monkeypatch):
+    import datetime
+    root, store, vault, runtime, tasks, task, runner = world
+    # This window is same-day recovery. Keep this synthetic writer's page
+    # dates on the test day so kb cannot introduce an unrelated metadata edit.
+    cli = root / 'controlled-cli'
+    today = datetime.date.today().isoformat()
+    cli.write_text(cli.read_text().replace('创建: 2026-10-08\\n更新: 2026-10-08',
+                                          f'创建: {today}\\n更新: {today}'))
+    first = worker(world)
+    original = first._typed_candidate
+    def crash(*args, **kwargs):
+        if kwargs.get('reservation') is not None:
+            raise SystemExit('checked repair final-stage persisted, child gate candidate not yet written')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(first, '_typed_candidate', crash)
+    with pytest.raises(SystemExit):
+        first.run_one()
+    directory = next(runtime.rglob('wiki-support-*'))
+    state = json.loads((directory / 'state.json').read_bytes())['payload']
+    assert state['used'] == 1 and len(state['attempts']) == 1
+    assert state['repair']['consumed'] is False
+    assert state['repair']['parent_hash'] == state['attempts'][-1]['candidate_hash']
+    token = state['repair']['token']
+    batch = next(runtime.rglob('final-stage-1.json')).parent
+    assert json.loads((batch / 'final-stage-1.json').read_bytes())['check_phase'] == 'repair-1-check'
+    saved = {p.name: p.read_bytes() for p in batch.iterdir() if p.is_file()}
+    workspace = next(runtime.rglob('workspace'))
+    before = {p.relative_to(workspace): p.read_bytes() for p in workspace.rglob('*') if p.is_file()}
+    calls = (root / 'calls').read_text().splitlines()
+    resumed = worker(world)
+    monkeypatch.setattr(resumed, '_trusted_kb', lambda *_: pytest.fail('checked repair must not regenerate'))
+    assert resumed.run_one().error_code is None
+    after = json.loads((directory / 'state.json').read_bytes())['payload']
+    assert after['used'] == 1 and after['repair']['token'] == token and after['repair']['consumed'] is True
+    assert len(after['attempts']) == 2
+    assert len((root / 'calls').read_text().splitlines()) == len(calls) + 1  # only the repaired support review
+    assert not (batch / 'reservation-3.json').exists()
+    assert not list(batch.glob('repair-2-*'))
+    assert all((batch / name).read_bytes() == content for name, content in saved.items())
+    assert {p.relative_to(workspace): p.read_bytes() for p in workspace.rglob('*') if p.is_file()} == before
+    with connect(store.path) as db:
+        assert db.execute("SELECT count(*) FROM wiki_outcome_receipts WHERE phase='accepted'").fetchone()[0] == 1
 
 
 @pytest.mark.parametrize('corrupt,world', [
