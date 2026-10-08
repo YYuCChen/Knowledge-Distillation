@@ -33,6 +33,7 @@ from .zhihu import ZhihuSourceError, zhihu_identity
 from .weibo import WeiboSourceError, weibo_identity
 from .ocr import OcrError, default_ocr_runner
 from .image_source import image_source_fact
+from .raw import LegacySourceVeto
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,10 @@ class Distiller:
         self.documents = documents
 
     def run(self, item_id: int) -> DistillResult:
+        try:
+            self._legacy_gate(item_id)
+        except LegacySourceVeto:
+            return DistillResult(item_id, self._item(item_id)['state'])
         row = self._item(item_id)
         if row["published_path"] is not None:
             self.store.mark_succeeded(item_id)
@@ -94,12 +99,22 @@ class Distiller:
             if row["source_fact_id"] is None:
                 self._establish_source(item_id, row)
             return self._finish(item_id)
+        except LegacySourceVeto:
+            return DistillResult(item_id, self._item(item_id)['state'])
         except SourceReviewConflict:
             return DistillResult(item_id, self._item(item_id)['state'])
         except SourceCopyError:
+            try:
+                self._legacy_gate(item_id)
+            except LegacySourceVeto:
+                return DistillResult(item_id, self._item(item_id)['state'])
             self.store.mark_failed(item_id, self._item(item_id)["phase"], "source_copy_unavailable")
             return DistillResult(item_id, "failed")
         except (OcrError, SourceVersionError, ChromeSessionError, DouyinSourceError, YouTubeSourceError, BilibiliSourceError, XiaohongshuSourceError, XPostSourceError, ZhihuSourceError, WeiboSourceError, KnowledgeModelError, DistillError) as error:
+            try:
+                self._legacy_gate(item_id)
+            except LegacySourceVeto:
+                return DistillResult(item_id, self._item(item_id)['state'])
             if self._item(item_id)["state"] == "waiting_user":
                 return DistillResult(item_id, "waiting_user")
             if isinstance(error, OcrError) and hasattr(error, 'partial_review'):
@@ -130,8 +145,25 @@ class Distiller:
                                    rejection_reason=error.rejection_reason if isinstance(error, KnowledgeModelError) else None)
             return DistillResult(item_id, "failed")
         finally:
-            from .temporary_artifacts import TemporaryArtifacts
-            TemporaryArtifacts(self.store, self.runtime_root).clean_item(item_id)
+            # A qualification/schema refusal preserves retained material.
+            # Do not let this fresh refusal replace an earlier normal error.
+            try:
+                self._legacy_gate(item_id)
+            except LegacySourceVeto:
+                pass
+            else:
+                from .temporary_artifacts import TemporaryArtifacts
+                TemporaryArtifacts(self.store, self.runtime_root).clean_item(item_id)
+
+    def _legacy_gate(self, item_id):
+        import sqlite3
+        from .database import connect
+        from .raw import _legacy_item_gate
+        try:
+            with connect(self.store.path) as db:
+                _legacy_item_gate(db, item_id)
+        except sqlite3.DatabaseError:
+            raise LegacySourceVeto('candidate_schema_rebuild_required') from None
 
     def suggest_candidates(self, item_id: int, *, token: str, concern_id: str = "") -> None:
         row = self._item(item_id)
@@ -843,6 +875,7 @@ class Distiller:
         return DistillResult(item_id, state)
 
     def _establish_source(self, item_id: int, row) -> None:
+        self._legacy_gate(item_id)
         if row["input_kind"] in {"direct_text", "markdown", "pdf", "epub", "image"}:
             self.store.mark_working(item_id, "reviewing")
             review_revision = self._item(item_id)['review_revision']
@@ -1062,6 +1095,7 @@ class Distiller:
                                         stage_result, confirmation=confirmation)
 
     def _finish_partial_source(self, item_id: int, row, pending: dict) -> None:
+        self._legacy_gate(item_id)
         if pending.get('group_confirmation_contract'):
             raise DistillError('group_unresolved_members_require_review')
         # Judge the remaining clear content before freezing an incomplete SourceFact.
@@ -1085,6 +1119,7 @@ class Distiller:
         self._remove_confirmation_audio(item_id, pending["deferred_concerns"])
 
     def _finish(self, item_id: int) -> DistillResult:
+        self._legacy_gate(item_id)
         row = self._item(item_id)
         if row["source_fact_id"] is None:
             return DistillResult(item_id, "waiting_user")
@@ -1094,6 +1129,8 @@ class Distiller:
             try:
                 from .captures import Captures
                 Captures(self.store).write_ready()
+            except LegacySourceVeto:
+                raise
             except Exception as error:
                 import logging
                 logging.getLogger(__name__).warning('capture raw deferred (%s)', type(error).__name__)
@@ -1131,6 +1168,7 @@ class Distiller:
         """The finished material goes to raw/ (raw-interface §5.1) before any
         distillation, so a knowledge failure never keeps it out. A raw failure
         is recorded for backfill and never blocks the V1 note."""
+        self._legacy_gate(row['item_id'])
         try:
             from .raw import RawLedger
             from .captures import Captures
@@ -1139,6 +1177,8 @@ class Distiller:
                                             **Captures(self.store).material_hints(row['item_id']))
             if record is not None and record['written_at'] is None:
                 ledger.write(record, self.vault)
+        except LegacySourceVeto:
+            raise
         except Exception as error:
             import logging
             logging.getLogger(__name__).warning('raw deferred for material %s (%s)',
