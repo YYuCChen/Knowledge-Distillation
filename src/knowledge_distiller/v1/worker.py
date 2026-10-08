@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 
 from .pipeline import Distiller
+from . import raw
 from .store import Store
 
 
@@ -121,7 +122,7 @@ class SingleWorker:
         """Claim and finish while the caller holds the update activity lock."""
         if self._stopping.is_set():
             return None
-        work = self.store.claim_next_work()
+        work = self.store.claim_next_work(item_guard=raw._legacy_item_gate)
         if work is None:
             return None
         kind, item_id = work
@@ -170,6 +171,11 @@ class SingleWorker:
         try:
             service = self.distiller() if callable(self.distiller) else self.distiller
             service.run(item_id)
+        except raw.LegacySourceVeto as error:
+            if error.args != ('local_source_qualification_pending',):
+                raise
+            # A real owner change after claim does not undo that durable claim.
+            logger.info('Item %s legacy qualification deferred', item_id)
         except Exception as error:
             # Isolate one failed item, not a failed database or queue claim.
             # Do not log provider exception text, which may contain private data.

@@ -749,10 +749,13 @@ class Store:
                       'attempt': marker['attempt'] + 1, 'outcome': 'queued'}
             _save_preparation(db, row, pending, 'queued', None, marker)
 
-    def claim_next_work(self):
+    def claim_next_work(self, *, item_guard=None):
+        from .raw import LegacySourceVeto
+        if item_guard is not None and not callable(item_guard):
+            raise TypeError('item_guard must be callable')
         with connect(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("""SELECT * FROM (
+            rows = db.execute("""SELECT * FROM (
                 SELECT 'item' AS kind,item_id AS id,queued_at FROM distill_items i WHERE state='queued'
                   AND NOT EXISTS(SELECT 1 FROM collection_members cm WHERE cm.item_id=i.item_id)
                   AND COALESCE(json_extract(confirmation_json,'$.presentation_preparation.outcome'),'')!='queued'
@@ -761,23 +764,30 @@ class Store:
                   AND json_extract(confirmation_json,'$.presentation_preparation.outcome')='queued'
                 UNION ALL
                 SELECT 'collection',operation_id,queued_at FROM collection_operations WHERE state='queued'
-                ) ORDER BY queued_at,id,kind LIMIT 1""").fetchone()
-            if row is None:
-                return None
-            if row['kind'] == 'presentation':
-                current = db.execute('SELECT * FROM distill_items WHERE item_id=?', (row['id'],)).fetchone()
-                pending, marker = _presentation_owned(db, current, state='queued')
-                from .confirmation_preparation import PROTOCOL, input_binding
-                if (marker.get('protocol') != PROTOCOL or marker.get('input_binding') !=
-                        input_binding(pending, source_descriptor=_preparation_source(db, current))):
-                    _save_preparation(db, current, pending, 'failed', 'review_incomplete',
-                                      {**marker, 'outcome': 'failed', 'code': 'review_incomplete'})
-                    return None
-                _save_preparation(db, current, pending, 'working', None, {**marker, 'outcome': 'running'})
-            else:
-                table,key = ('distill_items','item_id') if row['kind']=='item' else ('collection_operations','operation_id')
-                db.execute(f"UPDATE {table} SET state='working',updated_at=? WHERE {key}=?",(_now(),row['id']))
-            return row['kind'],row['id']
+                ) ORDER BY queued_at,id,kind""")
+            for row in rows:
+                if row['kind'] == 'item' and item_guard is not None:
+                    try:
+                        item_guard(db, row['id'])
+                    except LegacySourceVeto as error:
+                        if error.args != ('local_source_qualification_pending',):
+                            raise
+                        continue
+                if row['kind'] == 'presentation':
+                    current = db.execute('SELECT * FROM distill_items WHERE item_id=?', (row['id'],)).fetchone()
+                    pending, marker = _presentation_owned(db, current, state='queued')
+                    from .confirmation_preparation import PROTOCOL, input_binding
+                    if (marker.get('protocol') != PROTOCOL or marker.get('input_binding') !=
+                            input_binding(pending, source_descriptor=_preparation_source(db, current))):
+                        _save_preparation(db, current, pending, 'failed', 'review_incomplete',
+                                          {**marker, 'outcome': 'failed', 'code': 'review_incomplete'})
+                        return None
+                    _save_preparation(db, current, pending, 'working', None, {**marker, 'outcome': 'running'})
+                else:
+                    table,key = ('distill_items','item_id') if row['kind']=='item' else ('collection_operations','operation_id')
+                    db.execute(f"UPDATE {table} SET state='working',updated_at=? WHERE {key}=?",(_now(),row['id']))
+                return row['kind'],row['id']
+            return None
 
     def claim_next_item(self) -> int | None:
         with connect(self.path) as connection:
