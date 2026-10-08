@@ -12,11 +12,11 @@ import yaml
 
 from . import raw
 from .captures import Captures
-from .database import connect, INGESTION_CONTRACT
+from .database import connect, INGESTION_CONTRACT, RAW_OWNER_COLUMNS, RAW_TERMINAL_TRIGGERS
 from .wiki_lock import VaultWriteLock, session_fd_holds_lock
 
 CONTRACT = INGESTION_CONTRACT
-RESERVED_SCHEMA_VERSION = 24  # unreleased candidate; old candidate24 roots rebuilt
+RESERVED_SCHEMA_VERSION = 25  # explicit migration; no implicit guard replacement
 
 
 class IngestionError(ValueError):
@@ -215,6 +215,118 @@ class Ingestion:
             return [tuple(row) for row in db.execute(
                 "SELECT kind,binding_sha256,detail_json FROM ingestion_events WHERE subject_kind=? AND subject_id=? ORDER BY event_id",
                 (kind, int(subject_id)))]
+
+    def _terminal_owner(self, db, item_id, subject_kind, subject_id, expected_revision):
+        row = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+        if row is None or row['review_revision'] != expected_revision:
+            raise IngestionError('raw_terminal_stale')
+        if (row['ingestion_contract'] != CONTRACT or row['material_id'] is None
+                or row['confirmation_json'] is not None or row['dismissed_at'] is not None
+                or row['error_code'] is not None or row['rejection_reason'] is not None
+                or not row['source_binding_sha256'] or not row['relation_binding_sha256']
+                or not ((row['state'] == 'working' and row['phase'] in {'collecting', 'reviewing'})
+                        or (row['state'] == 'raw_saved' and row['phase'] == 'done'))):
+            raise IngestionError('raw_terminal_owner_pending')
+        if (db.execute('SELECT 1 FROM collection_members WHERE item_id=?', (item_id,)).fetchone()
+                or db.execute('SELECT count(*) FROM distill_items WHERE material_id=?',
+                              (row['material_id'],)).fetchone()[0] != 1
+                or db.execute('SELECT count(*) FROM capture_state WHERE item_id=?', (item_id,)).fetchone()[0] > 1):
+            raise IngestionError('raw_terminal_owner_ambiguous')
+        if subject_kind == 'material':
+            if row['material_id'] != subject_id:
+                raise IngestionError('raw_terminal_subject_mismatch')
+        else:
+            capture = self.captures.get(subject_id)
+            decision = self.captures.identity(subject_id) if capture else None
+            if (capture is None or capture['item_id'] != item_id or capture['message_type'] != 'audio'
+                    or decision is None or decision['result'] not in {'my_thought', 'annotation'}):
+                raise IngestionError('raw_terminal_capture_pending')
+        return {key: row[key] for key in RAW_OWNER_COLUMNS}
+
+    def complete_raw_owner(self, item_id: int, vault: Path, *, subject_kind: str,
+                           subject_id: int, expected_revision: int) -> RawReceipt:
+        """Explicit backend-only writer terminal; no knowledge, release or UI caller.
+
+        A queued owner must first be claimed through the original FIFO. A replay
+        requires the current revision and fresh bytes, never a previous receipt.
+        """
+        if (type(item_id) is not int or item_id <= 0 or type(subject_id) is not int or subject_id <= 0
+                or type(expected_revision) is not int or expected_revision < 0 or type(subject_kind) is not str
+                or subject_kind not in {'material', 'capture'}):
+            raise IngestionError('raw_terminal_input_invalid')
+        self.initialize()
+        with connect(self.path) as db:
+            guards = dict(db.execute("SELECT name,sql FROM sqlite_schema WHERE name LIKE 'distill_items_raw_terminal_%'"))
+            expected = {s.split()[2]: s for s in RAW_TERMINAL_TRIGGERS}
+            if db.execute('PRAGMA user_version').fetchone()[0] != 25 or guards != expected:
+                raise IngestionError('raw_terminal_schema_required')
+        if not Path(vault).is_dir():
+            raise IngestionError('vault_unavailable')
+        with VaultWriteLock.acquire(vault) as lock:
+            with connect(self.path) as db:
+                owner = self._terminal_owner(db, item_id, subject_kind, subject_id, expected_revision)
+            # Capture the full source/relation state before the writer can assign
+            # a raw head. Exclude heads only for this pre-assignment comparison.
+            with connect(self.path) as db:
+                before_source = self._source_state(db, subject_kind, subject_id, heads_required=False)
+            def without_heads(value):
+                # Only this subject can acquire its first head. Nested material
+                # and relationship heads remain part of the source CAS.
+                return {k: v for k, v in value.items() if k != 'heads'}
+            def source_hash(value):
+                return digest(b'raw-terminal-source-v1\0' + encoded(without_heads(value)).encode())
+            source_snapshot = source_hash(before_source)
+            if owner['state'] != 'raw_saved':
+                if subject_kind == 'material':
+                    self._material(subject_id, lock.vault, item_id=item_id, lock=lock)
+                else:
+                    self._capture(subject_id, lock.vault, lock)
+            with connect(self.path) as db:
+                db.execute('PRAGMA synchronous=FULL')
+                db.execute('BEGIN IMMEDIATE')
+                current = self._terminal_owner(db, item_id, subject_kind, subject_id, expected_revision)
+                if current != owner:
+                    raise IngestionError('raw_terminal_stale')
+                source = self._source_state(db, subject_kind, subject_id)
+                if (source_hash(source) != source_snapshot
+                        or (before_source['heads'] and source['heads'] != before_source['heads'])):
+                    raise IngestionError('source_binding_changed')
+                record = db.execute('SELECT * FROM raw_records WHERE raw_id=?',
+                                    (source['heads'][0]['raw_id'],)).fetchone()
+                binding = self._binding(db, record, item_id)
+                # This performs current context and every attachment readback
+                # even when an identical raw_verified event already exists.
+                receipt = self._insert_proven(db, record, item_id, 'raw_verified', binding, lock)
+                if (not isinstance(receipt, RawReceipt) or receipt.raw_id != record['raw_id']
+                        or receipt.source_version != binding or receipt.subject_kind != subject_kind
+                        or receipt.subject_id != subject_id or receipt.content_sha256 != record['content_sha256']):
+                    raise IngestionError('raw_terminal_proof_invalid')
+                if (self._terminal_owner(db, item_id, subject_kind, subject_id, expected_revision) != owner
+                        or self._binding(db, record, item_id) != binding
+                        or source_hash(self._source_state(db, subject_kind, subject_id)) != source_snapshot):
+                    raise IngestionError('raw_terminal_stale')
+                if owner['state'] == 'raw_saved':
+                    return receipt
+                capability = (item_id, expected_revision, 'raw_saved', 'done')
+                db.create_function('ingestion_raw_terminal', 4, lambda *args: int(
+                    args == capability and db.in_transaction and session_fd_holds_lock(lock.vault, lock.descriptor)))
+                try:
+                    # All original columns participate, not only the source hash
+                    # which intentionally excludes workflow state/revision.
+                    predicate = ' AND '.join(f'"{key}" IS ?' for key in RAW_OWNER_COLUMNS)
+                    changed = db.execute(f"""UPDATE distill_items SET state='raw_saved',phase='done',updated_at=?
+                        WHERE {predicate}""", (datetime.now(UTC).isoformat(), *(owner[k] for k in RAW_OWNER_COLUMNS))).rowcount
+                    if changed != 1:
+                        raise IngestionError('raw_terminal_stale')
+                finally:
+                    db.create_function('ingestion_raw_terminal', 4, lambda *_: 0)
+                final = dict(db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone())
+                if (final['state'] != 'raw_saved' or final['phase'] != 'done'
+                        or final['review_revision'] != expected_revision + 1
+                        or any(final[k] != owner[k] for k in RAW_OWNER_COLUMNS
+                               if k not in {'state', 'phase', 'updated_at', 'review_revision'})):
+                    raise IngestionError('raw_terminal_commit_invalid')
+                return receipt
 
     def _owner(self, material_id, item_id=None):
         with connect(self.path) as db:

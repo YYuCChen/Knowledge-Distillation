@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import sqlite3
+import hashlib
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 INGESTION_CONTRACT = 'raw-verified-v1'
 # These are process bindings, not filesystem verification certificates.
 INGESTION_COLUMNS = (
@@ -178,6 +180,7 @@ def connect(path: Path, *, timeout: float = 5) -> Iterator[sqlite3.Connection]:
     # transaction-local predicates only after locked readback and binding CAS.
     connection.create_function('ingestion_proof', 3, lambda *_: 0)
     connection.create_function('ingestion_release', 4, lambda *_: 0)
+    connection.create_function('ingestion_raw_terminal', 4, lambda *_: 0)
     try:
         yield connection
         connection.commit()
@@ -192,7 +195,7 @@ def initialize(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as connection:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version < 10 or version == 22:
+        if version < 25:
             # A parent-table rebuild preserves all ids. Disable enforcement only
             # for this migration connection; check every FK before atomic commit.
             connection.execute("PRAGMA foreign_keys = OFF")
@@ -224,7 +227,7 @@ def initialize(path: Path) -> None:
             connection.execute(SUBMITTED_SCHEMA)
             connection.execute("ALTER TABLE source_facts ADD COLUMN lineage_json TEXT NOT NULL DEFAULT '{}'")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, SCHEMA_VERSION):
+        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, SCHEMA_VERSION):
             raise RuntimeError(f"unsupported database version: {version}")
 
         if version < 6:
@@ -440,6 +443,160 @@ def initialize(path: Path) -> None:
             if connection.execute('PRAGMA foreign_key_check').fetchone() is not None:
                 raise RuntimeError('database migration found broken ingestion references')
             connection.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
+
+        if version < 25:
+            if not connection.in_transaction:
+                connection.execute('BEGIN IMMEDIATE')
+            migrate_v25(connection)
+            connection.execute('PRAGMA user_version = 25')
+            connection.commit()
+            connection.execute('PRAGMA foreign_keys = ON')
+            if connection.execute('PRAGMA foreign_keys').fetchone()[0] != 1:
+                # Commit already happened: do not claim a post-commit failure restored 24.
+                raise RuntimeError('raw terminal migration committed; FK re-enable failed')
+
+
+RAW_OWNER_COLUMNS = (
+    'item_id', 'submitted_url', 'state', 'phase', 'material_id', 'error_code',
+    'rejection_reason', 'dismissed_at', 'confirmation_json', 'queued_at',
+    'created_at', 'updated_at', 'platform_authority_json', 'submitted_title',
+    'review_revision', 'ingestion_contract', 'source_binding_sha256', 'relation_binding_sha256',
+)
+# Source-audited parent dependents; no guessed SQL dependency rewriting.
+RAW_PARENT_TRIGGERS = frozenset((
+    'distill_review_revision', 'distill_items_ingestion_binding_immutable',
+    'distill_items_ingestion_binding_required', 'distill_items_ingestion_owner_immutable',
+    'distill_items_ingestion_no_delete', 'collection_members_ingestion_contract_match',
+    'ingestion_events_observation_typed', 'source_media_no_update',
+    'source_media_ingestion_no_update', 'source_media_ingestion_no_delete',
+    'submitted_sources_ingestion_no_release', 'submitted_sources_ingestion_no_delete',
+    'submitted_sources_ingestion_owner_immutable', 'source_media_ingestion_capture_binding',
+    'source_media_ingestion_capture_release', 'source_media_ingestion_capture_no_delete',
+))
+RAW_PARENT_CHILDREN = frozenset((
+    'submitted_sources', 'confirmation_decisions', 'source_review_results',
+    'collection_members', 'manual_cards', 'group_decisions', 'capture_state',
+    'feishu_parts', 'ingestion_events',
+))
+RAW_TERMINAL_TRIGGERS = (
+    """CREATE TRIGGER distill_items_raw_terminal_no_insert
+        BEFORE INSERT ON distill_items WHEN NEW.state='raw_saved'
+        BEGIN SELECT RAISE(ABORT,'raw terminal writer required'); END""",
+    """CREATE TRIGGER distill_items_raw_terminal_proof
+        BEFORE UPDATE ON distill_items WHEN NEW.state='raw_saved' AND OLD.state!='raw_saved'
+        AND (OLD.state!='working' OR OLD.phase NOT IN ('collecting','reviewing')
+            OR NEW.phase!='done' OR NEW.ingestion_contract!='raw-verified-v1'
+            OR NEW.confirmation_json IS NOT NULL OR NEW.dismissed_at IS NOT NULL
+            OR NEW.material_id IS NULL OR NEW.source_binding_sha256 IS NULL
+            OR NEW.relation_binding_sha256 IS NULL
+            OR ingestion_raw_terminal(OLD.item_id,OLD.review_revision,NEW.state,NEW.phase)!=1)
+        BEGIN SELECT RAISE(ABORT,'raw terminal proof unavailable'); END""",
+    """CREATE TRIGGER distill_items_raw_terminal_no_reopen
+        BEFORE UPDATE OF state,phase ON distill_items WHEN OLD.state='raw_saved'
+        AND (NEW.state IS NOT OLD.state OR NEW.phase IS NOT OLD.phase)
+        BEGIN SELECT RAISE(ABORT,'raw terminal is durable'); END""",
+)
+
+
+def _quoted(identifier):
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _migration_inventory(db):
+    """Full typed-row/FK inventory, including wiki/observation/ownership domains."""
+    result = {}
+    for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name").fetchall():
+        table = row[0]
+        columns = tuple(tuple(r) for r in db.execute(f'PRAGMA table_xinfo({_quoted(table)})'))
+        names = ','.join(_quoted(c[1]) for c in columns)
+        types = ','.join(f'typeof({_quoted(c[1])})' for c in columns)
+        digest = hashlib.sha256(b'raw-terminal-migration-v1\0')
+        count = 0
+        for values in db.execute(f'SELECT rowid,{names},{types} FROM {_quoted(table)} ORDER BY rowid'):
+            payload = repr(tuple(values)).encode('utf-8')
+            digest.update(len(payload).to_bytes(8, 'big'))
+            digest.update(payload)
+            count += 1
+        fks = tuple(tuple(r) for r in db.execute(f'PRAGMA foreign_key_list({_quoted(table)})'))
+        indexes = tuple(tuple(r) for r in db.execute(f'PRAGMA index_list({_quoted(table)})'))
+        result[table] = (columns, count, digest.hexdigest(), fks, indexes)
+    return result
+
+
+def _check_v25_preservation(db, before, catalog, parent_sql):
+    if _migration_inventory(db) != before:
+        raise RuntimeError('raw terminal migration changed old data or references')
+    after = {tuple(r[:2]): tuple(r[2:]) for r in db.execute(
+        'SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name')}
+    for key, value in catalog.items():
+        if key != ('table', 'distill_items') and after.get(key) != value:
+            raise RuntimeError('raw terminal migration changed old schema object')
+    actual = after[('table', 'distill_items')][1]
+    # SQLite quotes the final name during ALTER TABLE RENAME; no other rewrite allowed.
+    expected = parent_sql.replace('CREATE TABLE distill_items', 'CREATE TABLE "distill_items"', 1)
+    if actual != expected or set(after) - set(catalog) != {
+            ('trigger', statement.split()[2]) for statement in RAW_TERMINAL_TRIGGERS}:
+        raise RuntimeError('raw terminal migration unexpected DDL')
+    if db.execute('PRAGMA foreign_key_check').fetchone() is not None:
+        raise RuntimeError('raw terminal migration broken references')
+    if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+        raise RuntimeError('raw terminal migration integrity failed')
+
+
+def migrate_v25(db):
+    """Atomic parent rebuild only; preserve legacy rows, guards and all source bytes."""
+    if not db.in_transaction or db.execute('PRAGMA foreign_keys').fetchone()[0] != 0:
+        raise RuntimeError('raw terminal migration connection required')
+    catalog = {tuple(r[:2]): tuple(r[2:]) for r in db.execute(
+        'SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name')}
+    if any(name == 'distill_items_v25' for _, name in catalog):
+        raise RuntimeError('raw terminal migration reserved name collision')
+    before = _migration_inventory(db)
+    columns = before['distill_items'][0]
+    if len(columns) != 18 or {c[1] for c in columns} != set(RAW_OWNER_COLUMNS) or any(c[6] for c in columns):
+        raise RuntimeError('raw terminal migration unsupported parent columns')
+    parent = catalog[('table', 'distill_items')][1]
+    if not parent.startswith('CREATE TABLE distill_items (') or not parent.rstrip().endswith(')'):
+        raise RuntimeError('raw terminal migration unsupported parent DDL')
+    state_check = re.compile(r"state IN \(\s*'queued',\s*'working',\s*'waiting_user',\s*'succeeded',\s*'failed'\s*\)")
+    parent, changes = state_check.subn("state IN ('queued','working','waiting_user','succeeded','failed','raw_saved')", parent)
+    if changes != 1:
+        raise RuntimeError('raw terminal migration unsupported state CHECK')
+    parent = parent.rstrip()[:-1] + ", CHECK(state!='raw_saved' OR (phase='done' AND ingestion_contract='raw-verified-v1')))"
+    dependents = {}
+    incoming = set()
+    for table, (_, _, _, fks, _) in before.items():
+        for fk in fks:
+            if fk[2] == 'distill_items':
+                if fk[3:7] != ('item_id', 'item_id', 'NO ACTION', 'NO ACTION'):
+                    raise RuntimeError('raw terminal migration unsupported incoming FK')
+                incoming.add(table)
+    if incoming != RAW_PARENT_CHILDREN or before['distill_items'][4]:
+        raise RuntimeError('raw terminal migration unsupported parent references or indexes')
+    if before['distill_items'][3] != ((0, 0, 'materials', 'material_id', 'material_id',
+                                      'NO ACTION', 'NO ACTION', 'NONE'),):
+        raise RuntimeError('raw terminal migration unsupported outgoing FK')
+    for (kind, name), (table, sql) in catalog.items():
+        if kind in ('trigger', 'view', 'index') and (table == 'distill_items' or
+                (sql and re.search(r'\bdistill_items\b', sql, re.IGNORECASE))):
+            if kind != 'trigger' or name not in RAW_PARENT_TRIGGERS:
+                raise RuntimeError('raw terminal migration unsupported dependent object')
+            dependents[name] = sql
+    if set(dependents) != RAW_PARENT_TRIGGERS:
+        raise RuntimeError('raw terminal migration missing parent guards')
+    db.execute(parent.replace('CREATE TABLE distill_items', 'CREATE TABLE distill_items_v25', 1))
+    names = ','.join(_quoted(c[1]) for c in columns)
+    db.execute(f'INSERT INTO distill_items_v25({names}) SELECT {names} FROM distill_items')
+    # Only this migration connection has FK enforcement disabled. No ordinary guard bypass.
+    for name in sorted(dependents):
+        db.execute(f'DROP TRIGGER {_quoted(name)}')
+    db.execute('DROP TABLE distill_items')
+    db.execute('ALTER TABLE distill_items_v25 RENAME TO distill_items')
+    for name in sorted(dependents):
+        db.execute(dependents[name])
+    for statement in RAW_TERMINAL_TRIGGERS:
+        db.execute(statement)
+    _check_v25_preservation(db, before, catalog, parent)
 
 
 def migrate_v24(connection: sqlite3.Connection) -> None:
