@@ -22,6 +22,8 @@ from .wiki_support import CATEGORIES as _SUPPORT_CATEGORIES, FIELDS as _SUPPORT_
 CONTRACT = 'r08-wiki-outcomes-v1'
 CHECK_CONTRACT = 'r08-no-knowledge-check-v1'
 SUPPORT_CONTRACT = 'r14-typed-support-v1'
+APPLICATION_UTF8_POLICY = 'application_utf8_v1'
+EXACT_TOKEN_POLICY = 'exact_tokens_v1'
 STDOUT_LIMIT = 8 * 1024 * 1024
 LINE_LIMIT = 256 * 1024
 STDERR_LIMIT = 256 * 1024
@@ -44,7 +46,8 @@ class TypedError(ValueError):
                    'typed_path_invalid', 'source_proof_unavailable', 'input_budget_unavailable',
                    'group_over_budget', 'agent_failed', 'interrupted', 'runner_output_limit',
                    'runner_timeout', 'config_required', 'model_unavailable',
-                   'runner_unavailable', 'vault_busy'}
+                   'runner_unavailable', 'vault_busy', 'input_policy_invalid',
+                   'context_limit_observed', 'context_compaction_observed'}
         super().__init__(code if type(code) is str and code in allowed else 'typed_input_invalid')
 
 
@@ -54,6 +57,7 @@ class TypedRunnerResult:
     usage: tuple[tuple[str, int], ...] = ()
     final_bytes: bytes | None = None
     final_sha256: str | None = None
+    input_binding: InputBinding | None = None
 
     @property
     def succeeded(self):
@@ -291,6 +295,11 @@ def _file_key(info):
 
 def read_final(directory, name, *, limit=FINAL_LIMIT, private=True):
     """Bounded ordinary-file read; only frozen input reads may allow 0644."""
+    return _read_regular(directory, name, limit=limit, private=private)
+
+
+def _read_regular(directory, name, *, limit, private, digest_only=False):
+    """Shared FD/identity contract; hash mode keeps only one bounded chunk."""
     if type(name) is not str or name in {'', '.', '..'} or any(c in name for c in '/\\:\x00'):
         raise TypedError('typed_path_invalid')
     root = _directory(directory)
@@ -300,6 +309,10 @@ def read_final(directory, name, *, limit=FINAL_LIMIT, private=True):
     if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
             or (private and stat.S_IMODE(info.st_mode) & 0o077)):
         raise TypedError('typed_output_invalid')
+    if limit is None:
+        if not digest_only:
+            raise TypedError('typed_input_invalid')
+        limit = info.st_size  # Continuous growth cannot extend the read bound.
     if info.st_size > limit:
         raise TypedError('runner_output_limit')
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -307,19 +320,22 @@ def read_final(directory, name, *, limit=FINAL_LIMIT, private=True):
         held = os.fstat(fd)
         if not stat.S_ISREG(held.st_mode) or _file_key(held) != _file_key(info):
             raise TypedError('typed_output_invalid')
-        chunks, size = [], 0
+        chunks, size, hasher = [], 0, hashlib.sha256()
         while True:
             chunk = os.read(fd, min(65536, limit + 1 - size))
             if not chunk:
                 break
-            chunks.append(chunk)
+            if digest_only:
+                hasher.update(chunk)
+            else:
+                chunks.append(chunk)
             size += len(chunk)
             if size > limit:
                 raise TypedError('runner_output_limit')
         if (_file_key(os.fstat(fd)) != _file_key(info) or _file_key(path.lstat()) != _file_key(info)
                 or any((p.lstat().st_dev, p.lstat().st_ino, p.lstat().st_mode) != key for p, key in parents)):
             raise TypedError('typed_output_invalid')
-        return b''.join(chunks)
+        return (hasher.hexdigest(), size) if digest_only else b''.join(chunks)
     finally:
         os.close(fd)
 
@@ -376,17 +392,89 @@ def require_budget(prompt, schema, measure):
     return version, count, budget
 
 
+@dataclass(frozen=True)
+class InputBinding:
+    """Independent exact application-byte hashes; no self-hashing prompt.
+
+    count/limit have the explicit unit. Bytes branch has no tokenizer identity.
+    Tokens branch additionally keeps genuine capability measurement. This host
+    transport binding does not add fields to the existing model envelopes.
+    """
+    policy: str
+    unit: str
+    count: int
+    limit: int
+    tokenizer_version: str | None
+    prompt_bytes: int
+    prompt_sha256: str
+    schema_bytes: int
+    schema_sha256: str
+    max_application_input_bytes: int
+
+
+def validate_input_policy(input_policy, measure, max_application_input_bytes):
+    if (type(max_application_input_bytes) is not int
+            or not 0 < max_application_input_bytes <= INPUT_LIMIT
+            or (input_policy is not None and type(input_policy) is not str)
+            or input_policy not in (None, APPLICATION_UTF8_POLICY, EXACT_TOKEN_POLICY)):
+        raise TypedError('input_policy_invalid')
+    if input_policy == APPLICATION_UTF8_POLICY:
+        if measure is not None:
+            raise TypedError('input_policy_invalid')
+    elif max_application_input_bytes != INPUT_LIMIT:
+        raise TypedError('input_policy_invalid')
+
+
+def admit_input(prompt, schema, measure, *, input_policy=None,
+                max_application_input_bytes=INPUT_LIMIT, schema_bytes=None):
+    """Exact FULL stdin + independent encoded schema, before model probe/spawn.
+
+    application_utf8_v1 proves only application bytes, not CLI internal tools,
+    instructions, remote tokens/context or invisible server compaction.
+    None policy retains the exact-measure requirement; never a byte fallback.
+    """
+    validate_input_policy(input_policy, measure, max_application_input_bytes)
+    if type(prompt) is not bytes:
+        raise TypedError('typed_input_invalid')
+    try:
+        prompt.decode('utf-8', errors='strict')
+        canonical = encoded(schema)
+    except (UnicodeError, TypeError, ValueError):
+        raise TypedError('typed_input_invalid') from None
+    if schema_bytes is not None and (type(schema_bytes) is not bytes or schema_bytes != canonical):
+        raise TypedError('typed_binding_invalid')
+    total = len(prompt) + len(canonical)
+    if total > max_application_input_bytes:
+        raise TypedError('typed_input_limit')
+    if input_policy == APPLICATION_UTF8_POLICY:
+        policy, unit, count, limit, version = input_policy, 'utf8_bytes', total, max_application_input_bytes, None
+    else:
+        version, count, limit = require_budget(prompt, schema, measure)
+        policy, unit = EXACT_TOKEN_POLICY, 'tokens'
+    return InputBinding(policy, unit, count, limit, version, len(prompt), digest(prompt),
+                        len(canonical), digest(canonical), max_application_input_bytes)
+
+
 def _input_bytes(root, relative, limit):
-    if (type(relative) is not str or any(c in relative for c in '\\:\x00')
-            or any(p in {'', '.', '..'} for p in relative.split('/'))):
-        raise TypedError('typed_path_invalid')
-    path = root / relative
+    path = _input_path(root, relative)
     try:
         return read_final(path.parent, path.name, limit=limit, private=False)
     except TypedError as error:
         if str(error) == 'runner_output_limit':
             raise TypedError('typed_input_limit') from None
         raise
+
+
+def _input_path(root, relative):
+    if (type(relative) is not str or any(c in relative for c in '\\:\x00')
+            or any(p in {'', '.', '..'} for p in relative.split('/'))):
+        raise TypedError('typed_path_invalid')
+    return root / relative
+
+
+def _input_digest(root, relative):
+    path = _input_path(root, relative)
+    return _read_regular(path.parent, path.name, limit=None, private=False, digest_only=True)
 
 
 def freeze_input(task, snapshot, batch_no, source_proof, *, runtime_root):
@@ -486,7 +574,7 @@ class SupportInput:
     candidate_sha256: str
     prompt: bytes
     model_config_hash: str
-    measurement: tuple
+    measurement: InputBinding
 
 
 def _support_bytes(value):
@@ -501,7 +589,8 @@ def _support_bytes(value):
     return bytes(output)
 
 
-def freeze_support(task, snapshot, registry, source_proof, measure, *, runtime_root, model, effort):
+def freeze_support(task, snapshot, registry, source_proof, measure, *, runtime_root, model, effort,
+                   input_policy=None, max_application_input_bytes=INPUT_LIMIT):
     """Trusted caller admission before constructing/reviewing an R14 Gate.
 
     Reads EVERY task raw and the whole current tree. Snapshot before hashes
@@ -515,7 +604,8 @@ def freeze_support(task, snapshot, registry, source_proof, measure, *, runtime_r
     from dataclasses import asdict
     if source_proof is None:
         raise TypedError('source_proof_unavailable')
-    if measure is None:
+    validate_input_policy(input_policy, measure, max_application_input_bytes)
+    if measure is None and input_policy != APPLICATION_UTF8_POLICY:
         raise TypedError('input_budget_unavailable')
     if os.name != 'posix':
         raise TypedError('runner_unavailable')
@@ -546,17 +636,12 @@ def freeze_support(task, snapshot, registry, source_proof, measure, *, runtime_r
     changes = {c.path: c for c in registry.changes}
     if len(changes) != len(registry.changes) or set(baseline) - set(paths):
         raise TypedError('typed_coverage_invalid')
-    current, changed, total = [], set(), 0
+    current, changed = [], set()
     for path in sorted(paths):
-        size = (snapshot.workspace / path).lstat().st_size
-        total += size
-        if total > INPUT_LIMIT:
-            raise TypedError('typed_input_limit')
-        content = _input_bytes(snapshot.workspace, path, size)
-        sha = digest(content)
-        current.append({'path': path, 'sha256': sha, 'byte_count': len(content)})
+        sha, size = _input_digest(snapshot.workspace, path)
+        current.append({'path': path, 'sha256': sha, 'byte_count': size})
         old = baseline.get(path)
-        differs = old is None or old.sha256 != sha or old.byte_count != len(content)
+        differs = old is None or old.sha256 != sha or old.byte_count != size
         if differs and path.startswith('wiki/'):
             if not path.endswith('.md'):
                 raise TypedError('typed_path_invalid')
@@ -565,6 +650,7 @@ def freeze_support(task, snapshot, registry, source_proof, measure, *, runtime_r
             raise TypedError('typed_binding_invalid')
         change = changes.get(path)
         if change is not None:
+            content = _input_bytes(snapshot.workspace, path, min(size, INPUT_LIMIT))
             if change.after != content or change.after_sha256 != sha:
                 raise TypedError('typed_binding_invalid')
             if old is None:
@@ -598,7 +684,8 @@ def freeze_support(task, snapshot, registry, source_proof, measure, *, runtime_r
               'The envelope wraps the original checks; no tools or edits.\n').encode() + _support_bytes({
                   'binding': binding, 'registry_sha256': registry_sha,
                   'candidate_sha256': registry.candidate_hash, 'inputs': payload})
-    measurement = require_budget(prompt, SUPPORT_SCHEMA, measure)
+    measurement = admit_input(prompt, SUPPORT_SCHEMA, measure, input_policy=input_policy,
+                              max_application_input_bytes=max_application_input_bytes)
     # Policy identity excludes candidate/prompt/input hash and measured count.
     # 8192 is Gate request policy, NOT a Codex CLI hard output token limit.
     policy = {'contract': SUPPORT_CONTRACT, 'schema': SUPPORT_SCHEMA,
@@ -606,7 +693,9 @@ def freeze_support(task, snapshot, registry, source_proof, measure, *, runtime_r
               'input_byte_limit': INPUT_LIMIT, 'final_byte_limit': FINAL_LIMIT,
               'r14_versions': [CONTRACT_VERSION, EXTRACTOR_VERSION, RECOVERY_VERSION],
               'system_sha256': digest(SYSTEM.encode()), 'model': model, 'effort': effort,
-              'tokenizer_version': measurement[0], 'max_tokens': 8192,
+              'tokenizer_version': measurement.tokenizer_version, 'max_tokens': 8192,
+              'input_policy': measurement.policy, 'measurement_unit': measurement.unit,
+              'max_application_input_bytes': measurement.max_application_input_bytes,
               'source_boundary': {'task_id': task.task_id, 'attempt_id': snapshot.task_root.name,
                   'boundary_sha256': task.boundary_sha256, 'task_raw': payload['task_raw'],
                   'baseline': payload['baseline'],
@@ -635,6 +724,42 @@ def parse_support(content, prepared, registry):
     return unwrapped
 
 
+def _observable_failure(event):
+    """Only structural event discriminants, NEVER words inside source/text.
+
+    Exec error/turn.failed shapes and candidate App Server event shapes are
+    explicit fixtures, not proof that installed exec exposes all compaction.
+    Unknown remote errors are fixed failures; no message text is retained.
+    """
+    if type(event) is not dict:
+        return None
+    kind = event.get('type') or event.get('method')
+    if type(kind) is not str:
+        return None
+    item = event.get('item')
+    if kind in ('item/started', 'item/completed'):
+        params = event.get('params')
+        item = params.get('item') if type(params) is dict else None
+    item_kind = item.get('type') if type(item) is dict else None
+    if (kind in ('context_compaction', 'context.compacted', 'thread.compacted', 'thread/compacted')
+            or (kind in ('item.started', 'item.completed', 'item/started', 'item/completed')
+                and item_kind in ('context_compaction', 'contextCompaction'))):
+        return 'context_compaction_observed'
+    error = event.get('error')
+    if kind == 'error' and type(event.get('params')) is dict:
+        error = event['params'].get('error')
+    code = (error.get('codexErrorInfo') or error.get('code')) if type(error) is dict else None
+    if (kind in ('context_window_exceeded', 'context_length_exceeded')
+            or (kind in ('error', 'turn.failed')
+                and code in ('context_window_exceeded', 'context_length_exceeded', 'contextWindowExceeded',
+                             'sessionBudgetExceeded'))):
+        return 'context_limit_observed'
+    if (kind in ('error', 'turn.failed')
+            or (kind in ('item.started', 'item.completed') and item_kind == 'error')):
+        return 'agent_failed'
+    return None
+
+
 def pump(process, prompt, final, *, timeout, cancelled, terminate):
     """Nonblocking POSIX pipe pump; bounded memory and no communicate()."""
     deadline = time.monotonic() + timeout
@@ -644,6 +769,13 @@ def pump(process, prompt, final, *, timeout, cancelled, terminate):
     def consume_line(data):
         from .codex import _usage
         try:
+            try:
+                event = json.loads(data)
+            except (ValueError, UnicodeError):
+                event = None
+            failure = _observable_failure(event)
+            if failure is not None:
+                raise TypedError(failure)
             usage.update(_usage(data.decode('utf-8')))
         except RecursionError:
             raise TypedError('agent_failed') from None
