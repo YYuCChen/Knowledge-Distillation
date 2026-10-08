@@ -76,6 +76,61 @@ def audio_required(pending, source_descriptor):
         or source_descriptor.get('source_modality') != 'text')
 
 
+def _human_unresolved_member(pending, member):
+    """Accept only a retained unable decision reopened from its deferred member.
+
+    Legacy uncertainties have no UID. Match their unique exact human span, then
+    check the deferred member's inherited identity; never invent a UID or make
+    the marker a recognized candidate. Actual audio evidence remains required.
+    """
+    if member['text'] != '[听辨不清]' or member['text'] in member['candidates']:
+        return False
+    span = [member['start'], member['end']]
+    original = member.get('original_span')
+    if (not isinstance(original, list) or len(original) != 2
+            or any(type(v) is not int for v in original)
+            or not 0 <= original[0] < original[1]
+            or member.get('current_span') != span
+            or any(not isinstance(pending.get(k), str) or not pending[k]
+                   or member.get(k) != pending[k]
+                   for k in ('source_version_id', 'original_review_hash'))):
+        return False
+    deferred = pending.get('deferred_concerns')
+    uncertainties = pending.get('uncertainties')
+    if (not isinstance(deferred, list) or not isinstance(uncertainties, list)
+            or any(not isinstance(c, dict) for c in deferred + uncertainties)):
+        return False
+    matches = [c for c in deferred if c.get('concern_uid') == member['concern_uid']]
+    if len(matches) != 1:
+        return False
+    inherited = ('concern_uid', 'source_version_id', 'original_review_hash',
+                 'original_span', 'current_span', 'start', 'end', 'text',
+                 'candidates', 'audio_name', 'member_id', 'media_member_id')
+    if any(matches[0].get(k) != member.get(k) for k in inherited):
+        return False
+    # A second deferred member cannot lend the same location/playback identity.
+    if any(c is not matches[0] and (c.get('audio_name') == member['audio_name']
+           or (c.get('start'), c.get('end')) == tuple(span)) for c in deferred):
+        return False
+    humans = [u for u in uncertainties if u.get('by') == 'human'
+              and u.get('status') == 'unresolved']
+    if any(type(u.get('start')) is not int or type(u.get('end')) is not int
+           or not 0 <= u['start'] < u['end'] <= len(pending['snapshot']) for u in humans):
+        return False
+    humans = [u for u in humans if u['start'] < span[1] and u['end'] > span[0]]
+    if len(humans) != 1:
+        return False
+    human = humans[0]
+    text = human.get('original_text')
+    return ((human.get('start'), human.get('end')) == tuple(span)
+            and human.get('text') == member['text']
+            and isinstance(text, str) and bool(text.strip())
+            and text != '[听辨不清]' and text in member['candidates']
+            and original[1] - original[0] == len(text)
+            and all(k not in human or human[k] == member[k]
+                    for k in ('concern_uid', 'source_version_id', 'original_review_hash')))
+
+
 def _members(pending):
     if not isinstance(pending, dict):
         raise PreparationError()
@@ -92,8 +147,10 @@ def _members(pending):
                 or not isinstance(c.get('source_version_id'), str)
                 or not isinstance(c.get('candidates'), list) or not c['candidates']
                 or any(not isinstance(v, str) or not v for v in c['candidates'])
-                or len(set(c['candidates'])) != len(c['candidates'])
-                or c['text'] not in c['candidates']):
+                or len(set(c['candidates'])) != len(c['candidates'])):
+            raise PreparationError()
+        if ((c['text'] == '[听辨不清]' or c['text'] not in c['candidates'])
+                and not _human_unresolved_member(pending, c)):
             raise PreparationError()
         result.append(c)
     if len({c['concern_uid'] for c in result}) != len(result):
