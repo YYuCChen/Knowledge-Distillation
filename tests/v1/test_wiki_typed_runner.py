@@ -409,6 +409,23 @@ def test_strict_checker_rejects_fake_green_structure(fixture, damage):
                           changes_sha256='2' * 64, source_proof_sha256=source_hash)
 
 
+@pytest.mark.parametrize('damage', ['binding', 'later_hash', 'unknown_documents'])
+def test_missing_documents_does_not_make_other_proposal_errors_repairable(fixture, damage):
+    value = proposal(fixture)
+    expected = dict(value['binding'])
+    value['outcomes'][0]['documents'] = []
+    if damage == 'binding':
+        value['binding']['input_sha256'] = '0' * 64
+    elif damage == 'later_hash':
+        value['outcomes'][1]['documents'][0]['sha256'] = 'invalid-hash'
+    else:
+        value['outcomes'][1].update(status='unknown', reason_code='context_incomplete')
+    rows = tuple((r, (fixture[2].workspace / r.relative_path).read_bytes()) for r in fixture[3].raw)
+    with pytest.raises(typed.TypedError) as failure:
+        typed.parse_proposal(typed.encoded(value), expected, rows)
+    assert not isinstance(failure.value, typed.ProposalDocumentsMissing)
+
+
 def test_windows_typed_rejected_before_probe_or_spawn(fixture, monkeypatch):
     instance = CodexWikiRunner(executable_resolver=lambda: pytest.fail('must not spawn'))
     monkeypatch.setattr(sys, 'platform', 'win32')

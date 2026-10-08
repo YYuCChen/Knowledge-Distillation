@@ -141,14 +141,17 @@ def prepare():
     print(json.dumps(prepared, ensure_ascii=False))
 
 
-def resume_task(root, prepared, store, tasks, wiki, *, final_check=False):
-    """Use production retry gates; reject absent/invalid saved generation.
+def resume_task(root, prepared, store, tasks, wiki, *, final_check=False,
+                proposal_documents_repair=False):
+    """Use production retry gates and narrowly diagnosed proposal repair.
 
     No model call here. The checkpoint precheck prevents this manual recovery
-    from silently falling back to a fresh proposal on generation_interrupted.
+    from silently falling back to a fresh proposal on generation_interrupted,
+    except explicitly released production missing-documents repair.
     """
     from knowledge_distiller.v1.wiki_lock import VaultWriteLock
     from knowledge_distiller.v1.wiki_source_proof import trusted_source_callback
+    from knowledge_distiller.v1.wiki_staging import WikiStagingError, load_bound_staging
     task = tasks.get(prepared['task_id'])
     old = json.loads((root / 'result.json').read_text())
     if (not (root / 'run-once.json').is_file() or old.get('task_id') != task.task_id
@@ -176,9 +179,21 @@ def resume_task(root, prepared, store, tasks, wiki, *, final_check=False):
         for batch in task.batches:
             if batch.state == 'succeeded':
                 continue
-            tasks.load_generation_checkpoint(task.task_id, root / 'runtime',
-                batch_no=batch.batch_no, lock=lock, expected_plan_sha256=task.plan_sha256,
-                source_proof=source, allow_regenerated_graph=True)
+            try:
+                tasks.load_generation_checkpoint(task.task_id, root / 'runtime',
+                    batch_no=batch.batch_no, lock=lock, expected_plan_sha256=task.plan_sha256,
+                    source_proof=source, allow_regenerated_graph=True)
+            except WikiStagingError as error:
+                if (not proposal_documents_repair or final_check
+                        or str(error) != 'generation_interrupted'):
+                    raise
+                # Production verifies the complete immutable transport, exact
+                # ProposalDocumentsMissing diagnosis, bindings/document hashes,
+                # duplicate failure and remaining original generation budget.
+                snapshot = load_bound_staging(root / 'runtime' / 'wiki-tasks' / task.task_id,
+                    root / 'runtime', task=task, lock=lock)
+                if wiki._proposal_feedback(task, snapshot, batch.batch_no, source) is None:
+                    raise RuntimeError('proposal_documents_failure_not_repairable')
             phase_root = root / 'runtime' / 'wiki-tasks' / task.task_id / 'execution' / f'batch-{batch.batch_no}'
             if final_check:
                 reservations = sorted(p.name for p in phase_root.glob('check-reservation-*.json'))
@@ -199,6 +214,9 @@ def run(path, core_ready, *, resume=False, final_check=False):
     root = private_root(path)
     prepared = json.loads((root / 'prepared.json').read_text())
     readiness = json.loads(Path(core_ready).read_text())
+    proposal_documents_repair = readiness.get('proposal_documents_repair') == 'passed'
+    if proposal_documents_repair and (not resume or final_check):
+        raise ValueError('proposal_documents_repair_requires_resume_once')
     if resume:
         ready_field = 'status_prompt' if final_check else 'protocol'
         action = 'resume-final-check' if final_check else 'resume-once'
@@ -235,7 +253,8 @@ def run(path, core_ready, *, resume=False, final_check=False):
                             (('result.json', 'run-once.json', 'resume-result.json', 'resume-once.json')
                              if final_check else ('result.json', 'run-once.json'))}
             summary['prior_artifact_sha256'] = prior_hashes
-            resume_task(root, prepared, store, tasks, wiki, final_check=final_check)
+            resume_task(root, prepared, store, tasks, wiki, final_check=final_check,
+                        proposal_documents_repair=proposal_documents_repair)
         result = wiki.run_one()  # actual runner, recording, validators and publisher
         after = tasks.get(task.task_id)
         with connect(store.path) as db:

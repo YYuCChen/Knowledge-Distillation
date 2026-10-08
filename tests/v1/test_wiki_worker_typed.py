@@ -32,6 +32,7 @@ final=pathlib.Path(sys.argv[sys.argv.index('-o')+1])
 mode=pathlib.Path(__file__).with_name('mode').read_text()
 knowledge=mode in ('knowledge','repair')
 repair='"status":"repair_reserved"' in prompt
+structure_feedback='processed_documents_missing' in prompt
 counter=pathlib.Path(__file__).with_name('calls')
 with counter.open('a') as f: f.write('call\n')
 if mode == 'crash': sys.exit(1)
@@ -74,7 +75,7 @@ else:
         (root/'wiki/体检报告.md').write_text('# 体检报告\n\n'+refs+'\n')
         result=None
     else:
-        if not repair:
+        if not repair and not structure_feedback:
             with log.open('a') as f: f.write('\n## [2026-10-08] ingest | '+refs+'\n- '+refs+'\n')
         if knowledge:
             page=root/'wiki/概念/条件测试.md'; page.parent.mkdir(exist_ok=True)
@@ -95,6 +96,15 @@ else:
             for outcome in result['outcomes']:
                 outcome.update(status='processed_with_knowledge',reason_code='knowledge_proposed',reason='保留来源低温数值条件。')
                 outcome['documents'].append(dict(path='wiki/概念/条件测试.md',sha256=sha(page.read_bytes())))
+        if mode in ('documents_repair','documents_repeat','documents_budget'):
+            assert 'processed_no_knowledge列wiki/log.md' in prompt
+            if structure_feedback:
+                assert 'processed结果必须列实际写入文件及最终字节SHA256' in prompt
+                pathlib.Path(__file__).with_name('documents-feedback').write_text(prompt)
+            if not structure_feedback or mode in ('documents_repeat','documents_budget'):
+                result['outcomes'][0]['documents']=[]
+                if mode=='documents_budget':
+                    result['outcomes'][0]['reason']+='尝试'+str(len(counter.read_text().splitlines()))
 final.write_bytes(b'health complete' if result is None else enc(result))
 '''
 
@@ -148,6 +158,89 @@ def test_real_typed_worker_commits_no_knowledge_and_formal_receipt(world):
         assert payload['outcomes'][0]['status'] == 'processed_no_knowledge'
         assert payload['journal_sha256'] and payload['check_sha256']
     assert before == {r.relative_path: (vault / r.relative_path).read_bytes() for r in task.raw}
+
+
+def test_missing_documents_gets_fixed_feedback_then_real_worker_accepts(world):
+    root, store, vault, runtime, tasks, task, runner = world
+    (root / 'mode').write_text('documents_repair')
+    before = {r.relative_path: (vault / r.relative_path).read_bytes() for r in task.raw}
+    assert worker(world).run_one().error_code is None
+    assert tasks.get(task.task_id).state == 'succeeded'
+    records = list(runtime.rglob('generation-feedback-1.json'))
+    assert len(records) == 1
+    saved = json.loads(records[0].read_bytes())
+    assert saved['issues'][0]['field'] == 'documents'
+    assert saved['issues'][0]['code'] == 'processed_documents_missing'
+    assert json.loads(saved['candidate'])['outcomes'][0]['documents'] == []
+    reservation = json.loads((records[0].parent / 'reservation.json').read_bytes())
+    original = Path(reservation['argv'][reservation['argv'].index('-o') + 1]).read_bytes()
+    assert saved['candidate'].encode() == original and t.digest(original) == saved['candidate_sha256']
+    assert (root / 'documents-feedback').is_file()
+    assert len(list(runtime.rglob('reservation*.json'))) == 2
+    assert (vault / 'wiki/log.md').read_text().count('ingest |') == 1
+    assert before == {r.relative_path: (vault / r.relative_path).read_bytes() for r in task.raw}
+    with connect(store.path) as db:
+        accepted = db.execute("SELECT payload_json FROM wiki_outcome_receipts WHERE phase='accepted'").fetchall()
+        assert len(accepted) == 1
+        assert json.loads(accepted[0][0])['outcomes'][0]['status'] == 'processed_no_knowledge'
+
+
+def test_documents_feedback_survives_crash_without_resetting_generation_budget(world, monkeypatch):
+    root, store, vault, runtime, tasks, task, runner = world
+    (root / 'mode').write_text('documents_repair')
+    first = worker(world)
+    original = first._proposal_feedback
+    def crash(*args):
+        result = original(*args)
+        if result is not None:
+            raise SystemExit('controlled crash after durable structure feedback')
+        return result
+    monkeypatch.setattr(first, '_proposal_feedback', crash)
+    with pytest.raises(SystemExit):
+        first.run_one()
+    assert len((root / 'calls').read_text().splitlines()) == 1
+    saved = next(runtime.rglob('generation-feedback-1.json')).read_bytes()
+    assert worker(world).run_one().error_code is None
+    assert next(runtime.rglob('generation-feedback-1.json')).read_bytes() == saved
+    assert len(list(runtime.rglob('reservation*.json'))) == 2
+    assert tasks.get(task.task_id).state == 'succeeded'
+
+
+def test_existing_documents_feedback_cannot_loop_when_next_preflight_fails(world, monkeypatch):
+    from knowledge_distiller.v1.wiki_runner import WikiRunnerError
+    root, store, vault, runtime, tasks, task, runner = world
+    (root / 'mode').write_text('documents_repair')
+    preflight = runner.preflight
+    calls = []
+    def fail_second(*args):
+        calls.append(args)
+        if len(calls) > 1:
+            raise WikiRunnerError('runner_unavailable')
+        return preflight(*args)
+    monkeypatch.setattr(runner, 'preflight', fail_second)
+    assert worker(world).run_one().error_code == 'runner_unavailable'
+    assert len(calls) == 2
+    assert len((root / 'calls').read_text().splitlines()) == 1
+    assert len(list(runtime.rglob('reservation*.json'))) == 1
+    assert len(list(runtime.rglob('generation-feedback-*.json'))) == 1
+    assert tasks.get(task.task_id).state == 'failed'
+
+
+@pytest.mark.parametrize('mode,attempts', [('documents_repeat', 2), ('documents_budget', 3)])
+def test_documents_same_candidate_stops_and_total_budget_remains_durable(world, mode, attempts):
+    root, store, vault, runtime, tasks, task, runner = world
+    (root / 'mode').write_text(mode)
+    before = (vault / 'wiki/log.md').read_bytes()
+    assert worker(world).run_one().error_code is not None
+    assert len(list(runtime.rglob('reservation*.json'))) == attempts
+    assert len(list(runtime.rglob('generation-feedback-*.json'))) == attempts
+    calls = (root / 'calls').read_bytes()
+    tasks.retry_failed(task.task_id)
+    assert worker(world).run_one().error_code is not None
+    assert (root / 'calls').read_bytes() == calls
+    assert (vault / 'wiki/log.md').read_bytes() == before
+    with connect(store.path) as db:
+        assert db.execute("SELECT count(*) FROM wiki_outcome_receipts WHERE phase='accepted'").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize('mode', ['unknown', 'crash'])

@@ -52,6 +52,14 @@ class TypedError(ValueError):
         super().__init__(code if type(code) is str and code in allowed else 'typed_input_invalid')
 
 
+class ProposalDocumentsMissing(TypedError):
+    """Only fully validated processed outcomes with missing documents qualify."""
+
+    def __init__(self, issues):
+        super().__init__('typed_protocol_invalid')
+        self.issues = issues
+
+
 @dataclass(frozen=True)
 class TypedRunnerResult:
     error_code: str | None
@@ -181,6 +189,7 @@ def parse_proposal(content, binding, rows):
     outcomes = value['outcomes']
     if type(outcomes) is not list or len(outcomes) != len(rows) or not rows:
         raise TypedError('typed_coverage_invalid')
+    missing = []
     for outcome, (raw, _content) in zip(outcomes, rows):
         _object(outcome, ('raw_id', 'content_sha256', 'ordinal', 'status', 'reason_code', 'reason', 'documents'))
         if (outcome['raw_id'] != raw.raw_id or outcome['content_sha256'] != raw.content_sha256
@@ -198,8 +207,13 @@ def parse_proposal(content, binding, rows):
             if not _specific_reason(outcome['reason']):
                 raise TypedError('typed_protocol_invalid')
         documents = outcome['documents']
-        if type(documents) is not list or (status == 'unknown') != (not documents):
+        if type(documents) is not list or (status == 'unknown' and documents):
             raise TypedError('typed_protocol_invalid')
+        if status != 'unknown' and not documents:
+            missing.append(dict(raw_id=raw.raw_id, ordinal=raw.ordinal, field='documents',
+                code='processed_documents_missing',
+                reason='processed结果必须列实际写入文件及最终字节SHA256；'
+                       'processed_no_knowledge列wiki/log.md，不需创建知识页。'))
         seen = set()
         for document in documents:
             _object(document, ('path', 'sha256'))
@@ -210,6 +224,8 @@ def parse_proposal(content, binding, rows):
                 raise TypedError('typed_path_invalid')
             seen.add(path)
             _hash(document['sha256'])
+    if missing:
+        raise ProposalDocumentsMissing(missing)
     return value
 
 

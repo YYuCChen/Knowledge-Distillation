@@ -946,13 +946,14 @@ def save_generation_result(permit, result, *, lock, source_proof):
     return receipt
 
 
-def _verify_generation_terminal(terminal, root, record, *, schema_definition='proposal'):
+def _verify_generation_terminal(terminal, root, record, *, schema_definition='proposal',
+                                expected_error=None):
     from . import wiki_typed as t
     if (type(terminal) is not dict or terminal.get('contract') != 'g3-exec-recording-v1'
             or terminal.get('reserved') is not True or terminal.get('actual_spawned') is not True
             or type(terminal.get('pid')) is not int or terminal['pid'] <= 0
             or type(terminal.get('returncode')) is not int or terminal['returncode'] != 0
-            or terminal.get('error_code') is not None
+            or terminal.get('error_code') != expected_error
             or any(terminal.get(k) is not False for k in
                    ('cancelled', 'timed_out', 'not_observed_tail', 'truncated_due_to_overflow'))
             or any(terminal.get(k) is not True for k in ('complete_stdout_eof', 'complete_stderr_eof'))

@@ -424,6 +424,100 @@ class WikiWorker:
             self.runner.recording = previous
             recording.close()
 
+    def _proposal_feedback(self, task, snapshot, batch_no, source):
+        """Recover one narrowly diagnosed failure from its immutable recording."""
+        from . import wiki_typed as t
+        from .wiki_staging import (_checkpoint_read, _checkpoint_write,
+                                   _verify_generation_terminal)
+        root = snapshot.task_root.parent.parent / 'execution' / f'batch-{batch_no}'
+        number = next((n for n in (3, 2, 1) if
+                       (root / ('reservation.json' if n == 1 else f'reservation-{n}.json')).exists()), None)
+        if number is None:
+            return None
+        record = _checkpoint_read(root / ('reservation.json' if number == 1 else f'reservation-{number}.json'))
+        call = Path(record['recording_call'])
+        if not (call / 'terminal.json').exists():
+            return None
+        terminal = _checkpoint_read(call / 'terminal.json')
+        # Existing recorder seals unregistered TypedError codes as external
+        # failure. Never infer reparability from that code alone: require a
+        # complete clean transport and reproduce this exact parser diagnosis.
+        if terminal.get('error_code') not in {'typed_protocol_invalid', 'recording_external_failure'}:
+            return None
+        cleanup = terminal.get('diagnostic', {}).get('cleanup_observation_v1', {})
+        if cleanup.get('first_result') is not True or cleanup.get('failure_code') is not None:
+            return None
+        try:
+            _verify_generation_terminal(terminal, call, record, expected_error=terminal['error_code'])
+        except WikiStagingError as error:
+            if str(error) == 'generation_interrupted':
+                return None
+            raise
+        verify_staging_protected(snapshot)
+        binding, rows, _payload = t.freeze_input(task, snapshot, batch_no, source, runtime_root=self.runtime_root)
+        if (record['binding'] != binding or record['task_id'] != task.task_id
+                or record['plan_sha256'] != task.plan_sha256 or record['batch_no'] != batch_no
+                or record['first_attempt'] != snapshot.task_root.name):
+            raise WikiStagingError('checkpoint_binding_changed')
+        final = snapshot.control / record['final_relative_path']
+        if str(final) != record['argv'][record['argv'].index('-o') + 1]:
+            raise WikiStagingError('checkpoint_binding_changed')
+        content = t.read_final(final.parent, final.name)
+        try:
+            t.parse_proposal(content, binding, rows)
+        except t.ProposalDocumentsMissing as error:
+            issues = error.issues
+        except t.TypedError:
+            return None
+        else:
+            return None
+        candidate = t.strict_json(content)
+        # Missing documents never excuses a different document/hash violation.
+        documents = {d['path']: d['sha256'] for o in candidate['outcomes'] for d in o['documents']}
+        for outcome in candidate['outcomes']:
+            if any(documents[d['path']] != d['sha256'] for d in outcome['documents']):
+                raise WikiStagingError('checkpoint_binding_changed')
+        if documents:
+            t.checked_documents(snapshot, documents)
+        saved = dict(candidate=content.decode('utf-8'), candidate_sha256=t.digest(content), issues=issues,
+                     reservation_sha256=t.digest(t.encoded(record)), terminal_sha256=t.digest(t.encoded(terminal)))
+        path = root / f'generation-feedback-{number}.json'
+        if path.exists():
+            if _checkpoint_read(path) != saved:
+                raise WikiStagingError('checkpoint_binding_changed')
+        else:
+            _checkpoint_write(path, t.encoded(saved))
+        for previous in range(1, number):
+            old_path = root / f'generation-feedback-{previous}.json'
+            if old_path.exists():
+                old = _checkpoint_read(old_path)
+                if t.digest(old['candidate'].encode('utf-8')) != old['candidate_sha256']:
+                    raise WikiStagingError('checkpoint_binding_changed')
+                if t.strict_json(old['candidate'].encode('utf-8')) == candidate and old['issues'] == issues:
+                    raise WikiRunnerError('agent_failed')
+        if number == 3:
+            raise WikiRunnerError('agent_failed')
+        return dict(candidate=saved['candidate'], issues=issues)
+
+    def _typed_generation(self, task, snapshot, batch_no, lock, source, args):
+        feedback = self._proposal_feedback(task, snapshot, batch_no, source)
+        root = snapshot.task_root.parent.parent / 'execution' / f'batch-{batch_no}'
+        def reservations():
+            return tuple(name for name in ('reservation.json', 'reservation-2.json', 'reservation-3.json')
+                         if (root / name).exists())
+        while True:
+            before = reservations()
+            try:
+                return self._typed_call(task, snapshot, batch_no, 'generation', lock, source,
+                    lambda: self.runner.run_outcomes(snapshot, self.runtime_root,
+                                                     generation_feedback=feedback, **args)).final_bytes
+            except WikiRunnerError:
+                if reservations() == before:
+                    raise
+                feedback = self._proposal_feedback(task, snapshot, batch_no, source)
+                if feedback is None:
+                    raise
+
     def _typed_validate(self, snapshot, task, batch_no):
         if not self._trusted_kb(snapshot, task):
             raise WikiStagingError('validation_failed')
@@ -621,11 +715,9 @@ class WikiWorker:
                         except WikiStagingError as error:
                             if str(error) != 'generation_interrupted':
                                 raise
-                            proposal = self._typed_call(task, snapshot, batch_no, 'generation', lock, source,
-                                lambda: self.runner.run_outcomes(snapshot, self.runtime_root, **args)).final_bytes
+                            proposal = self._typed_generation(task, snapshot, batch_no, lock, source, args)
                     else:
-                        proposal = self._typed_call(task, snapshot, batch_no, 'generation', lock, source,
-                            lambda: self.runner.run_outcomes(snapshot, self.runtime_root, **args)).final_bytes
+                        proposal = self._typed_generation(task, snapshot, batch_no, lock, source, args)
                     validated = self._typed_validate(snapshot, task, batch_no)
                     changes = {c.relative_path: c.after_sha256 for c in validated.changes
                                if c.relative_path.startswith('wiki/') and c.relative_path.endswith('.md')}
