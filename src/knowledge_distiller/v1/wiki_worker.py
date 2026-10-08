@@ -543,9 +543,11 @@ class WikiWorker:
             _stable_bytes(baseline / f.relative_path, changed_code='validation_failed'), f.sha256)
             for f in snapshot.files if f.relative_path.startswith('wiki/') and f.relative_path.endswith('.md')
             and f.relative_path not in {c.path for c in changes})
+        read_facts = lambda: self._program_facts(task, snapshot, batch_no)
         registry = support.build_registry(snapshot.workspace, changes,
             tuple(support.FrozenRaw(r.relative_path, r.raw_id, contents[r.raw_id], r.content_sha256) for r in task.raw),
             pages=pages, generated=self._managed_sections(snapshot, task), parent_registry=parent_registry,
+            program_facts=read_facts(), program_facts_readback=read_facts,
             claim_mapping=() if parent_registry is None else tuple(support.ClaimMapping(
                 c.block.claim_id, c.block.path, c.block.position) for c in parent_registry.claims))
         client = self.runner.support_client(snapshot, self.runtime_root, task=task,
@@ -586,6 +588,49 @@ class WikiWorker:
             checker=None, support_gate=gate, support_client=client, full_contents=contents,
             check_result=checked, proposal=proposal)
         return candidate, receipt
+
+    def _program_facts(self, task, snapshot, batch_no):
+        """Read-only program state plus verified successful local checkpoints."""
+        from . import wiki_typed as t
+        from .wiki_staging import _checkpoint_read, _verify_generation_terminal
+        verify_staging_protected(snapshot)
+        run = self.store.runtime.run('managed', snapshot.workspace, ('describe-state',))
+        if run.returncode:
+            raise WikiStagingError('validation_failed')
+        facts = json.loads(run.stdout)
+        root = snapshot.task_root.parent.parent / 'execution' / f'batch-{batch_no}'
+        phases = []
+        for path in sorted(root.glob('*.json')):
+            match = re.fullmatch(r'result(?:-([23]))?\.json', path.name)
+            if match:
+                attempt = int(match[1] or 1)
+                saved = _checkpoint_read(path)
+                reservation = root / ('reservation.json' if attempt == 1 else f'reservation-{attempt}.json')
+                record = _checkpoint_read(reservation)
+                phase, schema, final_sha = 'generation', t.PROPOSAL_SCHEMA, saved['proposal_sha256']
+            else:
+                match = re.fullmatch(r'(check|final-check|health|repair-([12])-check)-result\.json', path.name)
+                if match is None:
+                    continue
+                saved = _checkpoint_read(path)
+                record = saved['record']
+                phase = 'repair-check' if match[2] else match[1]
+                attempt = int(match[2] or 1)
+                schema = None if phase == 'health' else t.CHECK_SCHEMA
+                final_sha = saved['final_sha256']
+                if saved['plan_sha256'] != task.plan_sha256:
+                    raise WikiStagingError('checkpoint_binding_changed')
+            if record['task_id'] != task.task_id or record['plan_sha256'] != task.plan_sha256:
+                raise WikiStagingError('checkpoint_binding_changed')
+            call = Path(record['recording_call'])
+            terminal = _checkpoint_read(call / 'terminal.json')
+            _verify_generation_terminal(terminal, call, record, schema_definition=schema)
+            final = Path(record['argv'][record['argv'].index('-o') + 1])
+            if t.digest(t.read_final(final.parent, final.name)) != final_sha:
+                raise WikiStagingError('checkpoint_binding_changed')
+            phases.append(dict(phase=phase, attempt=attempt, final_sha256=final_sha))
+        facts['completed_phases'] = phases
+        return t.encoded(facts)
 
     def _managed_sections(self, snapshot, task):
         """Render existing kb-managed regions; certify only exact current bytes."""

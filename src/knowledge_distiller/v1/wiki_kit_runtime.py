@@ -168,6 +168,22 @@ def _describe_generated(kit_root: Path, root: Path):
     print(json.dumps(rows, ensure_ascii=False))
 
 
+def _describe_state(kit_root: Path, root: Path):
+    """Current library facts only; no free prose, model output or read claims."""
+    import hashlib
+    module = runpy.run_path(os.fspath(kit_root / 'tools/kb.py'))
+    vault = module['Vault'](root)
+    vault.load(); vault.load_raw(); vault.build_graph(); vault.compute_states(); vault.check()
+    query = root / '.graph/queries.jsonl'
+    value = dict(pages=[dict(path=p.rel, sha256=hashlib.sha256(p.path.read_bytes()).hexdigest(),
+                             type=p.type, confirmed=p.confirmed,
+                             declared_topics=p.topics) for p in vault.pages],
+                 pending=vault.pending,
+                 query_record=dict(exists=query.exists(),
+                     sha256=hashlib.sha256(query.read_bytes()).hexdigest() if query.exists() else None))
+    print(json.dumps(value, ensure_ascii=False, sort_keys=True))
+
+
 def helper_main(argv: list[str]) -> int:
     """Run one bundled kit tool without starting the application or opening its DB."""
     if len(argv) < 4 or argv[1] != "--vault-root" or "--" not in argv[2:]:
@@ -183,12 +199,13 @@ def helper_main(argv: list[str]) -> int:
         if manifest.protocol_version != 2:
             return 2
         if tool == 'managed':
-            if argv[marker + 1:] != ['describe-generated']:
+            operations = {'describe-generated': _describe_generated, 'describe-state': _describe_state}
+            if len(argv[marker + 1:]) != 1 or argv[marker + 1] not in operations:
                 return 2
             old_path = list(sys.path)
             sys.path.insert(0, os.fspath(kit_root / 'tools'))
             try:
-                _describe_generated(kit_root, root)
+                operations[argv[marker + 1]](kit_root, root)
             finally:
                 sys.path[:] = old_path
             return 0

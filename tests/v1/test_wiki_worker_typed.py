@@ -43,7 +43,8 @@ if 'inputs' in data:
     if failure: pathlib.Path(__file__).with_name('support-failed').write_text('1')
     result=dict(contract='r14-typed-support-v1',schema_revision=1,binding=binding,
         registry_sha256=data['registry_sha256'],candidate_sha256=data['candidate_sha256'],
-        checks=[dict(claim_id=c['claim_id'],status='supported',reason='Synthetic transport control.',issues=[])
+        checks=[dict(claim_id=c['claim_id'],status='supported',basis='program' if c['management_eligible'] else 'raw',
+                     reason='Synthetic transport control.',issues=[])
                 for c in data['inputs']['registry']['claims']])
     for c,check in zip(data['inputs']['registry']['claims'],result['checks']):
         if failure and c['path']=='wiki/概念/条件测试.md' and '低温' in c['text']:
@@ -326,6 +327,13 @@ def test_actual_knowledge_claim_ranges_publish_and_feedback_repair(world):
     page=(vault/'wiki/概念/条件测试.md').read_text()
     assert '仅低温数值为10。' in page and '数值为12。' not in page
     registry=json.loads((root/'registry.json').read_text())
+    facts=registry['program_facts']
+    assert facts['candidate_hash']==registry['candidate_hash']
+    page_fact=next(p for p in facts['facts']['pages'] if p['path']=='wiki/概念/条件测试.md')
+    assert page_fact['declared_topics']==['社科'] and page_fact['confirmed'] is False
+    phases={(p['phase'],p['attempt']) for p in facts['facts']['completed_phases']}
+    assert ('generation',1) in phases and ('check',1) in phases
+    if (root/'mode').read_text()=='repair': assert ('repair-check',1) in phases
     claims=[c for c in registry['claims'] if c['path']=='wiki/概念/条件测试.md']
     assert claims and all(c['evidence'] for c in claims)
     assert any(e.get('start_line') and e.get('end_line') and '低温' in e['excerpt'] for c in claims for e in c['evidence'])

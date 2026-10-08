@@ -131,6 +131,8 @@ def test_frozen_command_uses_only_internal_helper_and_bundled_manifest(tmp_path)
     managed = runtime.command('managed', vault, ('describe-generated',))
     assert managed == (str(app), '--wiki-kit', 'managed', '--vault-root', str(vault), '--', 'describe-generated')
     assert '-c' not in managed
+    assert runtime.command('managed', vault, ('describe-state',)) == (
+        str(app), '--wiki-kit', 'managed', '--vault-root', str(vault), '--', 'describe-state')
 
 
 def test_helper_dispatch_runs_bundled_protocol_without_opening_application(
@@ -189,6 +191,12 @@ def test_frozen_bundle_resolves_internal_resource_link_and_dispatches(
     assert stopped.value.code == 0
     rows = json.loads(capsys.readouterr().out)
     assert {r[0] for r in rows} >= {'wiki/index.md', 'wiki/待确认.md', 'wiki/主题/AI.md'}
+    with pytest.raises(SystemExit) as state_stopped:
+        main(['--wiki-kit', 'managed', '--vault-root', str(vault), '--', 'describe-state'])
+    assert state_stopped.value.code == 0
+    facts = json.loads(capsys.readouterr().out)
+    assert facts['pages'] and all(set(p) == {'path', 'sha256', 'type', 'confirmed', 'declared_topics'}
+                                  for p in facts['pages'])
     assert (vault / 'tools/kb.py').read_bytes() == staged
     assert all(p.read_bytes() == data for rel, data in before.items()
                if rel.as_posix() != 'tools/kb.py' for p in [vault / rel])

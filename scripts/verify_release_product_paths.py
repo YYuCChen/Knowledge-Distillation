@@ -68,7 +68,34 @@ def managed(args, root):
     assert files(vault) == before
     assert not any(root.rglob('knowledge.sqlite3'))
     assert not any(root.rglob('.desktop-instance.json'))
-    return {'command': command, 'rows': len(payload), 'vault_unchanged': True, 'app_not_started': True}
+    state_command = command[:-1] + ['describe-state']
+    state_result = subprocess.run(state_command, cwd=root, env=env,
+                                  capture_output=True, text=True, timeout=120)
+    (root / 'managed-state.stdout').write_text(state_result.stdout)
+    (root / 'managed-state.stderr').write_text(state_result.stderr)
+    assert state_result.returncode == 0, state_result.stderr
+    state = json.loads(state_result.stdout)
+    assert type(state) is dict and set(state) == {'pages', 'pending', 'query_record'}
+    assert type(state['pages']) is list
+    for page in state['pages']:
+        assert type(page) is dict and set(page) == {'path', 'sha256', 'type', 'confirmed', 'declared_topics'}
+        assert all(type(page[key]) is str for key in ('path', 'sha256', 'type'))
+        assert len(page['sha256']) == 64 and all(c in '0123456789abcdef' for c in page['sha256'])
+        assert type(page['confirmed']) is bool
+        assert type(page['declared_topics']) is list and all(type(t) is str for t in page['declared_topics'])
+    assert type(state['pending']) is dict and set(state['pending']) == {'外部', '自述'}
+    assert all(type(paths) is list and all(type(p) is str for p in paths)
+               for paths in state['pending'].values())
+    query = state['query_record']
+    assert type(query) is dict and set(query) == {'exists', 'sha256'}
+    assert type(query['exists']) is bool
+    assert (type(query['sha256']) is str and len(query['sha256']) == 64
+            and all(c in '0123456789abcdef' for c in query['sha256'])) if query['exists'] else query['sha256'] is None
+    assert files(vault) == before
+    assert not any(root.rglob('knowledge.sqlite3'))
+    assert not any(root.rglob('.desktop-instance.json'))
+    return {'command': command, 'state_command': state_command, 'rows': len(payload),
+            'state_pages': len(state['pages']), 'vault_unchanged': True, 'app_not_started': True}
 
 
 def components(args, root):

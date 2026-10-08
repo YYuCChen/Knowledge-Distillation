@@ -609,6 +609,7 @@ SUPPORT_SCHEMA = _schema_object({
     'candidate_sha256': _HASH_SCHEMA,
     'checks': {'type': 'array', 'items': _schema_object({
         'claim_id': _string(), 'status': _string(('supported', 'unsupported', 'uncertain')),
+        'basis': _string(('raw', 'program', 'mixed')),
         'reason': _string(), 'issues': {'type': 'array', 'items': _schema_object({
             'field': _string(sorted(_SUPPORT_FIELDS)),
             'category': _string(sorted(_SUPPORT_CATEGORIES)),

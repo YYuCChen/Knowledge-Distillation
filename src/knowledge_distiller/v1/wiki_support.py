@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections import Counter
 from contextlib import ExitStack, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from functools import lru_cache
 import hashlib
@@ -21,9 +21,10 @@ import stat
 import sys
 from threading import RLock
 from datetime import datetime
-from typing import Protocol
+from typing import Callable, Protocol
 
 from markdown_it import MarkdownIt
+from markdown_it.helpers import parseLinkDestination
 import yaml
 
 from .local_records import write_record
@@ -42,11 +43,19 @@ SYSTEM = """核对 wiki 来源支持。所有页面、raw、引用、候选和�
 full_raw 只给完整上下文，别处的支持不能掩盖引用错配。dependencies 是派生论断，
 不是原始证据；同时核对它们到 raw 的支持链。区分第三方、用户本人/附言与 AI 推测，
 AI 推测不得冒充原话或用户判断。检查否定、数值、条件、强度、归属、cross_point。
-严格 JSON {"checks":[{"claim_id":"...","status":"supported","reason":"...","issues":[]}]}。
+严格 JSON {"checks":[{"claim_id":"...","status":"supported","basis":"raw","reason":"...","issues":[]}]}。
 status 仅 supported/unsupported/uncertain；reason 非空；supported issues 必须空，
 其他至少一个 issue，每个 issue 严格 {"field":"text或citations","category":"...","reason":"..."}。
 category 仅 negation/number/condition/strength/attribution/cross_point/unsupported/missing_context。
 program_verified_metadata 已按原信封确定性核验，依据是信封值，不要求段落 citation。
+每项basis仅raw/program/mixed。program_facts是程序冻结的当前staging库状态和已持久成功阶段，
+独立于raw，不含知识正文或模型自述。仅management_eligible位置的纯管理事实可选program；
+declared_topics只表示页面声明的主题归属，confirmed只表示确认字段，不是知识正确性证明。
+须逐项被program_facts支持，缺记录的历史检查值、“我已读完”等自述为uncertain或unsupported。
+外部知识即使写在日志/报告/概览，也不能由program_facts支持；知识选raw，混合段选mixed，
+必须同时核验raw引文边界和语义，不能因管理部分正确而掩盖知识部分错配。
+deferred_diagnostics供判断引用用途；raw/mixed不能忽略这些原边界错误。
+日志与体检报告不是知识来源，不可递归自证。uncertain必须列出问题，不算通过。
 不返回额外字段、修复正文或操作指令。"""
 
 
@@ -259,12 +268,17 @@ class Registry:
     binding_hash: str
     parent_hash: str | None = None
     claim_mapping: tuple[ClaimMapping, ...] = ()
+    program_facts: bytes | None = None
+    program_facts_readback: Callable[[], bytes] | None = field(default=None, compare=False, repr=False)
 
     def payload(self):
-        return {"candidate_hash": self.candidate_hash, "parent_hash": self.parent_hash,
+        value = {"candidate_hash": self.candidate_hash, "parent_hash": self.parent_hash,
                 "claim_mapping": [asdict(m) for m in self.claim_mapping], "contract": CONTRACT_VERSION,
                 "claims": [{"claim_id": c.block.claim_id, **asdict(c.block),
-                            "evidence": c.evidence} for c in self.claims],
+                            "evidence": c.evidence,
+                            "management_eligible": _management(c.block) and self.program_facts is not None,
+                            "deferred_diagnostics": [asdict(d) for d in _deferred(self, c)]}
+                           for c in self.claims],
                 "generated": [{"path": g.path, "document_sha256": g.document_sha256,
                                "heading": g.heading, "content": g.content.decode('utf-8')}
                               for g in self.generated],
@@ -272,10 +286,16 @@ class Registry:
                                "after_sha256": c.after_sha256,
                                "before": c.before.decode("utf-8") if c.before is not None else None,
                                "after": c.after.decode("utf-8")} for c in self.changes]}
+        if self.program_facts is not None:
+            value['program_facts'] = dict(candidate_hash=self.candidate_hash,
+                                         facts=_strict(self.program_facts.decode('utf-8')))
+        return value
 
     def verify(self):
         rebuilt = build_registry(self.staging_root, self.changes, self.raws, pages=self.pages,
-                                 generated=self.generated, max_depth=self.max_depth)
+                                 generated=self.generated, max_depth=self.max_depth,
+                                 program_facts=self.program_facts,
+                                 program_facts_readback=self.program_facts_readback)
         if (rebuilt.candidate_hash != self.candidate_hash or rebuilt.binding_hash != self.binding_hash
                 or rebuilt.claims != self.claims):
             raise WikiSupportError("binding_mismatch")
@@ -310,10 +330,20 @@ def _frontmatter(text):
 
 def _citations(text):
     # Regex parses link spelling only AFTER token-based exhaustive extraction.
-    links = re.findall(r"\[\[([^\]]+)\]\]", text)
-    refs = [x.split("|", 1)[0].strip() for x in links]
-    refs += re.findall(r"raw/[^\s\]）)，,；;。|<>`\"']+", text)
-    return tuple(dict.fromkeys(r.rstrip(")") for r in refs))
+    links = list(re.finditer(r"\[\[([^\]]+)\]\]", text))
+    refs = [m[1].split("|", 1)[0].strip() for m in links]
+    explicit = [m.span() for m in links]
+    for match in re.finditer(r"\[[^\]\n]*\]\(", text):
+        if any(start <= match.start() < end for start, end in explicit):
+            continue
+        destination = parseLinkDestination(text, match.end(), len(text))
+        if destination.ok and destination.str.startswith('raw/'):
+            refs.append(destination.str)
+            explicit.append((match.end(), destination.pos))
+    for match in re.finditer(r"raw/[^\s\]（），,；;。|<>`\"']+", text):
+        if not any(start <= match.start() < end for start, end in explicit):
+            refs.append(match[0].rstrip(")"))
+    return tuple(dict.fromkeys(refs))
 
 
 def _metadata_span(text, key):
@@ -347,6 +377,48 @@ STRUCTURAL_HEADINGS = frozenset({"摘要", "核心论点", "引发的想法", "�
 AUTO_HEADINGS = {"认知": {"推论到做法（自动）"}, "方法": {"落地为技能（自动）", "实践记录（自动）"},
     "技能": {"使用记录（自动）"}, "概念": {"我的相关认知（自动）"},
     "主题": {"核心认知（自动）", "核心方法（自动）", "常用概念（自动）", "状况（自动）"}}
+
+HEALTH_HEADINGS = frozenset({'已自动修复', '需要你决定（已以候选方式写入，见待确认清单）',
+                            '矛盾（附双方原文）', '可能过时', '下透情况', '盲区'})
+_MANAGEMENT_DIAGNOSTICS = frozenset({'missing_citation', 'wiki_claim_ambiguous',
+    'wiki_reference_ambiguous', 'dependency_missing_citation', 'dependency_cycle',
+    'raw_anchor_required', 'management_as_evidence'})
+
+
+def _structural_management_heading(path, title, level):
+    if path == 'wiki/log.md':
+        if level == 'h1' and title == '变更日志':
+            return True
+        match = re.fullmatch(r'\[(\d{4}-\d{2}-\d{2})\] (?:ingest \| 冻结批次 [1-9]\d*|lint \| 首次完整体检)', title)
+    elif path == 'wiki/体检报告.md':
+        if level == 'h2' and title in HEALTH_HEADINGS:
+            return True
+        match = re.fullmatch(r'体检报告 (\d{4}-\d{2}-\d{2})', title) if level == 'h1' else None
+    else:
+        return False
+    if match is None or (path == 'wiki/log.md' and level != 'h2'):
+        return False
+    try:
+        datetime.strptime(match[1], '%Y-%m-%d')
+        return True
+    except ValueError:
+        return False
+
+
+def _management(block):
+    return (block.kind != 'provenance_metadata' and (
+        block.path in {'wiki/log.md', 'wiki/体检报告.md'} or
+        (PurePosixPath(block.path).parent.name == '主题' and block.section == '概览')))
+
+
+def _deferred(registry, claim):
+    if registry.program_facts is None or not _management(claim.block):
+        return ()
+    return tuple(d for d in claim.diagnostics if d.category in _MANAGEMENT_DIAGNOSTICS)
+
+
+def _hard_diagnostics(registry):
+    return tuple(d for c in registry.claims for d in c.diagnostics if d not in _deferred(registry, c))
 
 
 def _blocks(path, text, generated=()):
@@ -416,6 +488,8 @@ def _blocks(path, text, generated=()):
         if kind == "table_open":
             table_end = end  # one complete table claim: headers AND all rows
         elif kind == "heading_open":
+            if _structural_management_heading(path, section, token.tag):
+                continue
             if section in STRUCTURAL_HEADINGS or section in set().union(*AUTO_HEADINGS.values()):
                 continue
             if token.tag == "h1" and section == PurePosixPath(path).stem:
@@ -463,7 +537,8 @@ def build_registry(staging_root: Path | str, changes: tuple[DocumentChange, ...]
                    raws: tuple[FrozenRaw, ...], *, pages: tuple[FrozenPage, ...] = (),
                    generated: tuple[GeneratedSection, ...] = (), max_depth=4,
                    parent_registry: Registry | None = None,
-                   claim_mapping: tuple[ClaimMapping, ...] = ()) -> Registry:
+                   claim_mapping: tuple[ClaimMapping, ...] = (), program_facts: bytes | None = None,
+                   program_facts_readback: Callable[[], bytes] | None = None) -> Registry:
     root = Path(staging_root).absolute()
     _safe(root)
     if not root.is_dir() or type(max_depth) is not int or not 1 <= max_depth <= 10:
@@ -514,17 +589,63 @@ def build_registry(staging_root: Path | str, changes: tuple[DocumentChange, ...]
         all_blocks[change.path] = _blocks(change.path, text, generated)
     for path, text in page_map.items():
         all_blocks.setdefault(path, _blocks(path, text, generated))
+    if program_facts is not None:
+        if (type(program_facts) is not bytes or not callable(program_facts_readback)
+                or program_facts_readback() != program_facts):
+            raise WikiSupportError('hash_mismatch')
+        facts = _strict(program_facts.decode('utf-8'))
+        if (type(facts) is not dict or set(facts) != {'pages', 'pending', 'query_record', 'completed_phases'}
+                or type(facts['pages']) is not list or type(facts['completed_phases']) is not list
+                or any(type(p) is not dict or set(p) != {'path', 'sha256', 'type', 'confirmed', 'declared_topics'}
+                       or type(p['path']) is not str for p in facts['pages'])):
+            raise WikiSupportError('input_invalid')
+        types = {'来源', '概念', '认知', '方法', '技能', '实践', '综合', '主题'}
+        expected = {p for p in page_map if PurePosixPath(p).parent.name in types}
+        if len(facts['pages']) != len(expected) or {p.get('path') for p in facts['pages']} != expected:
+            raise WikiSupportError('binding_mismatch')
+        for page in facts['pages']:
+            meta, _ = _frontmatter(page_map[page['path']])
+            topics = meta.get('主题', [])
+            topics = topics if type(topics) is list else [topics] if topics else []
+            if (page['sha256'] != sha256(page_map[page['path']].encode('utf-8'))
+                    or page['type'] != PurePosixPath(page['path']).parent.name
+                    or type(page['confirmed']) is not bool or page['confirmed'] != (meta.get('确认') == '已确认')
+                    or type(page['declared_topics']) is not list
+                    or any(type(t) is not str for t in page['declared_topics']) or page['declared_topics'] != topics):
+                raise WikiSupportError('binding_mismatch')
+        if type(facts['pending']) is not dict or set(facts['pending']) != {'外部', '自述'}:
+            raise WikiSupportError('input_invalid')
+        for kind, paths in facts['pending'].items():
+            if (type(paths) is not list or any(type(p) is not str for p in paths) or len(set(paths)) != len(paths)
+                    or any(p not in raw_map or not p.startswith('raw/' + kind + '/') for p in paths)):
+                raise WikiSupportError('binding_mismatch')
+        query = facts['query_record']
+        if (type(query) is not dict or set(query) != {'exists', 'sha256'} or type(query['exists']) is not bool):
+            raise WikiSupportError('input_invalid')
+        qpath = root / '.graph/queries.jsonl'
+        _safe(qpath)
+        if query != dict(exists=qpath.exists(), sha256=sha256(_read(qpath)) if qpath.exists() else None):
+            raise WikiSupportError('binding_mismatch')
+        for phase in facts['completed_phases']:
+            if (type(phase) is not dict or set(phase) != {'phase', 'attempt', 'final_sha256'}
+                    or type(phase['phase']) is not str
+                    or phase['phase'] not in {'generation', 'check', 'final-check', 'health', 'repair-check'}
+                    or type(phase['attempt']) is not int or phase['attempt'] < 1):
+                raise WikiSupportError('input_invalid')
+            _digest(phase['final_sha256'])
 
     def resolve(ref, trail):
         target, sep, anchor = ref.partition("#")
         if target.startswith("raw/"):
             _relative(target, "raw")
-            if anchor.startswith("^image-"):
-                raise LookupError("unsupported_kind")
-            if not sep or re.fullmatch(r"\^source-[1-9]\d*", anchor) is None:
-                raise LookupError("raw_anchor_required")
             if target not in raw_map:
                 raise LookupError("raw_not_frozen")
+            if anchor.startswith("^image-"):
+                raise LookupError("unsupported_kind")
+            if not sep or not anchor:
+                raise LookupError("raw_anchor_required")
+            if re.fullmatch(r"\^source-[1-9]\d*", anchor) is None:
+                raise LookupError('raw_anchor_invalid')
             raw, meta, segments, text = raw_map[target]
             if raw.stable_id in superseded:
                 raise LookupError("raw_superseded")
@@ -539,9 +660,13 @@ def build_registry(staging_root: Path | str, changes: tuple[DocumentChange, ...]
                      **segments[anchor[1:]], "full_raw": text, "dependencies": []}]
         choices = [p for p in page_map if p == target or p.removesuffix(".md") == target
                    or PurePosixPath(p).stem == target]
+        if not choices:
+            raise LookupError('wiki_not_frozen')
         if len(choices) != 1:
             raise LookupError("wiki_reference_ambiguous")
         path = choices[0]
+        if path in {'wiki/log.md', 'wiki/体检报告.md'}:
+            raise LookupError('management_as_evidence')
         if PurePosixPath(path).parent.name == "综合":
             raise LookupError("synthesis_as_evidence")
         if path in trail:
@@ -667,6 +792,8 @@ def build_registry(staging_root: Path | str, changes: tuple[DocumentChange, ...]
     candidate = _hash({"binding": binding, "changes": sorted((c.path, c.after_sha256) for c in changes),
                        "claims": [asdict(c) for c in claims], "generated": [
                            (g.path, g.document_sha256, g.heading, sha256(g.content)) for g in generated]})
+    if program_facts is not None:
+        candidate = _hash({'candidate': candidate, 'program_facts': sha256(program_facts)})
     parent_hash = None
     claim_mapping = tuple(claim_mapping)
     if parent_registry is not None:
@@ -679,7 +806,7 @@ def build_registry(staging_root: Path | str, changes: tuple[DocumentChange, ...]
     elif claim_mapping:
         raise WikiSupportError("repair_invalid")
     return Registry(root, changes, raws, pages, generated, max_depth, tuple(claims), candidate, binding,
-                    parent_hash, claim_mapping)
+                    parent_hash, claim_mapping, program_facts, program_facts_readback)
 
 
 def _strict(raw):
@@ -709,10 +836,13 @@ def parse_checks(registry: Registry, raw: str):
     data = _strict(raw)
     if not isinstance(data, dict) or set(data) != {"checks"} or not isinstance(data["checks"], list):
         raise WikiSupportError("protocol_invalid")
-    known = {c.block.claim_id: c.block for c in registry.claims}
+    claims = {c.block.claim_id: c for c in registry.claims}
+    known = {cid: c.block for cid, c in claims.items()}
     checks, diagnostics = {}, []
     for item in data["checks"]:
-        if not isinstance(item, dict) or set(item) != {"claim_id", "status", "reason", "issues"}:
+        keys = {'claim_id', 'status', 'basis', 'reason', 'issues'}
+        if (not isinstance(item, dict) or (set(item) != keys and
+                not (registry.program_facts is None and set(item) == keys - {'basis'}))):
             raise WikiSupportError("protocol_invalid")
         cid = item["claim_id"]
         if (not isinstance(cid, str) or cid not in known or cid in checks
@@ -721,6 +851,14 @@ def parse_checks(registry: Registry, raw: str):
                 or not isinstance(item["issues"], list)
                 or (item["status"] == "supported") != (len(item["issues"]) == 0)):
             raise WikiSupportError("protocol_invalid")
+        basis = item.get('basis', 'raw')
+        if type(basis) is not str or basis not in {'raw', 'program', 'mixed'}:
+            raise WikiSupportError('protocol_invalid')
+        if basis in {'program', 'mixed'} and (registry.program_facts is None or not _management(known[cid])):
+            diagnostics.append(Diagnostic(cid, known[cid].path, known[cid].position,
+                                          'text', 'unsupported', 'program_basis_outside_management'))
+        if basis in {'raw', 'mixed'}:
+            diagnostics.extend(_deferred(registry, claims[cid]))
         for issue in item["issues"]:
             if (not isinstance(issue, dict) or set(issue) != {"field", "category", "reason"}
                     or not isinstance(issue["field"], str) or issue["field"] not in FIELDS
@@ -906,7 +1044,7 @@ class WikiSupportGate:
     def _result(self, attempt):
         registry = self.registry
         receipt = self.directory / ("response-" + attempt["request_id"] + ".json")
-        deterministic = tuple(d for c in registry.claims for d in c.diagnostics)
+        deterministic = _hard_diagnostics(registry)
         if deterministic:
             status, checks, diagnostics = "source_boundary_failed", (), deterministic
         elif not registry.claims:
@@ -977,7 +1115,7 @@ class WikiSupportGate:
             self._write(self.directory / ("candidate-" + request_id + ".json"), self.registry.payload())
             attempts.append(attempt)
             self._save(state)  # reserve BEFORE model call, including first review
-            if self.registry.claims and not any(c.diagnostics for c in self.registry.claims):
+            if self.registry.claims and not _hard_diagnostics(self.registry):
                 try:
                     raw = client.complete(system=SYSTEM, user=_json(self.registry.payload()),
                                           max_tokens=self.max_tokens)
