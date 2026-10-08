@@ -7,11 +7,11 @@ from knowledge_distiller.v1.database import connect
 from knowledge_distiller.v1.insights import InsightLibrary, InsightError
 from tests.test_organization_service import _productive_plan
 from .test_organization import organization
-from .test_topics import library
+from .test_topic_web import historical_library, establish_historical_knowledge
 
 
 def prepared(tmp_path):
-    _, store, _ = library(tmp_path)
+    _, store, _ = historical_library(tmp_path)
     plan = _productive_plan()
     plan['candidate_versions'][0]['payload']['scan_tags'] = ['来源核对', '证据边界', '认知增量']
     service, _ = organization(store, growth=plan)
@@ -82,18 +82,9 @@ def test_history_page_is_read_only_and_direct_posts_preserve_judgments(tmp_path)
 
 
 def successor(insights, version, tmp_path):
-    from .test_submitted_sources import Model, ForbiddenAudio
-    from knowledge_distiller.v1.file_sources import prepare_direct_text
-    from knowledge_distiller.v1.pipeline import Distiller
-    from knowledge_distiller.v1.worker import SingleWorker
     from tests.fixtures.growth import empty_growth_plan_payload, insight_payload, source_participant
-    audio = ForbiddenAudio()
-    engine = Distiller(store=insights.store, source=audio, normalizer=audio, recognizer=audio,
-        reviewer=audio, confirmation_clipper=audio, knowledge_model=Model(), runtime_root=tmp_path/'runtime', vault=tmp_path/'vault')
-    worker = SingleWorker(insights.store, engine)
-    for text in ('新正文丙。', '新正文丁。'):
-        insights.store.submit_source(prepare_direct_text(text))
-        worker.run_one()
+    for result_id, text in enumerate(('新正文丙。', '新正文丁。'), start=3):
+        assert establish_historical_knowledge(insights.store, text, tmp_path / 'vault') == result_id
     old = insights.read(version)
     plan = empty_growth_plan_payload()
     plan['new_input_reviews'] = [dict(knowledge_result_id=i,outcome='participated',reason_text='贡献新依据') for i in (3,4)]
