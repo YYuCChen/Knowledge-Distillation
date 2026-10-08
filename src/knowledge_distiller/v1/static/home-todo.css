@@ -557,6 +557,18 @@ mark {
 }
 @media (max-width: 720px) {
   .english-confirmation .confirmation-head { padding-right: 0; }
+}
+@media (min-width: 481px) and (max-width: 720px) {
+  .compact-confirmation .confirmation-actions,
+  .english-confirmation .confirmation-operations {
+    grid-template-columns: max-content minmax(0, 1fr) 122px;
+  }
+  .compact-confirmation .confirmation-actions .source-actions,
+  .english-confirmation .confirmation-operations .source-actions { width: max-content; }
+  .compact-confirmation .confirmation-actions .manual-entry,
+  .english-confirmation .confirmation-operations .manual-entry { padding-right: 0; }
+}
+@media (max-width: 480px) {
   .compact-confirmation .confirmation-actions,
   .english-confirmation .confirmation-operations {
     grid-template-columns: minmax(0, 1fr);
