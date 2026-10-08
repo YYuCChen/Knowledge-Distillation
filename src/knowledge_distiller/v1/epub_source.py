@@ -109,7 +109,7 @@ def parse_epub(content: bytes, label: str, source_key: str, *, converter=None, o
                     target = _resource(resource, parts.path) if parts.path else resource
                     if parts.scheme or parts.netloc or not parts.fragment or target not in document_ids or unquote(parts.fragment) not in document_ids[target]:
                         raise SourceReadError("epub_footnote_missing")
-            from .document_source import convert_document, compose_document
+            from .document_source import convert_document, compose_document, page_member_id
             from .ocr import default_ocr_runner
             ocr = ocr or default_ocr_runner()
             pieces, spans, media, images, uncertainties, chapters = [], [], [], [], [], []
@@ -119,12 +119,16 @@ def parse_epub(content: bytes, label: str, source_key: str, *, converter=None, o
                 if body is None:
                     raise SourceReadError("epub_chapter_invalid")
                 converted = convert_document(_chapter_container(archive, package_path, package, ordinal, resource, document), 'epub', converter)
-                composed = compose_document(converted, context={'spine': ordinal, 'resource': resource, 'linear': linear},
+                context = {'spine': ordinal, 'resource': resource, 'linear': linear}
+                composed = compose_document(converted, context=context,
                                             media_offset=len(media), ocr=ocr)
                 native_spans = _bind_occurrences(body, composed.snapshot, ordinal, resource, linear)
                 chapters.append({'spine': ordinal, 'resource': resource, 'linear': linear,
                                  'anchors': [node.get('id') for node in document.iter() if node.get('id')],
-                                 'links': [node.get('href') for node in document.iter() if _local(node.tag) == 'a' and node.get('href')]})
+                                 'links': [node.get('href') for node in document.iter() if _local(node.tag) == 'a' and node.get('href')],
+                                 'pages': [{'member_id': page_member_id(p.page, context=context),
+                                            'physical_page': p.page, 'width': p.width, 'height': p.height}
+                                           for p in converted.page_images]})
                 if pieces:
                     pieces.append("\n\n"); cursor += 2
                 pieces.append(composed.snapshot)
@@ -150,7 +154,7 @@ def parse_epub(content: bytes, label: str, source_key: str, *, converter=None, o
                      "package_version": package.get("version"), "unique_identifier": package.get("unique-identifier"),
                      "parser": "docling", "parser_version": converted.runtime_version})
     return ParsedSource(snapshot, metadata,
-                        {"version": 2, "kind": "epub-spine", "source_key": source_key, "package": package_path,
+                        {"version": 3, "kind": "epub-spine", "source_key": source_key, "package": package_path,
                          "snapshot_sha256": hashlib.sha256(snapshot.encode()).hexdigest(), "spans": spans,
                          "image_ocr": images, "chapters": chapters, "parser": "docling", "parser_version": converted.runtime_version},
                         tuple(media), tuple(uncertainties))

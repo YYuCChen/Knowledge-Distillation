@@ -1,5 +1,7 @@
 """Project structured document output without losing its format provenance."""
 from dataclasses import asdict, dataclass
+import hashlib
+import posixpath
 from .source_parsing import ParsedMedia, SourceReadError
 
 
@@ -21,6 +23,26 @@ class ComposedDocument:
     media: tuple
     images: list
     uncertainties: tuple
+
+
+def page_member_id(page, *, context=None):
+    """Keep PDF IDs; scope EPUB page occurrences by actual spine/resource."""
+    if context is None:
+        return f'page-{page}'
+    if not isinstance(context, dict):
+        raise SourceReadError('docling_invalid_output')
+    spine, resource = context.get('spine'), context.get('resource')
+    if (type(spine) is not int or spine < 1 or type(page) is not int or page < 1
+            or type(resource) is not str or not resource or '\x00' in resource
+            or '\\' in resource or resource.startswith('/')
+            or resource in {'.', '..'} or resource.startswith('../')
+            or posixpath.normpath(resource) != resource):
+        raise SourceReadError('docling_invalid_output')
+    try:
+        resource_sha = hashlib.sha256(resource.encode('utf-8', errors='strict')).hexdigest()
+    except UnicodeError as error:
+        raise SourceReadError('docling_invalid_output') from error
+    return f'page-epub-{spine}-{resource_sha}-{page}'
 
 
 def compose_document(converted, *, context=None, media_offset=0, ocr=None):
@@ -78,5 +100,5 @@ def compose_document(converted, *, context=None, media_offset=0, ocr=None):
                           'page_local_start': 0, 'page_local_end': end-begin,
                           'occurrence': f"{(context or {}).get('resource', 'document')}/{entry.ref}/{index}/{begin}"})
     for page in converted.page_images:
-        media.append(ParsedMedia(f'page-{page.page}', page.mime, page.image_bytes))
+        media.append(ParsedMedia(page_member_id(page.page, context=context), page.mime, page.image_bytes))
     return ComposedDocument(''.join(pieces), spans, tuple(media), images, tuple(uncertainties))
