@@ -37,8 +37,9 @@ def _same_ingestion_binding(db, item_id, binding):
 
 
 class Store:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, runtime_root: Path | None = None):
         self.path = path
+        self.preparation_runtime_root = Path(runtime_root) if runtime_root is not None else Path(path).parent / 'runtime'
 
     def initialize(self) -> None:
         initialize(self.path)
@@ -317,19 +318,159 @@ class Store:
         with connect(self.path) as db:
             return tuple(db.execute('SELECT * FROM ingestion_events WHERE item_id=? ORDER BY event_id', (item_id,)))
 
+    def presentation_context(self, item_id, pending=None, *, new_review=None):
+        """Read current source and normalize identities before building evidence.
+
+        new_review=(expected_revision, identity, result) is for a new source
+        commit, not an established SourceFact. It does not write/prepare audio.
+        """
+        from .confirmation_schema import view
+        with connect(self.path) as db:
+            row = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+            if row is None:
+                raise SourceReviewConflict('source_review_revision_conflict')
+            if pending is None:
+                pending = view(db, row)
+            else:
+                pending = dict(pending)
+                pending.setdefault('review_identity', uuid4().hex)
+                pending = _prepared_confirmation(pending, db, item_id)
+            return {'pending': pending, 'source_descriptor': _preparation_source(db, row, new_review),
+                    'item_runtime_root': self.preparation_runtime_root / 'items' / str(item_id)}
+
+    def discover_pending_presentations(self, *, after_item_id=0, limit=8):
+        """Bounded current-pending discovery; no model, files written or history scan."""
+        from .confirmation_preparation import PROTOCOL, required, input_binding, presentation_state, PreparationError
+        from .confirmation_schema import view
+        if type(limit) is not int or not 1 <= limit <= 64 or type(after_item_id) is not int or after_item_id < 0:
+            raise ValueError('preparation_page_invalid')
+        enqueued = []
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute('''SELECT * FROM distill_items i WHERE item_id>? AND state='waiting_user'
+                AND dismissed_at IS NULL AND confirmation_json IS NOT NULL
+                AND NOT EXISTS(SELECT 1 FROM source_facts sf WHERE sf.material_id=i.material_id)
+                ORDER BY item_id LIMIT ?''', (after_item_id, limit)).fetchall()
+            for row in rows:
+                pending = view(db, row)
+                source = _preparation_source(db, row)
+                if not required(pending, source):
+                    continue
+                try:
+                    binding = input_binding(pending, source_descriptor=source)
+                except PreparationError:
+                    # Unrepresentable current source cannot become a normal card.
+                    _save_preparation(db, row, pending, 'failed', 'review_incomplete',
+                                      {'protocol': PROTOCOL, 'input_binding': None, 'attempt': 1,
+                                       'outcome': 'failed', 'code': 'review_incomplete'})
+                    continue
+                prior = pending.get('presentation_preparation', {})
+                same = isinstance(prior, dict) and prior.get('protocol') == PROTOCOL and prior.get('input_binding') == binding
+                if same and prior.get('outcome') == 'failed':
+                    continue
+                if same and prior.get('outcome') == 'prepared':
+                    observed = presentation_state(pending, self.preparation_runtime_root / 'items' / str(row['item_id']), source_descriptor=source)
+                    if observed['outcome'] == 'prepared':
+                        continue
+                    marker = {**prior, 'outcome': 'failed', 'code': observed['code'] or 'review_incomplete'}
+                    _save_preparation(db, row, pending, 'failed', marker['code'], marker)
+                    continue
+                marker = {'protocol': PROTOCOL, 'input_binding': binding, 'attempt': 1, 'outcome': 'queued'}
+                _save_preparation(db, row, pending, 'queued', None, marker)
+                enqueued.append(row['item_id'])
+        return {'enqueued': tuple(enqueued), 'after_item_id': rows[-1]['item_id'] if rows else 0}
+
+    def presentation_ownership(self, item_id):
+        from .confirmation_preparation import PROTOCOL, input_binding
+        with connect(self.path) as db:
+            row = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+            pending, marker = _presentation_owned(db, row)
+            if (marker.get('protocol') != PROTOCOL or marker.get('outcome') != 'running'
+                    or marker.get('input_binding') != input_binding(pending, source_descriptor=_preparation_source(db, row))):
+                raise SourceReviewConflict('presentation_ownership_conflict')
+            return {'item_id': item_id, 'review_revision': row['review_revision'],
+                    'expected_confirmation_json': row['confirmation_json'],
+                    'input_binding': marker['input_binding'], 'attempt': marker['attempt']}
+
+    def finish_pending_presentation(self, item_id, ownership, result):
+        """Commit only an owned result, with source and WAV readback in this CAS."""
+        from .confirmation_preparation import (PROTOCOL, FAILURE_CODES, validate_change,
+                                               input_binding, validate_evidence)
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+            pending, marker = _presentation_owned(db, row)
+            actual = {'item_id': item_id, 'review_revision': row['review_revision'],
+                      'expected_confirmation_json': row['confirmation_json'],
+                      'input_binding': marker.get('input_binding'), 'attempt': marker.get('attempt')}
+            source = _preparation_source(db, row)
+            if (not isinstance(ownership, dict) or any(type(ownership.get(k)) is not int
+                    for k in ('item_id', 'review_revision', 'attempt'))
+                    or ownership != actual or not isinstance(result, dict) or result.get('ownership') != actual
+                    or marker.get('protocol') != PROTOCOL or marker.get('outcome') != 'running'
+                    or marker.get('input_binding') != input_binding(pending, source_descriptor=source)):
+                raise SourceReviewConflict('presentation_ownership_conflict')
+            if result.get('status') == 'prepared' and result.get('code') is None:
+                from .confirmation_schema import prepare
+                from .confirmation_preparation import PreparationError
+                if not isinstance(result.get('pending'), dict):
+                    raise PreparationError()
+                updated = prepare(db, item_id, result.get('pending'))
+                validate_change(pending, updated)
+                validate_evidence(updated, result.get('evidence'),
+                    self.preparation_runtime_root / 'items' / str(item_id), source_descriptor=source)
+                next_marker = {**marker, 'outcome': 'prepared', 'evidence': result['evidence']}
+                next_marker.pop('code', None)
+                _save_preparation(db, row, updated, 'waiting_user', None, next_marker)
+            elif (result.get('status') == 'failed' and result.get('code') in FAILURE_CODES
+                    and result.get('pending') is None and result.get('evidence') is None):
+                _save_preparation(db, row, pending, 'failed', result['code'],
+                                  {**marker, 'outcome': 'failed', 'code': result['code']})
+            else:
+                raise ValueError('presentation_result_invalid')
+            return db.execute('SELECT state FROM distill_items WHERE item_id=?', (item_id,)).fetchone()[0]
+
+    def retry_pending_presentation(self, item_id):
+        from .confirmation_preparation import PROTOCOL, input_binding, required
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+            pending, marker = _presentation_owned(db, row, state='failed')
+            source = _preparation_source(db, row)
+            if marker.get('protocol') != PROTOCOL or marker.get('outcome') != 'failed' or not required(pending, source):
+                raise SourceReviewConflict('presentation_ownership_conflict')
+            marker = {'protocol': PROTOCOL, 'input_binding': input_binding(pending, source_descriptor=source),
+                      'attempt': marker['attempt'] + 1, 'outcome': 'queued'}
+            _save_preparation(db, row, pending, 'queued', None, marker)
+
     def claim_next_work(self):
         with connect(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("""SELECT * FROM (
                 SELECT 'item' AS kind,item_id AS id,queued_at FROM distill_items i WHERE state='queued'
                   AND NOT EXISTS(SELECT 1 FROM collection_members cm WHERE cm.item_id=i.item_id)
+                  AND COALESCE(json_extract(confirmation_json,'$.presentation_preparation.outcome'),'')!='queued'
+                UNION ALL
+                SELECT 'presentation',item_id,queued_at FROM distill_items WHERE state='queued'
+                  AND json_extract(confirmation_json,'$.presentation_preparation.outcome')='queued'
                 UNION ALL
                 SELECT 'collection',operation_id,queued_at FROM collection_operations WHERE state='queued'
                 ) ORDER BY queued_at,id,kind LIMIT 1""").fetchone()
             if row is None:
                 return None
-            table,key = ('distill_items','item_id') if row['kind']=='item' else ('collection_operations','operation_id')
-            db.execute(f"UPDATE {table} SET state='working',updated_at=? WHERE {key}=?",(_now(),row['id']))
+            if row['kind'] == 'presentation':
+                current = db.execute('SELECT * FROM distill_items WHERE item_id=?', (row['id'],)).fetchone()
+                pending, marker = _presentation_owned(db, current, state='queued')
+                from .confirmation_preparation import PROTOCOL, input_binding
+                if (marker.get('protocol') != PROTOCOL or marker.get('input_binding') !=
+                        input_binding(pending, source_descriptor=_preparation_source(db, current))):
+                    _save_preparation(db, current, pending, 'failed', 'review_incomplete',
+                                      {**marker, 'outcome': 'failed', 'code': 'review_incomplete'})
+                    return None
+                _save_preparation(db, current, pending, 'working', None, {**marker, 'outcome': 'running'})
+            else:
+                table,key = ('distill_items','item_id') if row['kind']=='item' else ('collection_operations','operation_id')
+                db.execute(f"UPDATE {table} SET state='working',updated_at=? WHERE {key}=?",(_now(),row['id']))
             return row['kind'],row['id']
 
     def claim_next_item(self) -> int | None:
@@ -337,7 +478,9 @@ class Store:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """SELECT item_id FROM distill_items
-                   WHERE state = 'queued' AND NOT EXISTS (
+                   WHERE state = 'queued'
+                   AND COALESCE(json_extract(confirmation_json,'$.presentation_preparation.outcome'),'')!='queued'
+                   AND NOT EXISTS (
                        SELECT 1 FROM collection_members cm WHERE cm.item_id=distill_items.item_id)
                    ORDER BY queued_at, item_id LIMIT 1"""
             ).fetchone()
@@ -359,13 +502,33 @@ class Store:
             connection.execute("""UPDATE collection_operations
                 SET state=CASE WHEN cancel_requested=1 THEN 'cancelled' ELSE 'queued' END,updated_at=?
                 WHERE state='working'""", (_now(),))
-            return connection.execute(
+            from .confirmation_preparation import PROTOCOL
+            # A durable running attempt may have made a model request. Reboot
+            # cannot prove it did not: preserve its cache, fail once, await retry.
+            presentations = connection.execute('''SELECT * FROM distill_items WHERE state='working'
+                AND json_extract(confirmation_json,'$.presentation_preparation.protocol')=?
+                AND json_extract(confirmation_json,'$.presentation_preparation.outcome')='running' ''', (PROTOCOL,)).fetchall()
+            for row in presentations:
+                pending = json.loads(row['confirmation_json'])
+                marker = pending['presentation_preparation']
+                _save_preparation(connection, row, pending, 'failed', 'review_incomplete',
+                                  {**marker, 'outcome': 'failed', 'code': 'review_incomplete'})
+            return len(presentations) + connection.execute(
                 """UPDATE distill_items SET state = 'queued', updated_at = ?
                    WHERE state = 'working'""",
                 (_now(),),
             ).rowcount
 
     def retry_item(self, item_id: int, replacement=None) -> None:
+        row = self.item_bundle(item_id)
+        if row is not None and row['confirmation_json']:
+            from .confirmation_preparation import PROTOCOL
+            marker = json.loads(row['confirmation_json']).get('presentation_preparation', {})
+            if isinstance(marker, dict) and marker.get('protocol') == PROTOCOL and marker.get('outcome') == 'failed':
+                if replacement is not None:
+                    raise ValueError('presentation_source_replacement_forbidden')
+                self.retry_pending_presentation(item_id)
+                return
         self.expire_submitted_sources()
         self._enqueue_existing(item_id, expected_state="failed", replacement=replacement)
 
@@ -440,6 +603,14 @@ class Store:
             if row["state"] != "waiting_user" or row["confirmation_json"] != expected_json:
                 from .confirmation_revision import ConfirmationConflict
                 raise ConfirmationConflict("来源确认已更新，请查看该疑点当前状态。")
+            # Fresh decisions, including unable/manual, require the real current
+            # presentation proof. An already committed group replay above is
+            # still idempotent and does not establish another fact.
+            from .confirmation_preparation import ready, PreparationError
+            pending = json.loads(row['confirmation_json'])
+            if row['source_fact_id'] is None and not ready(pending, self.preparation_runtime_root / 'items' / str(item_id),
+                         source_descriptor=_preparation_source(connection, row)):
+                raise PreparationError('review_incomplete')
             if group_decision is not None:
                 from .confirmation_schema import view
                 from .confirmation_revision import ConfirmationConflict
@@ -672,6 +843,13 @@ class Store:
                     raise ValueError('failed_review_cannot_establish_source')
             elif (fact is None) == (confirmation is None):
                 raise ValueError('completed_review_requires_one_outcome')
+            if confirmation is not None:
+                from .confirmation_preparation import ready, PreparationError
+                confirmation = _prepared_confirmation(confirmation, connection, item_id)
+                source = _preparation_source(connection, row, (expected_revision, identity, result))
+                if not ready(confirmation, self.preparation_runtime_root / 'items' / str(item_id),
+                             source_descriptor=source):
+                    raise PreparationError('review_incomplete')
             connection.execute('INSERT INTO source_review_results VALUES (?,?,?,?,?,?)',
                 (item_id, expected_revision, identity, 'failed' if failure else 'complete', _json(result), _now()))
             if fact is not None:
@@ -1071,6 +1249,74 @@ class Store:
             _wake_collection(connection, item_id)
 
 
+def _preparation_source(db, row, new_review=None):
+    """Current DB source; stable source review differs from workflow CAS counter."""
+    from .confirmation_preparation import digest
+    material = db.execute('SELECT * FROM materials WHERE material_id=?', (row['material_id'],)).fetchone()
+    submitted = db.execute('SELECT * FROM submitted_sources WHERE item_id=?', (row['item_id'],)).fetchone()
+    if new_review is None:
+        review = db.execute('''SELECT revision,identity,result_json FROM source_review_results
+            WHERE item_id=? AND status='complete' ORDER BY revision DESC LIMIT 1''', (row['item_id'],)).fetchone()
+        review = dict(review) if review else None
+    else:
+        revision, identity, result = new_review
+        if row['state'] != 'working' or row['review_revision'] != revision:
+            raise SourceReviewConflict('source_review_revision_conflict')
+        review = {'revision': revision, 'identity': identity, 'result_json': _json(result)}
+    submitted_source = None
+    if submitted is not None:
+        submitted_source = {k: submitted[k] for k in ('input_kind', 'input_key', 'input_label', 'input_metadata')}
+        submitted_source['content_sha256'] = hashlib.sha256(submitted['content']).hexdigest() if submitted['content'] is not None else None
+    media = [dict(r) for r in db.execute('''SELECT member_id,position,mime_type,sha256
+        FROM source_media WHERE material_id=? ORDER BY position,member_id''', (row['material_id'],))]
+    text_kinds = {'direct_text', 'markdown', 'pdf', 'epub'}
+    kinds = [material['source_kind'] if material else None,
+             submitted['input_kind'] if submitted else None]
+    # Platform names alone cannot distinguish a video from an article.
+    modality = ('audio' if any(m['mime_type'].startswith(('audio/', 'video/')) for m in media)
+                or 'feishu_voice' in kinds else
+                'text' if all(k in text_kinds for k in kinds if k is not None)
+                and any(k in text_kinds for k in kinds) and not media else 'unknown')
+    return {'item_id': row['item_id'], 'material_id': row['material_id'],
+            'source_modality': modality,
+            'source_kind': material['source_kind'] if material else '',
+            'source_key': material['source_key'] if material else '',
+            'review_revision': review['revision'] if review else None,
+            'source_sha256': digest({'material': dict(material) if material else None,
+                'submitted': submitted_source, 'review': review, 'media': media,
+                'delivery': [row['submitted_url'], row['platform_authority_json'],
+                             row['ingestion_contract'], row['source_binding_sha256'], row['relation_binding_sha256']]})}
+
+
+def _presentation_owned(db, row, *, state='working'):
+    from .confirmation_preparation import PROTOCOL
+    if (row is None or row['state'] != state or row['dismissed_at'] is not None
+            or row['confirmation_json'] is None
+            or db.execute('SELECT 1 FROM source_facts WHERE material_id=?', (row['material_id'],)).fetchone()):
+        raise SourceReviewConflict('presentation_ownership_conflict')
+    pending = json.loads(row['confirmation_json'])
+    marker = pending.get('presentation_preparation')
+    if (not isinstance(marker, dict) or marker.get('protocol') != PROTOCOL
+            or type(marker.get('attempt')) is not int or marker['attempt'] <= 0):
+        raise SourceReviewConflict('presentation_ownership_conflict')
+    return pending, marker
+
+
+def _save_preparation(db, row, pending, state, code, marker):
+    """One owned transaction, retaining protected JSON and source copies."""
+    pending = {**pending, 'presentation_preparation': marker}
+    changed = db.execute('''UPDATE distill_items SET state=?,phase='reviewing',error_code=?,
+        confirmation_json=?,queued_at=CASE WHEN ?='queued' THEN ? ELSE queued_at END,updated_at=?
+        WHERE item_id=? AND review_revision=? AND confirmation_json IS ? AND state=?
+        AND dismissed_at IS NULL''',
+        (state, code, _confirmation_json(pending, db, row['item_id']), state, _now(), _now(),
+         row['item_id'], row['review_revision'], row['confirmation_json'], row['state'])).rowcount
+    if changed != 1:
+        raise SourceReviewConflict('presentation_ownership_conflict')
+    db.execute('UPDATE submitted_sources SET retain_until=NULL WHERE item_id=?', (row['item_id'],))
+    _sync_manual_cards(db, row['item_id'])
+
+
 def _group_payload(request):
     return {key: (sorted(request[key]) if key == 'selected_member_uids' else request[key])
             for key in ('group_id', 'group_revision', 'selected_member_uids', 'action', 'value')}
@@ -1156,12 +1402,18 @@ def _establish_source_fact(
     return int(cursor.lastrowid)
 
 
-def _confirmation_json(confirmation: Mapping[str, object], connection=None, item_id=None) -> str:
+def _prepared_confirmation(confirmation: Mapping[str, object], connection=None, item_id=None):
+    """The exact persisted body, before the deliberately unbound submit token."""
     if connection is not None:
         from .confirmation_schema import prepare
         confirmation = prepare(connection, item_id, confirmation)
     from .confirmation_display import concern_total
-    return _json({**confirmation, "review_identity": confirmation.get("review_identity", confirmation.get("token", uuid4().hex)), "concern_total": concern_total(confirmation), "token": uuid4().hex})
+    return {**confirmation, "review_identity": confirmation.get("review_identity", confirmation.get("token", uuid4().hex)),
+            "concern_total": concern_total(confirmation)}
+
+
+def _confirmation_json(confirmation: Mapping[str, object], connection=None, item_id=None) -> str:
+    return _json({**_prepared_confirmation(confirmation, connection, item_id), "token": uuid4().hex})
 
 
 def _json(value: object) -> str:
