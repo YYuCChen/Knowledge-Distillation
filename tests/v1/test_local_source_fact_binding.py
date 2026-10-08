@@ -247,9 +247,9 @@ def test_actual_document_parser_with_injected_converter_cannot_invent_execution_
     parsed = parse_submitted_source(source, converter=Converter(), ocr=NoOcr())
     assert parsed.snapshot == body
     before = snapshot(store)
-    # PDF retains actual pypdf TextStringObject metadata: exact JSON types
-    # reject it before the trace gate. Do not normalize it in this fixture.
-    code = 'local_source_result_invalid' if kind == 'pdf' else 'local_parse_trace_required'
+    # D0 preserves decoded PDF Info values as plain strings. Both document
+    # kinds still lack a trusted execution receipt and must hit the trace gate.
+    code = 'local_parse_trace_required'
     with pytest.raises(ValueError, match='^' + code + '$'):
         commit(store, item, revision, source, parsed)
     assert snapshot(store) == before

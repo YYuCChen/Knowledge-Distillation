@@ -61,6 +61,8 @@ def parse_pdf(content: bytes, label: str, source_key: str, *, converter=None, oc
 
 
 def _metadata(reader) -> dict:
+    from pypdf.generic import TextStringObject
+
     declarations = []
     info = reader.metadata
     fields = {"/Title": "title", "/Author": "author", "/Subject": "subject", "/Keywords": "keywords",
@@ -70,8 +72,10 @@ def _metadata(reader) -> dict:
             value = info.get(field)
             if value is None:
                 continue
-            if not isinstance(value, str):
+            if type(value) not in (str, TextStringObject):
                 raise SourceReadError("pdf_metadata_invalid")
+            if type(value) is TextStringObject:
+                value = str(value)
             declarations.append({"structure": "Info", "field": field, "role": role, "value": value,
                                  "provenance": "document-declared"})
     xmp = reader.trailer["/Root"].get("/Metadata")
