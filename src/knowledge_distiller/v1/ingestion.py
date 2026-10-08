@@ -256,7 +256,7 @@ class RawReceipt:
 
 
 def verify_record(ledger: raw.RawLedger, record, vault: Path,
-                  *, source_version: str, _released=False) -> RawReceipt:
+                  *, source_version: str, _released=False, db=None) -> RawReceipt:
     if record is None or not source_version:
         raise IngestionError("binding_missing")
     content = record["content"].encode("utf-8")
@@ -286,9 +286,14 @@ def verify_record(ledger: raw.RawLedger, record, vault: Path,
     attachments = []
     manifest = json.loads(record["attachments_json"])
     if record["subject_kind"] == "material":
-        with connect(ledger.store.path) as db:
-            retained = {(r["member_id"], r["sha256"], r["mime_type"]) for r in db.execute(
+        def retained_media(connection):
+            return {(r["member_id"], r["sha256"], r["mime_type"]) for r in connection.execute(
                 "SELECT member_id,sha256,mime_type FROM source_media WHERE material_id=?", (record["subject_id"],))}
+        if db is None:
+            with connect(ledger.store.path) as connection:
+                retained = retained_media(connection)
+        else:
+            retained = retained_media(db)
         declared = {(a["member_id"], a["sha256"], a["mime_type"]) for a in manifest}
         if retained != declared or len(declared) != len(manifest):
             raise IngestionError("attachment_manifest_incomplete")
@@ -298,7 +303,9 @@ def verify_record(ledger: raw.RawLedger, record, vault: Path,
         # Only the internal release path may use previously proved immutable
         # attachment identities after owned source bytes have been cleared.
         # This read-only result is never an API success/release capability.
-        expected = content if _released else raw._attachment_bytes(ledger.store, record, attachment)
+        expected = content if _released else (
+            raw._attachment_bytes(ledger.store, record, attachment) if db is None else
+            raw._attachment_bytes(ledger.store, record, attachment, db=db))
         if content != expected or digest(content) != attachment["sha256"]:
             raise IngestionError("attachment_bytes_mismatch")
         attachments.append((relative, attachment["sha256"]))
