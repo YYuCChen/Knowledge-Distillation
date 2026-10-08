@@ -18,7 +18,7 @@ def insight_blueprint(store, obsidian_url, publication_file=lambda *args: None):
         def formatted(value):
             if not value:
                 return ''
-            date = datetime.fromisoformat(value).astimezone(ZoneInfo('Asia/Shanghai'))
+            date = datetime.fromisoformat(value).astimezone(ZoneInfo('Asia/Taipei'))
             return f'{date.year} 年 {date.month} 月 {date.day} 日 {date:%H:%M}'
         item['date'] = formatted(item['time'])
         item['annotation_date'] = formatted(item['annotation_time'])

@@ -34,8 +34,8 @@ def search_records(snapshot, points, query):
 
 
 def _date(value):
-    current = datetime.now(ZoneInfo('Asia/Shanghai'))
-    date = datetime.fromisoformat(value).astimezone(ZoneInfo('Asia/Shanghai'))
+    current = datetime.now(ZoneInfo('Asia/Taipei'))
+    date = datetime.fromisoformat(value).astimezone(ZoneInfo('Asia/Taipei'))
     year = f'{date.year} 年 ' if date.year != current.year else ''
     return f'更新于 {year}{date.month} 月 {date.day} 日'
 

@@ -13,7 +13,7 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
-from .database import SCHEMA_VERSION, initialize
+from .database import SCHEMA_VERSION, _schema27_check_catalog, initialize
 
 
 MARKER_NAME = ".kd-offline-upgrade.json"
@@ -22,10 +22,10 @@ DATABASE_NAME = "knowledge.sqlite3"
 VAULT_RELPATH = "synthetic-vault"
 _SHA256_LENGTH = 64
 
-# Frozen historical storage plus the finite approved26 transform; no target DB oracle.
+# Frozen historical storage qualified by the shared finite catalog; no DB oracle.
 IDENTITY_CONTRACT = 'all-prior-schema-and-columns-v2'
-_PRIOR_SCHEMAS = (21, 22, 23, 25)
-_APPROVED_TARGET_SCHEMA = 26
+_PRIOR_SCHEMAS = (21, 22, 23, 25, 26)
+_APPROVED_TARGET_SCHEMA = 27
 _PARENT_STATE_PATTERN = r"state IN \(\s*'queued',\s*'working',\s*'waiting_user',\s*'succeeded',\s*'failed'\s*\)"
 _PARENT_STATE_V25 = "state IN ('queued','working','waiting_user','succeeded','failed','raw_saved')"
 _PARENT_CHECK_V25 = ", CHECK(state!='raw_saved' OR (phase='done' AND ingestion_contract='raw-verified-v1')))"
@@ -388,7 +388,19 @@ def _freeze25(connection, objects, columns):
     _full_autoindices(connection, indices, code=code)
 
 
+def _check_catalog(connection, version, *, code):
+    # The supplied connection is the probe's existing mode=ro/query_only reader.
+    # Shared fixed literals qualify the whole catalog; no initializer or UDF grant.
+    try:
+        _schema27_check_catalog(connection, version)
+    except RuntimeError:
+        raise UpgradeProbeError(code) from None
+
+
 def _freeze(connection, version):
+    if version not in _PRIOR_SCHEMAS:
+        raise UpgradeProbeError('unsupported_schema')
+    _check_catalog(connection, version, code='precheck_failed')
     objects = _objects(connection)
     columns = {name: _columns(connection, name) for name, value in objects.items()
                if value[0] == 'table'}
@@ -410,8 +422,17 @@ def _freeze(connection, version):
     }
     if any(not names <= {row[1] for row in columns[table]} for table, names in required.items()):
         raise UpgradeProbeError('precheck_failed')
-    if version == 25:
-        _freeze25(connection, objects, columns)
+    if version in (25, 26):
+        if version == 25:
+            _freeze25(connection, objects, columns)
+        else:
+            if connection.execute("""SELECT 1 FROM submitted_sources WHERE
+                    typeof(item_id)!='integer' OR typeof(input_kind)!='text'
+                    OR typeof(input_key)!='text' OR typeof(input_label)!='text'
+                    OR typeof(input_metadata)!='text' OR typeof(content) NOT IN ('blob','null')
+                    OR typeof(retain_until) NOT IN ('text','null') OR typeof(retryable)!='integer'
+                    OR retryable NOT IN (0,1) OR typeof(binding_scope)!='text' LIMIT 1""").fetchone():
+                raise UpgradeProbeError('precheck_failed')
         return {'version': version, 'objects': objects, 'columns': columns,
                 'indices': _indices(connection, columns),
                 'foreign_keys': {name: tuple(tuple(row) for row in connection.execute(
@@ -467,57 +488,27 @@ def _without_additions(sql, table):
 def _check_after(connection, prior):
     if connection.execute('PRAGMA user_version').fetchone()[0] != _APPROVED_TARGET_SCHEMA:
         raise UpgradeProbeError('legacy_changed')
-    actual = _objects(connection)
-    expected = {**prior['objects'], **_APPROVED_DDL, **_V26_DDL}
-    if prior['version'] == 25:
-        expected = {**prior['objects'], **_V26_DDL}
-    expected['submitted_sources'] = ('table', 'submitted_sources', _SUBMITTED_V26_SQL)
-    for name, (table, _) in _AUTO_INDEX_COLUMNS.items():
-        expected[name] = ('index', table, None)
-    if actual.keys() != expected.keys():
-        raise UpgradeProbeError('legacy_changed')
-    for name, wanted in expected.items():
-        kind, parent, sql = actual[name]
-        if kind == 'table' and name in _ADDITIONS and prior['version'] != 25:
-            sql = _without_additions(sql, name)
-        if name == 'distill_items' and prior['version'] != 25:
-            wanted = (wanted[0], wanted[1], _parent_v25_sql(wanted[2]))
-        if (kind, parent, sql) != wanted:
-            raise UpgradeProbeError('legacy_changed')
+    _check_catalog(connection, 27, code='legacy_changed')
     for table, old in prior['columns'].items():
         current = _columns(connection, table)
-        additions = _ADDITIONS.get(table, ()) if prior['version'] != 25 else ()
-        if table == 'submitted_sources':
+        additions = _ADDITIONS.get(table, ()) if prior['version'] in (21, 22, 23) else ()
+        if table == 'submitted_sources' and prior['version'] != 26:
             additions = ("binding_scope TEXT NOT NULL DEFAULT 'legacy' CHECK(typeof(binding_scope)='text')",)
         if current[:len(old)] != old or len(current) != len(old) + len(additions):
             raise UpgradeProbeError('legacy_changed')
         fks = tuple(tuple(row) for row in connection.execute(
-            f"PRAGMA foreign_key_list({_quote_identifier(table)})"))
+            f'PRAGMA foreign_key_list({_quote_identifier(table)})'))
         if fks != prior['foreign_keys'][table]:
             raise UpgradeProbeError('legacy_changed')
     for table, definitions in _ADDITIONS.items():
         _added_columns(connection, table, definitions, code='legacy_changed',
-                       check_defaults=prior['version'] != 25)
-    if _columns(connection, 'submitted_sources')[-1] != (8, 'binding_scope', 'TEXT', 1, "'legacy'", 0, 0):
+                       check_defaults=prior['version'] in (21, 22, 23))
+    if prior['version'] != 26 and connection.execute(
+            "SELECT 1 FROM submitted_sources WHERE binding_scope IS NOT 'legacy' LIMIT 1").fetchone():
         raise UpgradeProbeError('legacy_changed')
-    if connection.execute("SELECT 1 FROM submitted_sources WHERE binding_scope IS NOT 'legacy' LIMIT 1").fetchone():
-        raise UpgradeProbeError('legacy_changed')
-    indices = _indices(connection, [name for name, value in actual.items() if value[0] == 'table'])
-    for name, old in prior['indices'].items():
-        if name == 'sqlite_autoindex_submitted_sources_1':
-            continue  # Only this exact full three-key index transform is allowed.
-        if name == 'sqlite_autoindex_wiki_tasks_2' and prior['version'] == 22:
-            continue  # Exact approved six-column uniqueness is checked below.
-        if indices.get(name) != old:
-            raise UpgradeProbeError('legacy_changed')
-    _full_autoindices(connection, indices, code='legacy_changed')
-    if indices.get('sqlite_autoindex_submitted_sources_1') != _input_index(target=True):
-        raise UpgradeProbeError('legacy_changed')
-    if indices.get('ingestion_events_local_owner') != (1, 'c', 1, (
-            (0, 5, 'item_id', 0, 'BINARY', 1), (1, -1, None, 0, 'BINARY', 0))):
-        raise UpgradeProbeError('legacy_changed')
-    for table in ('ingestion_events', 'wiki_outcome_receipts'):
-        if table not in prior['columns'] and connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]:
+    for table in ('ingestion_events', 'wiki_outcome_receipts', 'source_identity_events'):
+        if table not in prior['columns'] and connection.execute(
+                f'SELECT 1 FROM {_quote_identifier(table)} LIMIT 1').fetchone():
             raise UpgradeProbeError('legacy_changed')
 
 
@@ -557,15 +548,15 @@ def _legacy_identity(connection, prior):
 def _snapshot(database: Path, expected_vault: Path, *, prior=None) -> dict:
     with closing(_sqlite_readonly(database)) as connection:
         schema = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if prior is None:
+            prior = _freeze(connection, schema)
+        else:
+            _check_after(connection, prior)
         quick_rows = [tuple(row) for row in connection.execute("PRAGMA quick_check")]
         foreign_key_violations = sum(1 for _ in connection.execute("PRAGMA foreign_key_check"))
         vault_rows = list(connection.execute("SELECT value FROM settings WHERE key = 'vault_path'"))
         if len(vault_rows) != 1 or vault_rows[0][0] != str(expected_vault):
             raise UpgradeProbeError("fixture_invalid")
-        if prior is None:
-            prior = _freeze(connection, schema)
-        else:
-            _check_after(connection, prior)
         counts, legacy_digest = _legacy_identity(connection, prior)
     return {"schema": schema, "quick_check": quick_rows == [("ok",)],
             "foreign_key_violations": foreign_key_violations,

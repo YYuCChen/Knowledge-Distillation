@@ -1,7 +1,8 @@
-"""Disposable genuine SQL-built 21/22/23/25 lanes; no App/native helpers."""
+"""Disposable genuine SQL-built 21/22/23/25/26 lanes; no App/native helpers."""
 from contextlib import closing
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 
@@ -17,6 +18,8 @@ BODY = b'\x00\xff\r\nA'
 
 
 def _directory(path):
+    assert path.resolve().is_relative_to(Path('/tmp').resolve())
+    assert path.parent.stat().st_uid == os.getuid()
     path.mkdir(mode=0o700)
     path.chmod(0o700)
     return path
@@ -34,7 +37,13 @@ def _marker(database, vault, version):
     path.chmod(0o600)
 
 
-def _prepare(tmp_path, version):
+def _prepare(tmp_path, version, *, sparse_wiki=False):
+    if version == 26:
+        assert not sparse_wiki
+        path, vault, report = _prepare(tmp_path, 25)
+        _upgrade_to26(path)
+        _marker(path, vault, 26)
+        return path, vault, report
     root = _directory(tmp_path / 'data')
     vault = _directory(root / probe.VAULT_RELPATH)
     raw = _directory(vault / 'raw')
@@ -72,7 +81,10 @@ def _prepare(tmp_path, version):
                 (f'R-20261008-{ordinal:04}', kind, subject, identity,
                  f'raw/合成/{ordinal}.md', SENTINEL, hashlib.sha256(SENTINEL.encode()).hexdigest(),
                  '[ ]', 'app', '2099-01-01T00:00:00Z'))
-        if version >= 22:
+        if sparse_wiki:
+            assert version == 22
+            _seed_sparse22(db, vault)
+        elif version >= 22:
             db.execute('''INSERT INTO wiki_tasks(task_id,vault_path,vault_key,request_kind,
                 trigger_source,backend,model,effort,kit_version,kit_manifest_sha256,
                 boundary_sha256,state,raw_count,batch_count,created_at,updated_at)
@@ -106,7 +118,7 @@ def _prepare(tmp_path, version):
 def _seed_prior25(path, vault):
     """Real typed observation/writer plus a real legacy validated candidate.
 
-    Never initialize this historical DB with the current26 engine. The private
+    Never initialize this historical DB with the current27 engine. The private
     WikiOutcomes writer produces the checked payload; its reserved canonical
     storage projection is validated only, never an accepted/published receipt.
     The deterministic checker below covers the complete synthetic closing note;
@@ -217,7 +229,7 @@ def _read_rows(path, selected=None):
             + ' FROM "' + name + '" ORDER BY rowid').fetchall() for name, cols in selected.items()}
 
 
-@pytest.mark.parametrize('version', [21, 22, 23, 25])
+@pytest.mark.parametrize('version', [21, 22, 23, 25, 26])
 def test_real_sql_versions_preserve_all_original_columns_and_vault(tmp_path, version):
     path, vault, report = _prepare(tmp_path, version)
     selected, before = _read_rows(path)
@@ -225,7 +237,7 @@ def test_real_sql_versions_preserve_all_original_columns_and_vault(tmp_path, ver
     assert _run(path, report) == 0
     result = json.loads(report.read_text())
     assert result['database']['schema_before'] == version
-    assert result['database']['schema_after'] == 26
+    assert result['database']['schema_after'] == 27
     assert result['legacy']['identity_contract'] == 'all-prior-schema-and-columns-v2'
     assert set(result['legacy']['table_counts_before']) == set(selected)
     assert result['legacy']['table_counts_after'] == {name: len(rows) for name, rows in before.items()}
@@ -235,12 +247,12 @@ def test_real_sql_versions_preserve_all_original_columns_and_vault(tmp_path, ver
     assert result['vault']['unchanged'] and report.stat().st_mode & 0o777 == 0o600
     assert SENTINEL not in report.read_text() and str(vault) not in report.read_text()
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 26
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 27
         assert db.execute('PRAGMA quick_check').fetchall() == [('ok',)]
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
         assert db.execute('SELECT ingestion_contract,source_binding_sha256,relation_binding_sha256 FROM distill_items WHERE item_id=51').fetchall() == [('legacy', None, None)]
         assert db.execute('SELECT ingestion_contract,source_binding_sha256,relation_binding_sha256 FROM collection_operations WHERE operation_id=71').fetchall() == [('legacy', None, None)]
-        if version != 25:
+        if version not in (25, 26):
             assert all(row == ('legacy', '{}', None) for row in db.execute('SELECT outcome_contract,plan_json,plan_sha256 FROM wiki_tasks'))
             assert db.execute('SELECT COUNT(*) FROM ingestion_events').fetchone()[0] == 0
             assert db.execute('SELECT COUNT(*) FROM wiki_outcome_receipts').fetchone()[0] == 0
@@ -252,7 +264,7 @@ def test_real_sql_versions_preserve_all_original_columns_and_vault(tmp_path, ver
         assert all(row == ('legacy',) for row in db.execute('SELECT binding_scope FROM submitted_sources'))
         assert db.execute('SELECT content FROM source_media').fetchone()[0] == BODY
         assert db.execute('SELECT legacy_material_id FROM media_lifecycle').fetchone()[0] == 40
-        if version != 25:
+        if version not in (25, 26):
             assert db.execute("SELECT count(*) FROM distill_items WHERE state='raw_saved'").fetchone()[0] == 0
     with database_module.connect(path) as ordinary:
         with pytest.raises(sqlite3.IntegrityError, match='raw terminal proof unavailable'):
@@ -270,7 +282,7 @@ def test_real_version_marker_mismatch_never_initializes(tmp_path, monkeypatch, v
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize('declared', [True, 21.0, '21', 20, 24, 26, None])
+@pytest.mark.parametrize('declared', [True, 21.0, '21', 20, 24, 27, 28, None])
 def test_marker_expected_schema_is_exact_supported_integer(tmp_path, monkeypatch, declared):
     path, vault, report = _prepare(tmp_path, 21)
     _marker(path, vault, declared)
@@ -312,7 +324,7 @@ def test_committed_observation_mutation_is_not_hidden_by_wiki_prefix(tmp_path, m
     assert _run(path, report) == 1
     assert json.loads(report.read_text())['error_code'] == 'legacy_changed'
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 26  # No restore claim.
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 27  # No restore claim.
 
 
 @pytest.mark.parametrize('change', ['extra_column', 'drop_guard', 'wrong_default', 'new_event'])
@@ -337,7 +349,7 @@ def test_unapproved_committed_schema_or_backfill_is_rejected(tmp_path, monkeypat
                 db.execute(guard)  # Restore DDL so only the added-column value is corrupt.
                 assert db.execute('SELECT source_binding_sha256 FROM distill_items WHERE item_id=51').fetchone()[0] == 'a' * 64
                 assert db.execute("SELECT sql FROM sqlite_master WHERE name='distill_items_ingestion_binding_immutable'").fetchone()[0] == guard
-                assert db.execute('PRAGMA user_version').fetchone()[0] == 26
+                assert db.execute('PRAGMA user_version').fetchone()[0] == 27
             else:
                 # No fake filesystem proof: an unauthorized backfill is a new
                 # observation on legacy data, with typed guard deliberately absent.
@@ -353,13 +365,13 @@ def test_unapproved_committed_schema_or_backfill_is_rejected(tmp_path, monkeypat
     assert json.loads(report.read_text())['error_code'] == 'legacy_changed'
     if change == 'wrong_default':
         with closing(sqlite3.connect(path)) as db:
-            assert db.execute('PRAGMA user_version').fetchone()[0] == 26  # Postcheck rejected, not rolled back.
+            assert db.execute('PRAGMA user_version').fetchone()[0] == 27  # Postcheck rejected, not rolled back.
             assert db.execute('SELECT source_binding_sha256 FROM distill_items WHERE item_id=51').fetchone()[0] == 'a' * 64
             assert db.execute("SELECT sql FROM sqlite_master WHERE name='distill_items_ingestion_binding_immutable'").fetchone()[0] == observed['guard']
 
 
 @pytest.mark.parametrize('version', [22, 25])
-def test_postcheck_failure_retains_committed_26_not_restored_claim(tmp_path, monkeypatch, version):
+def test_postcheck_failure_retains_committed_27_not_restored_claim(tmp_path, monkeypatch, version):
     path, _, report = _prepare(tmp_path, version)
     original = probe._snapshot
     def unhealthy(*args, **kwargs):
@@ -371,7 +383,7 @@ def test_postcheck_failure_retains_committed_26_not_restored_claim(tmp_path, mon
     assert _run(path, report) == 1
     assert json.loads(report.read_text()) == {'schema_version': 1, 'ok': False, 'error_code': 'postcheck_failed'}
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 26
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 27
 
 
 @pytest.mark.parametrize('change', ['bytes', 'permissions', 'directory'])
@@ -431,17 +443,17 @@ def test_permissions_do_not_get_repaired_implicitly(tmp_path, monkeypatch, targe
 
 def test_source_digest_distinguishes_text_blob_null_and_empty(tmp_path):
     path, vault, _ = _prepare(tmp_path, 21)
-    with closing(sqlite3.connect(path)) as db:
-        db.execute('CREATE TABLE original_extra(value)')
-        db.executemany('INSERT INTO original_extra VALUES(?)', [(None,), ('',), (b'',), ('é',), ('é',)])
-        db.commit()
-    before = probe._snapshot(path, vault)
-    with closing(sqlite3.connect(path)) as db:
-        db.execute("UPDATE original_extra SET value='' WHERE value IS NULL")
-        db.commit()
-    changed = probe._snapshot(path, vault)
-    assert before['legacy_table_counts'] == changed['legacy_table_counts']
-    assert before['legacy_digest'] != changed['legacy_digest']
+    fingerprints, counts = [], []
+    # A known original BLOB-affinity nullable column, not an unknown extra table.
+    for value in (None, '', b'', 'é', 'é'):
+        with closing(sqlite3.connect(path)) as db:
+            db.execute('UPDATE submitted_sources SET content=? WHERE item_id=51', (value,))
+            db.commit()
+        snapshot = probe._snapshot(path, vault)
+        fingerprints.append(snapshot['legacy_digest'])
+        counts.append(snapshot['legacy_table_counts'])
+    assert len(set(fingerprints)) == 5
+    assert all(value == counts[0] for value in counts)
 
 
 @pytest.mark.parametrize('version', [21, 22, 23])
@@ -487,38 +499,41 @@ def test_committed_v25_terminal_guard_damage_is_rejected(tmp_path, monkeypatch, 
     assert _run(path, report) == 1
     assert json.loads(report.read_text())['error_code'] == 'legacy_changed'
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 26  # Committed, no recovery claim.
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 27  # Committed, no recovery claim.
 
 
 @pytest.mark.parametrize('change', ['state', 'paired_check', 'table_name'])
 def test_v25_parent_catalog_projection_must_match_exact_approved_transform(tmp_path, monkeypatch, change):
-    # Corrupt the catalog read boundary, not writable_schema or an invented target DB.
-    # Actual initialization still commits 26; this verifies the probe's independent comparison.
     path, _, report = _prepare(tmp_path, 21)
-    actual = probe._objects
-    def damaged_catalog(db):
-        result = actual(db)
-        if db.execute('PRAGMA user_version').fetchone()[0] == 26:
-            kind, parent, sql = result['distill_items']
-            old, new = {
-                'state': (",'raw_saved'", ''),
-                'paired_check': ("AND ingestion_contract='raw-verified-v1'", 'AND 1'),
-                'table_name': ('CREATE TABLE "distill_items"', 'CREATE TABLE distill_items'),
-            }[change]
-            assert sql.count(old) == 1
-            result['distill_items'] = (kind, parent, sql.replace(old, new, 1))
-        return result
-    monkeypatch.setattr(probe, '_objects', damaged_catalog)
+    actual = probe._sqlite_readonly
+    def reader(database):
+        def alter(sql, rows):
+            if sql != 'SELECT type,name,tbl_name,sql FROM sqlite_schema':
+                return rows
+            damaged = []
+            for kind, name, parent, ddl in rows:
+                if name == 'distill_items':
+                    old, new = {
+                        'state': (",'raw_saved'", ''),
+                        'paired_check': ("AND ingestion_contract='raw-verified-v1'", 'AND 1'),
+                        'table_name': ('CREATE TABLE "distill_items"', 'CREATE TABLE "unapproved_parent"'),
+                    }[change]
+                    assert ddl.count(old) == 1
+                    ddl = ddl.replace(old, new, 1)
+                damaged.append((kind, name, parent, ddl))
+            return damaged
+        return _MetadataReader(actual(database), alter)
+    monkeypatch.setattr(probe, '_sqlite_readonly', reader)
     assert _run(path, report) == 1
     assert json.loads(report.read_text())['error_code'] == 'legacy_changed'
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 26
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 27
 
 
 def test_target_version_drift_is_rejected_before_initialize(tmp_path, monkeypatch):
     path, _, report = _prepare(tmp_path, 21)
     before = path.read_bytes()
-    monkeypatch.setattr(probe, 'SCHEMA_VERSION', 27)
+    monkeypatch.setattr(probe, 'SCHEMA_VERSION', 28)
     monkeypatch.setattr(probe, 'initialize', lambda *_: pytest.fail('must not migrate'))
     assert _run(path, report) == 1
     assert json.loads(report.read_text())['error_code'] == 'unsupported_schema'
@@ -613,7 +628,12 @@ def _rebuild_table(db, table, transform, *, generated_scope=False):
     old = tuple(row[1] for row in db.execute(f'PRAGMA table_xinfo("{table}")'))
     columns = tuple(name for name in old if not (generated_scope and name == 'binding_scope'))
     names = ','.join('"' + name + '"' for name in columns)
-    dependents = list(db.execute("SELECT type,name,sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL", (table,)))
+    # Schema27 also has guards on other tables which read submitted_sources.
+    # Preserve their exact SQL while the negative fixture briefly removes it;
+    # otherwise SQLite rejects ALTER before the intended corruption is committed.
+    dependents = list(db.execute("""SELECT type,name,sql FROM sqlite_master
+        WHERE sql IS NOT NULL AND (type='trigger' OR (type='index' AND tbl_name=?))
+        ORDER BY type,name""", (table,)))
     db.execute('BEGIN IMMEDIATE')
     temporary = table + '_negative'
     changed = transform(sql)
@@ -629,6 +649,8 @@ def _rebuild_table(db, table, transform, *, generated_scope=False):
     db.execute(f'ALTER TABLE {temporary} RENAME TO "{table}"')
     for _, _, statement in dependents:
         db.execute(statement)
+    for kind, name, statement in dependents:
+        assert db.execute('SELECT type,sql FROM sqlite_master WHERE name=?', (name,)).fetchone()[:] == (kind, statement)
     db.commit()
     db.execute('PRAGMA foreign_keys=ON')
 
@@ -640,8 +662,8 @@ def _rebuild_table(db, table, transform, *, generated_scope=False):
     'partial_missing', 'partial_predicate', 'partial_nonunique', 'partial_collation',
     'blob_empty', 'null_empty', 'old_event_changed', 'old_receipt_changed',
 ])
-def test_committed26_finite_contract_damage_keeps26_and_reports_failure(tmp_path, monkeypatch, version, change):
-    if version != 25 and change in ('null_empty', 'old_event_changed', 'old_receipt_changed'):
+def test_committed27_finite_contract_damage_keeps27_and_reports_failure(tmp_path, monkeypatch, version, change):
+    if version not in (25, 26) and change in ('null_empty', 'old_event_changed', 'old_receipt_changed'):
         pytest.skip('Requires independently frozen nonempty25 input')
     path, vault, report = _prepare(tmp_path, version)
     actual = probe.initialize
@@ -649,7 +671,7 @@ def test_committed26_finite_contract_damage_keeps26_and_reports_failure(tmp_path
     def corrupt(database):
         actual(database)
         with database_module.connect(database) as db:
-            assert db.execute('PRAGMA user_version').fetchone()[0] == 26
+            assert db.execute('PRAGMA user_version').fetchone()[0] == 27
             if change in ('scope_default', 'scope_type', 'scope_hidden', 'key_order', 'input_fk'):
                 old, new = {
                     'scope_default': ("DEFAULT 'legacy'", "DEFAULT 'wrong'"),
@@ -708,7 +730,7 @@ def test_committed26_finite_contract_damage_keeps26_and_reports_failure(tmp_path
     assert path.read_bytes() == seen['bytes']  # Failure is postcommit; no recovery claim.
     assert probe._digest_tree(vault) == vault_before
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 26
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 27
 
 
 @pytest.mark.parametrize('version', [21, 22, 23, 25])
@@ -748,34 +770,37 @@ def test_actual26_transaction_failure_restores_complete_prior(tmp_path, monkeypa
 @pytest.mark.parametrize('table', ['submitted_sources', 'ingestion_events'])
 def test_complete_index_xinfo_is_checked_independently(tmp_path, monkeypatch, table):
     path, _, report = _prepare(tmp_path, 25)
-    actual = probe._indices
-    def changed(db, tables):
-        rows = actual(db, tables)
-        if db.execute('PRAGMA user_version').fetchone()[0] == 26:
-            name = 'sqlite_autoindex_submitted_sources_1' if table == 'submitted_sources' else 'ingestion_events_local_owner'
-            unique, origin, partial, xinfo = rows[name]
-            # Same keys/collation/SQL; corrupt only the auxiliary physical cid.
-            rows[name] = (unique, origin, partial, xinfo[:-1] + ((len(xinfo) - 1, -2, None, 0, 'BINARY', 0),))
-        return rows
-    monkeypatch.setattr(probe, '_indices', changed)
-    assert _run(path, report) == 1
+    actual = probe._sqlite_readonly
+    name = 'sqlite_autoindex_submitted_sources_1' if table == 'submitted_sources' else 'ingestion_events_local_owner'
+    seen = []
+    def reader(database):
+        def alter(sql, rows):
+            if sql == f'PRAGMA index_xinfo("{name}")':
+                rows = list(rows)
+                tail = tuple(rows[-1]); assert tail[1] == -1 and tail[-1] == 0
+                rows[-1] = (tail[0], -2, *tail[2:])
+                seen.append(name)
+            return rows
+        return _MetadataReader(actual(database), alter)
+    monkeypatch.setattr(probe, '_sqlite_readonly', reader)
+    assert _run(path, report) == 1 and seen == [name]
     assert json.loads(report.read_text())['error_code'] == 'legacy_changed'
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 26
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 27
 
 
 def test_prior25_rowid_of_text_primary_key_is_not_lost_in_digest(tmp_path, monkeypatch):
     path, vault, report = _prepare(tmp_path, 25)
+    tid = '1' * 32
     with closing(sqlite3.connect(path)) as db:
-        db.execute('CREATE TABLE original_text_pk(key TEXT PRIMARY KEY, value BLOB)')
-        db.execute("INSERT INTO original_text_pk(rowid,key,value) VALUES(17,'kept',X'00ff')")
+        db.execute('UPDATE wiki_tasks SET rowid=17 WHERE task_id=?', (tid,))
         db.commit()
     _marker(path, vault, 25)
     actual = probe.initialize
     def changed(database):
         actual(database)
         with closing(sqlite3.connect(database)) as db:
-            db.execute('UPDATE original_text_pk SET rowid=18')
+            db.execute('UPDATE wiki_tasks SET rowid=18 WHERE task_id=?', (tid,))
             db.commit()
     monkeypatch.setattr(probe, 'initialize', changed)
     assert _run(path, report) == 1
@@ -786,10 +811,331 @@ def test_prior25_rowid_of_text_primary_key_is_not_lost_in_digest(tmp_path, monke
     ('local_intake_insert', (1, 'local', 'direct_text', 'key', 'label', '{}', b'body')),
     ('local_intake_event', ('a' * 64, 'raw-verified-v1', 'item', 1, 1, 'b' * 64, '{}')),
     ('ingestion_raw_terminal', (1, 0, 'raw_saved', 'done')),
+    ('wiki_outcome_accept', ('receipt', 'task', 1, 'accepted', 'contract', 'boundary', 'plan', '{}', 'stamp')),
+    ('source_identity_append', ('a' * 64, '["synthetic"]')),
 ])
-def test_ordinary26_connection_keeps_local_and_terminal_capabilities_defaultdeny(tmp_path, udf, args):
+def test_ordinary27_connection_keeps_local_and_terminal_capabilities_defaultdeny(tmp_path, udf, args):
     path, _, report = _prepare(tmp_path, 25)
     assert _run(path, report) == 0
     with database_module.connect(path) as db:
         placeholders = ','.join('?' for _ in args)
         assert db.execute(f'SELECT {udf}({placeholders})', args).fetchone()[0] == 0
+
+
+def _upgrade_to26(path):
+    """Fixed historical25 -> original unchanged26 migration, never init27/downcast.
+
+    migrate_v26 and its input/guard literals are AST-exact to the accepted
+    5cafd0058a821b01ed4a4b9eff84ca7ac2da9aed primary (also e76/1ede).
+    The version assignment records that completed real migration, not a facade.
+    """
+    with database_module.connect(path) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 25
+        assert not db.in_transaction
+        db.execute('PRAGMA foreign_keys=OFF')
+        db.execute('BEGIN IMMEDIATE')
+        database_module.migrate_v26(db)
+        db.execute('PRAGMA user_version=26')
+        db.commit()
+        db.execute('PRAGMA foreign_keys=ON')
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+        assert tuple(db.execute('PRAGMA quick_check').fetchone()) == ('ok',)
+
+
+def _seed_sparse22(db, vault):
+    """Legitimate INSERT rowids, no UPDATE of immutable raw or guard removal."""
+    stamp = '2099-01-01T00:00:00Z'
+    db.execute('''INSERT INTO wiki_tasks(rowid,task_id,vault_path,vault_key,request_kind,
+        trigger_source,backend,model,effort,kit_version,kit_manifest_sha256,
+        boundary_sha256,state,raw_count,batch_count,created_at,updated_at)
+        VALUES(197,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+        ('1' * 32, str(vault), 'a' * 64, 'all', 'cli', 'codex_cli', 'synthetic-model',
+         'medium', '3.0.0', 'c' * 64, 'b' * 64, 'queued', 1, 1, stamp, stamp))
+    db.execute('''INSERT INTO wiki_task_batches(rowid,task_id,batch_no,state,item_count)
+        VALUES(701,?,1,'queued',1)''', ('1' * 32,))
+    db.execute('''INSERT INTO wiki_task_raw(rowid,task_id,ordinal,batch_no,raw_id,identity,
+        relative_path,byte_count,content_sha256) VALUES(991,?,1,1,?,?,?, ?,?)''',
+        ('1' * 32, 'R-20261008-0001', '第三方', 'raw/合成/1.md',
+         len(SENTINEL.encode()), hashlib.sha256(SENTINEL.encode()).hexdigest()))
+
+
+class _MetadataRows(list):
+    def fetchall(self):
+        return self
+
+
+class _MetadataReader:
+    """Negative read-boundary injection only; actual DB/validator stay unchanged."""
+    def __init__(self, db, alter):
+        self.db, self.alter = db, alter
+
+    def __getattr__(self, name):
+        return getattr(self.db, name)
+
+    def execute(self, sql, parameters=()):
+        rows = self.db.execute(sql, parameters)
+        metadata = (sql == 'SELECT type,name,tbl_name,sql FROM sqlite_schema'
+                    or sql.startswith('PRAGMA index_xinfo('))
+        if metadata and self.db.execute('PRAGMA user_version').fetchone()[0] == 27:
+            return _MetadataRows(self.alter(sql, list(rows)))
+        return rows
+
+
+def test_schema22_sparse_parent_and_child_rowids_are_preserved(tmp_path):
+    path, vault, report = _prepare(tmp_path, 22, sparse_wiki=True)
+    selected, before = _read_rows(path)
+    assert [before[n][0][0] for n in ('wiki_tasks', 'wiki_task_batches', 'wiki_task_raw')] == [197, 701, 991]
+    vault_before = probe._digest_tree(vault)
+    # This strict positive guards the repaired historical23 copy: physical rowids
+    # remain part of the independent old-row oracle, never normalized or ignored.
+    assert _run(path, report) == 0
+    assert _read_rows(path, selected)[1] == before
+    assert probe._digest_tree(vault) == vault_before
+    with closing(probe._sqlite_readonly(path)) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 27
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+        assert [tuple(row) for row in db.execute('''SELECT t.rowid,b.rowid,r.rowid,r.task_id,r.batch_no
+            FROM wiki_tasks t JOIN wiki_task_batches b USING(task_id)
+            JOIN wiki_task_raw r USING(task_id,batch_no)''')] == [(197, 701, 991, '1' * 32, 1)]
+
+
+def test_schema26_real_local_scope_and_nonempty_receipts_are_preserved(tmp_path):
+    from knowledge_distiller.v1.file_sources import prepare_direct_text
+    from knowledge_distiller.v1.intake_binding import build_local_binding
+    from knowledge_distiller.v1.store import Store
+
+    path, vault, report = _prepare(tmp_path, 26)
+    source = prepare_direct_text('仅合成本地提交，条件保持。\r\n')
+    binding = build_local_binding(source)
+    store = Store(path, runtime_root=path.parent / 'synthetic-runtime')
+    item = store.submit_local_bound_source(source, envelope_json=binding.envelope_json)
+    assert store.local_intake_binding(item)[1] == binding
+    with closing(probe._sqlite_readonly(path)) as db:
+        scope = db.execute('SELECT binding_scope FROM submitted_sources WHERE item_id=?', (item,)).fetchone()[0]
+        assert scope != 'legacy'
+        assert db.execute("SELECT count(*) FROM ingestion_events WHERE json_extract(detail_json,'$.code')='intake_frozen'").fetchone()[0] == 1
+        assert db.execute('SELECT count(*) FROM wiki_outcome_receipts').fetchone()[0] == 1
+    _marker(path, vault, 26)
+    selected, before = _read_rows(path)
+    vault_before = probe._digest_tree(vault)
+    assert _run(path, report) == 0
+    assert _read_rows(path, selected)[1] == before
+    assert probe._digest_tree(vault) == vault_before
+    assert store.local_intake_binding(item)[1] == binding
+    with closing(probe._sqlite_readonly(path)) as db:
+        assert db.execute('SELECT binding_scope FROM submitted_sources WHERE item_id=?', (item,)).fetchone()[0] == scope
+
+
+@pytest.mark.parametrize('version', [25, 26])
+def test_historical_typed_success_plan_json_and_receipts_are_preserved(tmp_path, version):
+    path, vault, report = _prepare(tmp_path, version)
+    # These are lawful historical completion transitions before27 existed;
+    # validated is retained storage, never fabricated accepted publication.
+    with database_module.connect(path) as db:
+        for state in ('validating', 'publishing', 'succeeded'):
+            db.execute('UPDATE wiki_task_batches SET state=? WHERE task_id=?', (state, '2' * 32))
+            db.execute('UPDATE wiki_tasks SET state=?,completed_batch_count=? WHERE task_id=?',
+                       (state, int(state == 'succeeded'), '2' * 32))
+        assert db.execute("SELECT phase FROM wiki_outcome_receipts").fetchone()[0] == 'validated'
+    _marker(path, vault, version)
+    selected, before = _read_rows(path)
+    assert _run(path, report) == 0
+    assert _read_rows(path, selected)[1] == before
+    with closing(probe._sqlite_readonly(path)) as db:
+        assert tuple(db.execute('SELECT state,completed_batch_count FROM wiki_tasks WHERE task_id=?',
+                                ('2' * 32,)).fetchone()) == ('succeeded', 1)
+
+
+NEW27_NAMES = (
+    'wiki_task_contract_plan_unique', 'wiki_task_legacy_boundary_unique',
+    'wiki_batch_typed_success_requires_accepted', 'wiki_task_typed_success_requires_all_accepted',
+    'wiki_batch_typed_insert_requires_queued', 'source_identity_events',
+    'source_identity_one_root', 'source_identity_one_successor', 'source_identity_item_order',
+    'source_identity_events_no_update', 'source_identity_events_no_delete',
+    'source_identity_events_append_verified',
+)
+
+
+@pytest.mark.parametrize('version', [21, 22, 23, 25, 26])
+@pytest.mark.parametrize('name', NEW27_NAMES)
+def test_schema27_reserved_names_rejected_before_initializer(tmp_path, monkeypatch, version, name):
+    path, vault, report = _prepare(tmp_path, version)
+    with closing(sqlite3.connect(path)) as db:
+        db.execute('CREATE TABLE "' + name + '"(value TEXT)')
+        db.commit()
+    _marker(path, vault, version)
+    before, vault_before = path.read_bytes(), probe._digest_tree(vault)
+    monkeypatch.setattr(probe, 'initialize', lambda *_: pytest.fail('must not initialize unknown input'))
+    assert _run(path, report) == 1
+    assert json.loads(report.read_text())['error_code'] == 'precheck_failed'
+    assert path.read_bytes() == before and probe._digest_tree(vault) == vault_before
+
+
+@pytest.mark.parametrize('version', [21, 22, 23, 25, 26])
+@pytest.mark.parametrize('kind', ['incoming_fk', 'view', 'crossguard', 'table'])
+def test_whole_catalog_unknown_dependency_is_rejected_before_rows(tmp_path, monkeypatch, version, kind):
+    path, vault, report = _prepare(tmp_path, version)
+    statements = {
+        'incoming_fk': 'CREATE TABLE hostile(item_id INTEGER REFERENCES distill_items(item_id))',
+        'view': 'CREATE VIEW hostile AS SELECT value FROM settings',
+        'crossguard': "CREATE TRIGGER hostile BEFORE UPDATE ON settings BEGIN SELECT item_id FROM distill_items; END",
+        'table': 'CREATE TABLE hostile(body BLOB)',
+    }
+    with closing(sqlite3.connect(path)) as db:
+        db.execute(statements[kind]); db.commit()
+    _marker(path, vault, version)
+    before, vault_before = path.read_bytes(), probe._digest_tree(vault)
+    actual = probe._sqlite_readonly
+    reads = []
+    def reader(database):
+        db = actual(database)
+        db.set_authorizer(lambda action, table, col, *_: (
+            reads.append((table, col)) or sqlite3.SQLITE_DENY
+            if action == sqlite3.SQLITE_READ and table == 'settings' else sqlite3.SQLITE_OK))
+        return db
+    monkeypatch.setattr(probe, '_sqlite_readonly', reader)
+    monkeypatch.setattr(probe, 'initialize', lambda *_: pytest.fail('must not initialize unknown input'))
+    assert _run(path, report) == 1
+    assert json.loads(report.read_text())['error_code'] == 'precheck_failed'
+    assert reads == []
+    assert path.read_bytes() == before and probe._digest_tree(vault) == vault_before
+
+
+@pytest.mark.parametrize('version', [21, 22, 23, 25, 26])
+@pytest.mark.parametrize('stage', ['copied_parent', 'final_preservation'])
+def test_actual27_transaction_failure_restores_complete_prior(tmp_path, monkeypatch, version, stage):
+    path, vault, report = _prepare(tmp_path, version)
+    selected, rows = _read_rows(path)
+    before, vault_before = path.read_bytes(), probe._digest_tree(vault)
+    with closing(probe._sqlite_readonly(path)) as db:
+        catalog = probe._objects(db)
+    actual = database_module.migrate_v27
+    class Interrupted:
+        def __init__(self, db): self.db = db
+        def __getattr__(self, name): return getattr(self.db, name)
+        def execute(self, sql, parameters=()):
+            result = self.db.execute(sql, parameters)
+            if sql.startswith('INSERT INTO wiki_tasks_v27('):
+                raise RuntimeError(SENTINEL)
+            return result
+    def interrupted(db):
+        actual(Interrupted(db) if stage == 'copied_parent' else db)
+        assert db.execute("SELECT 1 FROM sqlite_schema WHERE name='source_identity_events'").fetchone()
+        raise RuntimeError(SENTINEL)
+    monkeypatch.setattr(database_module, 'migrate_v27', interrupted)
+    assert _run(path, report) == 1
+    assert json.loads(report.read_text()) == {'schema_version': 1, 'ok': False, 'error_code': 'migration_failed'}
+    assert path.read_bytes() == before and _read_rows(path, selected)[1] == rows
+    assert probe._digest_tree(vault) == vault_before
+    with closing(probe._sqlite_readonly(path)) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == version
+        assert probe._objects(db) == catalog
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+@pytest.mark.parametrize('version', [21, 22, 23, 25, 26])
+def test_initializer_postcommit_error_keeps27_and_reports_not_success(tmp_path, monkeypatch, version):
+    path, vault, report = _prepare(tmp_path, version)
+    selected, before = _read_rows(path)
+    vault_before = probe._digest_tree(vault)
+    original = database_module._schema27_enable_foreign_keys
+    def fail(db):
+        original(db)
+        assert not db.in_transaction and db.execute('PRAGMA user_version').fetchone()[0] == 27
+        raise RuntimeError(SENTINEL)
+    monkeypatch.setattr(database_module, '_schema27_enable_foreign_keys', fail)
+    assert _run(path, report) == 1
+    assert json.loads(report.read_text()) == {'schema_version': 1, 'ok': False, 'error_code': 'migration_failed'}
+    assert _read_rows(path, selected)[1] == before and probe._digest_tree(vault) == vault_before
+    with closing(probe._sqlite_readonly(path)) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 27
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+@pytest.mark.parametrize('name', NEW27_NAMES + (
+    'wiki_tasks', 'wiki_task_outcome_binding_required', 'wiki_outcome_receipts_publish_unavailable'))
+@pytest.mark.parametrize('change', ['missing', 'changed'])
+def test_complete27_catalog_metadata_failure_is_not_success_or_rollback(tmp_path, monkeypatch, name, change):
+    path, _, report = _prepare(tmp_path, 26)
+    actual_reader, actual_initialize = probe._sqlite_readonly, probe.initialize
+    seen = {}
+    def initialized(database):
+        actual_initialize(database)
+        seen['committed'] = Path(database).read_bytes()
+    def reader(database):
+        def alter(sql, rows):
+            if sql != 'SELECT type,name,tbl_name,sql FROM sqlite_schema':
+                return rows
+            result = []
+            for kind, obj, owner, ddl in rows:
+                if obj == name:
+                    if change == 'missing': continue
+                    ddl += '\n--unapproved catalog text'
+                result.append((kind, obj, owner, ddl))
+            return result
+        return _MetadataReader(actual_reader(database), alter)
+    monkeypatch.setattr(probe, 'initialize', initialized)
+    monkeypatch.setattr(probe, '_sqlite_readonly', reader)
+    assert _run(path, report) == 1
+    assert json.loads(report.read_text()) == {'schema_version': 1, 'ok': False, 'error_code': 'legacy_changed'}
+    assert path.read_bytes() == seen['committed']
+    with closing(actual_reader(path)) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 27
+        database_module._schema27_check_catalog(db, 27)
+
+
+@pytest.mark.parametrize('name', ['wiki_task_contract_plan_unique', 'wiki_task_legacy_boundary_unique',
+                                  'sqlite_autoindex_source_identity_events_1'])
+@pytest.mark.parametrize('field', ['cid', 'desc', 'coll', 'key', 'aux'])
+def test_new27_full_index_xinfo_is_independently_checked(tmp_path, monkeypatch, name, field):
+    path, _, report = _prepare(tmp_path, 26)
+    actual = probe._sqlite_readonly
+    seen = []
+    def reader(database):
+        def alter(sql, rows):
+            if sql != f'PRAGMA index_xinfo("{name}")': return rows
+            rows = [tuple(r) for r in rows]
+            index = -1 if field == 'aux' else 0
+            values = list(rows[index])
+            column = {'cid': 1, 'desc': 3, 'coll': 4, 'key': 5, 'aux': 1}[field]
+            values[column] = ('NOCASE' if values[column] != 'NOCASE' else 'BINARY') if field == 'coll' else (
+                0 if values[column] else 1) if field in ('desc', 'key') else -99
+            rows[index] = tuple(values); seen.append((name, field))
+            return rows
+        return _MetadataReader(actual(database), alter)
+    monkeypatch.setattr(probe, '_sqlite_readonly', reader)
+    assert _run(path, report) == 1 and seen == [(name, field)]
+    assert json.loads(report.read_text())['error_code'] == 'legacy_changed'
+    with closing(actual(path)) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 27
+
+
+def test_actual24_is_not_a_probe_source_even_when_database_can_migrate_it(tmp_path, monkeypatch):
+    path, vault, report = _prepare(tmp_path, 23)
+    with database_module.connect(path) as db:
+        db.execute('BEGIN IMMEDIATE')
+        database_module.migrate_v24(db)
+        db.execute('PRAGMA user_version=24')
+        db.commit()
+    _marker(path, vault, 24)
+    before = path.read_bytes()
+    monkeypatch.setattr(probe, 'initialize', lambda *_: pytest.fail('24 is not an approved probe source'))
+    assert _run(path, report) == 1
+    assert json.loads(report.read_text()) == {'schema_version': 1, 'ok': False, 'error_code': 'fixture_invalid'}
+    assert path.read_bytes() == before
+    with closing(probe._sqlite_readonly(path)) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 24
+
+
+@pytest.mark.parametrize('version', [21, 22, 23, 25, 26])
+def test_whole_catalog_source_qualification_has_no_database_side_effects(tmp_path, version):
+    path, vault, _ = _prepare(tmp_path, version)
+    before, vault_before = path.read_bytes(), probe._digest_tree(vault)
+    with closing(probe._sqlite_readonly(path)) as db:
+        assert db.execute('PRAGMA query_only').fetchone()[0] == 1
+        assert not db.in_transaction and db.total_changes == 0
+        prior = probe._freeze(db, version)
+        assert prior['version'] == version
+        assert not db.in_transaction and db.total_changes == 0
+        assert db.execute('PRAGMA user_version').fetchone()[0] == version
+    assert path.read_bytes() == before and probe._digest_tree(vault) == vault_before

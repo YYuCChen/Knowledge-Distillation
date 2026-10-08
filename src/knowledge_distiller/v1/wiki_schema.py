@@ -221,9 +221,13 @@ def migrate_v23(connection: sqlite3.Connection) -> None:
         "completed_batch_count,error_code,recovery_state,recovery_phase,created_at,updated_at"
     )
     connection.execute(
-        f"INSERT INTO wiki_tasks({task_columns}) SELECT {task_columns} FROM wiki_tasks_v22")
-    connection.execute("INSERT INTO wiki_task_batches SELECT * FROM wiki_task_batches_v22")
-    connection.execute("INSERT INTO wiki_task_raw SELECT * FROM wiki_task_raw_v22")
+        f"INSERT INTO wiki_tasks(rowid,{task_columns}) SELECT rowid,{task_columns} FROM wiki_tasks_v22")
+    connection.execute(
+        "INSERT INTO wiki_task_batches(rowid,task_id,batch_no,state,item_count,error_code) "
+        "SELECT rowid,task_id,batch_no,state,item_count,error_code FROM wiki_task_batches_v22")
+    connection.execute(
+        "INSERT INTO wiki_task_raw(rowid,task_id,ordinal,batch_no,raw_id,identity,relative_path,byte_count,content_sha256) "
+        "SELECT rowid,task_id,ordinal,batch_no,raw_id,identity,relative_path,byte_count,content_sha256 FROM wiki_task_raw_v22")
     for name in ("wiki_task_raw_v22", "wiki_task_batches_v22", "wiki_tasks_v22"):
         connection.execute(f"DROP TABLE {name}")
     migrate_observations(connection)
