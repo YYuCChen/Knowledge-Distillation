@@ -223,6 +223,7 @@
                 {% set cards.index = cards.index + 1 %}
                 {% set key = item.id|string ~ '-' ~ (concern.concern_uid|default(concern.audio_name)) %}
                 {% set error = confirmation_error if confirmation_error and confirmation_error.id == item.id and confirmation_error.concern_id == concern.audio_name else none %}
+                {% set empty_error = error and error.message == '请输入正确文字' and not error.value|trim %}
                 {% if item.confirmation.kind|default('') == 'image' %}
                   {% include 'image_confirmation.html' %}
                 {% else %}
@@ -232,7 +233,7 @@
                     <div class="todo-content">
                       <div class="confirmation-head">
                         {% if item.confirmation.english_assistance %}
-                        <p class="source-fragment" data-context-before="{{ item.confirmation.snapshot[:concern.start] }}" data-context-after="{{ item.confirmation.snapshot[concern.end:] }}"><span data-context-leading></span><mark>{{ concern.text }}</mark><span data-context-trailing></span></p>
+                        <p class="source-fragment">{{ concern.display.sentence if concern.display else '' }}</p>
                         {% else %}
                         {% set display = concern.display %}
                         <p class="source-fragment">{% if display.start > 12 %}…{% endif %}{{ item.confirmation.snapshot[[0, display.start-12]|max:display.start] }}<mark>{{ display.text }}</mark>{{ item.confirmation.snapshot[display.end:display.end+12] }}{% if display.end+12 < item.confirmation.snapshot|length %}…{% endif %}</p>
@@ -254,48 +255,38 @@
                         {% else %}<span class="manual-hint">请回听填写</span>{% endif %}
                       </div>
                       <div id="actions-{{ key }}" class="confirmation-actions" {% if not error %}hidden{% endif %}>
-                        {% set explanations = concern.candidate_explanations|default({}) %}
-                        {% if item.confirmation.english_assistance and concern.candidates %}
+                        {% if item.confirmation.english_assistance and concern.display %}
                         <div class="candidate-actions" aria-label="疑点 {{ loop.index }} 候选选项">
-                          {% for choice in concern.candidates %}
-                          <form id="candidate-{{ key }}-{{ loop.index }}" class="candidate-row" action="{{ url_for('confirm', item_id=item.id) }}" method="post">
+                          {% for choice in concern.display.candidates %}
+                          <form id="candidate-{{ key }}-{{ choice.key }}" class="candidate-row" action="{{ url_for('confirm', item_id=item.id) }}" method="post">
                             <input type="hidden" name="token" value="{{ item.confirmation.token }}">
                             <input type="hidden" name="concern_id" value="{{ concern.audio_name }}">
                             <input type="hidden" name="concern_revision" value="{{ concern.revision }}">
                             <input type="hidden" name="action" value="candidate">
-                            <button class="outline-choice candidate-option" name="value" value="{{ choice }}"><span class="candidate-text">{{ choice }}</span></button>
-                            {% if explanations.get(choice) %}<p class="candidate-explanation">{{ explanations.get(choice) }}</p>{% endif %}
+                            <div class="candidate-description">
+                              <p class="candidate-text">{{ choice.text }}</p>
+                              <p class="candidate-explanation">{{ choice.meaning }}</p>
+                              <details id="basis-{{ key }}-{{ choice.key }}" class="candidate-basis" data-persist-details="basis-{{ key }}-{{ choice.key }}">
+                                <summary>判断依据</summary>
+                                <p>{{ choice.basis }}</p>
+                              </details>
+                            </div>
+                            <button class="outline-choice candidate-option" name="value" value="{{ choice.value }}">{{ '保留原文' if choice.value == concern.text else '采用' }}</button>
                           </form>
                           {% endfor %}
                         </div>
+                        <p class="concern-reason">{{ concern.reason }}</p>
                         {% endif %}
-                        {% set recovery_layout = item.confirmation.english_assistance and concern.audio_recovery_required|default(false) %}
-                        {% set needs_suggestions = item.confirmation.english_assistance and (not concern.candidates or explanations|length < concern.candidates|length) %}
                         {% if item.confirmation.english_assistance %}
-                        <div id="operations-{{ key }}" class="confirmation-operations{{ ' has-audio-recovery' if recovery_layout else '' }}{{ ' without-suggestions' if not needs_suggestions else '' }}">
-                        {% endif %}
-                        {% if needs_suggestions %}
-                        <form class="suggest-candidates" action="/items/{{ item.id }}/suggestions" method="post" data-suggest-candidates>
-                          <input type="hidden" name="token" value="{{ item.confirmation.token }}">
-                          <input type="hidden" name="concern_id" value="{{ concern.audio_name }}">
-                            <input type="hidden" name="concern_revision" value="{{ concern.revision }}">
-                          <button type="submit" class="secondary-small" data-suggest-candidates>结合上下文补充候选</button>
-                        </form>
+                        <div id="operations-{{ key }}" class="confirmation-operations">
                         {% endif %}
                         <audio data-audio-identity="{{ key }}" data-audio-revision="{{ concern.audio_revision|default(concern.audio_name) }}" controls preload="metadata" aria-label="疑点 {{ loop.index }} 原音" src="{{ url_for('confirmation_audio', item_id=item.id, concern_id=concern.audio_name) }}"></audio>
-                        {% if concern.audio_recovery_required|default(false) %}
-                        <form action="{{ url_for('recover_confirmation_audio', item_id=item.id) }}" method="post" data-recover-audio>
-                          <input type="hidden" name="token" value="{{ item.confirmation.token }}">
-                          <input type="hidden" name="concern_id" value="{{ concern.audio_name }}">
-                          <button type="submit" class="secondary-small">重试局部原音恢复</button>
-                        </form>
-                        {% endif %}
                         <span class="source-actions">
                           <form action="{{ url_for('rerecognize', item_id=item.id) }}" method="post" data-rerecognize>
                             <input type="hidden" name="token" value="{{ item.confirmation.token }}">
                             <button class="text-action" type="submit">重新识别</button>
                           </form>
-                          <a href="{{ item.canonical_url }}" target="_blank" rel="noreferrer"><img class="source-action-icon" src="{{ url_for('static', filename='icons/external-link.svg') }}" alt="">查看来源</a>
+                          <a href="{{ item.canonical_url }}" target="_blank" rel="noreferrer">查看来源</a>
                         </span>
                         <div class="manual-entry">
                           <form id="manual-{{ key }}" class="manual-confirmation" action="{{ url_for('confirm', item_id=item.id) }}" method="post">
@@ -304,7 +295,7 @@
                             <input type="hidden" name="concern_revision" value="{{ concern.revision }}">
                           <input type="hidden" name="action" value="manual">
                           {% if not item.confirmation.english_assistance %}<input type="hidden" name="local_edit" value="1"><input type="hidden" name="local_prefix" value="{{ concern.display.prefix }}"><input type="hidden" name="local_suffix" value="{{ concern.display.suffix }}">{% endif %}
-                          <input name="value" value="{{ error.value if error else '' }}" placeholder="{{ error.message if error else ('自定义（可选）' if item.confirmation.english_assistance else '自定义输入…') }}" aria-label="疑点 {{ loop.index }} 正确文字" aria-invalid="{{ 'true' if error else 'false' }}">
+                          <input name="value" value="{{ error.value if error else '' }}" placeholder="{{ '请输入确认文字' if empty_error else (error.message if error else ('自定义（可选）' if item.confirmation.english_assistance else '自定义输入…')) }}" data-default-placeholder="{{ '自定义（可选）' if item.confirmation.english_assistance else '自定义输入…' }}" data-empty-error="empty-error-{{ key }}" aria-label="疑点 {{ loop.index }} 正确文字" aria-invalid="{{ 'true' if error else 'false' }}"{% if empty_error %} data-empty-confirmation aria-describedby="empty-error-{{ key }}"{% endif %}>
                         </form>
                         </div>
                         <span class="confirmation-buttons">
@@ -317,6 +308,7 @@
                           <button class="primary-small" type="submit" form="manual-{{ key }}">提交</button>
                         </span>
                         {% if item.confirmation.english_assistance %}</div>{% endif %}
+                        <p id="empty-error-{{ key }}" class="confirmation-empty-error" role="alert"{% if not empty_error %} hidden{% endif %}>请输入确认文字后再提交；也可以选择候选或回听原音。</p>
                       </div>
                     </div>
                     <button type="button" class="card-chevron" data-card-toggle aria-label="展开或收起疑点 {{ loop.index }}" aria-controls="actions-{{ key }}" aria-expanded="{{ 'true' if error else 'false' }}"><img src="{{ url_for('static', filename='icons/chevron-up.svg') }}" alt=""></button>

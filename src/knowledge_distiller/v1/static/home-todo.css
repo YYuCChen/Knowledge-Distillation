@@ -411,8 +411,6 @@ mark {
 .candidate-row .candidate-option { width: auto; min-width: 0; max-width: 100%; height: auto; padding: 5px 8px; white-space: normal; text-align: left; line-height: 14px; }
 .candidate-text { overflow-wrap: anywhere; }
 .candidate-explanation { max-width: 100%; margin: 0; min-width: 0; color: var(--muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
-.suggest-candidates { grid-column: 1 / -1; margin: 0; }
-.suggest-candidates .secondary-small { width: auto; }
 .manual-entry { min-width: 0; }
 
 .candidate-basis { color: var(--muted); }
@@ -449,20 +447,59 @@ mark {
 .group-confirmation-card .candidate-actions { max-width: 100%; }
 [data-audio-switch] { width: auto; min-height: 28px; height: auto; white-space: normal; line-height: 1.4; overflow: visible; }
 
-/* Keep the English operation identity when recovery ends; contents leaves
-   the original grid flow intact outside the approved recovery layout. */
-.english-confirmation .confirmation-operations { display: contents; }
-
-/* U05 v3: candidate choices stay above the full-width recovery grid. */
-.english-confirmation .confirmation-operations.has-audio-recovery {
+/* Design master confirmation states; preparation remains a background obligation. */
+.confirmation-card .confirmation-actions[hidden] { display: none; }
+.confirmation-card .card-chevron { padding-top: 16px; }
+.compact-confirmation .compact-candidates { width: 130px; max-width: 130px; }
+.compact-confirmation .source-fragment {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.english-confirmation .confirmation-head { padding-right: 42px; }
+.english-confirmation .confirmation-head .candidate-count { align-self: center; line-height: 16px; }
+.english-confirmation .candidate-row {
+  grid-template-columns: minmax(0, 1fr) 56px;
+  align-items: start;
+  gap: 12px;
+}
+.english-confirmation .candidate-description {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.english-confirmation .candidate-text { margin: 0; }
+.english-confirmation .candidate-option {
+  width: 56px;
+  height: 24px;
+  padding: 6px 7px;
+  line-height: 10px;
+  white-space: nowrap;
+  text-align: center;
+  justify-self: end;
+}
+.english-confirmation .candidate-basis p { margin: 0; overflow-wrap: anywhere; }
+.english-confirmation .concern-reason {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.compact-confirmation .confirmation-actions,
+.english-confirmation .confirmation-operations {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: max-content max-content minmax(0, 1fr);
+  grid-template-columns: 130px minmax(0, 1fr) 122px;
   align-items: center;
   gap: 10px;
   min-width: 0;
 }
-.english-confirmation .confirmation-operations.has-audio-recovery audio {
+.compact-confirmation .confirmation-actions audio,
+.english-confirmation .confirmation-operations audio {
   grid-column: 1 / -1;
   grid-row: 1;
   width: 100%;
@@ -470,69 +507,64 @@ mark {
   max-width: 100%;
   height: 32px;
 }
-.english-confirmation .confirmation-operations.has-audio-recovery [data-recover-audio] {
-  grid-column: 1;
-  grid-row: 2;
-  justify-self: start;
-}
-.english-confirmation .confirmation-operations.has-audio-recovery [data-recover-audio] .secondary-small {
-  width: max-content;
-  min-width: 56px;
-}
-.english-confirmation .confirmation-operations.has-audio-recovery .suggest-candidates {
+.compact-confirmation .confirmation-actions .manual-entry,
+.english-confirmation .confirmation-operations .manual-entry {
   grid-column: 2;
-  grid-row: 2;
-  justify-self: start;
-}
-.english-confirmation .confirmation-operations.has-audio-recovery .manual-entry {
-  grid-column: 3;
   grid-row: 2;
   width: 100%;
   min-width: 0;
+  padding-right: 20px;
 }
-.english-confirmation .confirmation-operations.has-audio-recovery .source-actions {
-  grid-column: 1 / 3;
-  grid-row: 3;
-  width: max-content;
+.compact-confirmation .confirmation-actions .source-actions,
+.english-confirmation .confirmation-operations .source-actions {
+  grid-column: 1;
+  grid-row: 2;
+  width: 130px;
   justify-self: start;
   align-items: center;
 }
-.english-confirmation .confirmation-operations.has-audio-recovery .source-actions form {
+.compact-confirmation .source-actions form,
+.english-confirmation .source-actions form {
   display: flex;
   align-items: center;
 }
-.english-confirmation .confirmation-operations.has-audio-recovery .source-actions button,
-.english-confirmation .confirmation-operations.has-audio-recovery .source-actions a {
+.compact-confirmation .source-actions button,
+.compact-confirmation .source-actions a,
+.english-confirmation .source-actions button,
+.english-confirmation .source-actions a {
   display: flex;
   align-items: center;
   line-height: 16px;
 }
-.english-confirmation .confirmation-operations.has-audio-recovery .confirmation-buttons {
+.compact-confirmation .confirmation-actions .confirmation-buttons,
+.english-confirmation .confirmation-operations .confirmation-buttons {
   grid-column: 3;
-  grid-row: 3;
+  grid-row: 2;
   justify-self: end;
 }
-.english-confirmation .confirmation-operations.has-audio-recovery.without-suggestions {
-  grid-template-columns: max-content minmax(0, 1fr);
+.confirmation-card .manual-confirmation input[data-empty-confirmation][aria-invalid="true"] {
+  color: var(--danger);
+  border-bottom-color: var(--danger);
 }
-.english-confirmation .confirmation-operations.has-audio-recovery.without-suggestions .manual-entry,
-.english-confirmation .confirmation-operations.has-audio-recovery.without-suggestions .confirmation-buttons {
-  grid-column: 2;
-}
-.english-confirmation .confirmation-operations.has-audio-recovery.without-suggestions .source-actions {
-  grid-column: 1;
+.confirmation-card .manual-confirmation input[data-empty-confirmation][aria-invalid="true"]::placeholder { color: var(--danger); }
+.confirmation-card .confirmation-empty-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 16.5px;
+  overflow-wrap: anywhere;
 }
 @media (max-width: 720px) {
-  .english-confirmation .confirmation-operations.has-audio-recovery,
-  .english-confirmation .confirmation-operations.has-audio-recovery.without-suggestions {
+  .english-confirmation .confirmation-head { padding-right: 0; }
+  .compact-confirmation .confirmation-actions,
+  .english-confirmation .confirmation-operations {
     grid-template-columns: minmax(0, 1fr);
   }
-  .english-confirmation .confirmation-operations.has-audio-recovery [data-recover-audio] { grid-column: 1; grid-row: 2; }
-  .english-confirmation .confirmation-operations.has-audio-recovery .suggest-candidates { grid-column: 1; grid-row: 3; }
-  .english-confirmation .confirmation-operations.has-audio-recovery .source-actions { grid-column: 1; grid-row: 4; }
-  .english-confirmation .confirmation-operations.has-audio-recovery .manual-entry { grid-column: 1; grid-row: 5; }
-  .english-confirmation .confirmation-operations.has-audio-recovery .confirmation-buttons { grid-column: 1; grid-row: 6; }
-  .english-confirmation .confirmation-operations.has-audio-recovery.without-suggestions .source-actions { grid-row: 3; }
-  .english-confirmation .confirmation-operations.has-audio-recovery.without-suggestions .manual-entry { grid-column: 1; grid-row: 4; }
-  .english-confirmation .confirmation-operations.has-audio-recovery.without-suggestions .confirmation-buttons { grid-column: 1; grid-row: 5; }
+  .compact-confirmation .confirmation-actions .source-actions,
+  .english-confirmation .confirmation-operations .source-actions { grid-column: 1; grid-row: 2; }
+  .compact-confirmation .confirmation-actions .manual-entry,
+  .english-confirmation .confirmation-operations .manual-entry { grid-column: 1; grid-row: 3; padding-right: 0; }
+  .compact-confirmation .confirmation-actions .confirmation-buttons,
+  .english-confirmation .confirmation-operations .confirmation-buttons { grid-column: 1; grid-row: 4; }
 }

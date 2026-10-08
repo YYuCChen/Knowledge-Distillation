@@ -184,8 +184,15 @@ document.addEventListener('click', event => {
 
 document.addEventListener('input', event => {
   if (event.target.matches('.manual-confirmation input[name="value"]')) {
-    event.target.setAttribute('aria-invalid', 'false');
-    event.target.placeholder = '自定义输入…';
+    const input = event.target;
+    input.setAttribute('aria-invalid', 'false');
+    input.placeholder = input.dataset.defaultPlaceholder || '自定义输入…';
+    const emptyError = input.dataset.emptyError ? document.getElementById(input.dataset.emptyError) : null;
+    if (emptyError) {
+      emptyError.hidden = true;
+      input.removeAttribute('data-empty-confirmation');
+      if (input.getAttribute('aria-describedby') === emptyError.id) input.removeAttribute('aria-describedby');
+    }
   }
 });
 
@@ -248,8 +255,16 @@ document.addEventListener('submit', async event => {
   if (updating) return;
   if ((form.matches('.manual-confirmation') || (form.matches('[data-group-confirmation]') && event.submitter?.value === 'manual')) && !form.elements.value.value.trim()) {
     const input = form.elements.value;
-    input.value = '';
-    input.placeholder = '请输入正确文字';
+    const emptyError = input.dataset.emptyError ? document.getElementById(input.dataset.emptyError) : null;
+    if (emptyError) {
+      input.placeholder = '请输入确认文字';
+      input.setAttribute('data-empty-confirmation', '');
+      input.setAttribute('aria-describedby', emptyError.id);
+      emptyError.hidden = false;
+    } else {
+      input.value = '';
+      input.placeholder = '请输入正确文字';
+    }
     input.setAttribute('aria-invalid', 'true');
     input.focus();
     return;
