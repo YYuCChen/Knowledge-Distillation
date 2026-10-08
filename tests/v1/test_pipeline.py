@@ -753,8 +753,11 @@ def test_long_choices_compact_the_actual_replacement_span():
     assert (c['start'], c['end']) == (10, 12)
 
 
-def test_browser_confirmation_keeps_other_drafts_and_does_not_reload(tmp_path: Path):
+def test_browser_confirmation_keeps_other_drafts_and_does_not_reload(tmp_path: Path, monkeypatch):
     import threading
+    from types import SimpleNamespace
+    from time import monotonic
+    import knowledge_distiller.v1.worker as worker_module
     from playwright.sync_api import sync_playwright, expect
     from werkzeug.serving import make_server
 
@@ -766,10 +769,20 @@ def test_browser_confirmation_keeps_other_drafts_and_does_not_reload(tmp_path: P
     service, store, source, _, _ = distiller(tmp_path, concerns=concerns)
     item = store.create_item('https://v.douyin.com/a/')
     service.run(item)
-    server = make_server('127.0.0.1', 0, create_app(store, service), threaded=True)
+    # Match production's bounded discovery cursor and real FIFO preparation.
+    # Accelerate only this worker's maintenance clock, never global/browser time.
+    monkeypatch.setattr(worker_module, 'time', SimpleNamespace(monotonic=lambda: monotonic() * 1000))
+    presentation_cursor = 0
+    def maintenance():
+        nonlocal presentation_cursor
+        page = store.discover_pending_presentations(after_item_id=presentation_cursor, limit=8)
+        presentation_cursor = page['after_item_id']
+    worker = SingleWorker(store, service, maintenance=maintenance)
+    server = make_server('127.0.0.1', 0, create_app(store, service, wake_worker=worker.wake), threaded=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        worker.start()
         with sync_playwright() as playwright:
             if not Path(playwright.chromium.executable_path).exists():
                 pytest.skip('Browser regression requires playwright install chromium')
@@ -796,6 +809,8 @@ def test_browser_confirmation_keeps_other_drafts_and_does_not_reload(tmp_path: P
             cards.first.locator('[data-card-toggle]').click()
             cards.first.get_by_role('button', name='无法确认').click()
             expect(cards).to_have_count(1)
+            expect(cards.first.locator('input[name="value"]')).to_be_editable()
+            assert worker.stop()  # The polling-only sibling below must remain unclaimed.
             expect(page.get_by_role('button', name='重试', exact=True)).to_have_count(0)
             expect(cards.first.locator('input[name="value"]')).to_have_value('另一疑点草稿')
             expect(cards.first.locator('[data-card-toggle]')).to_have_attribute('aria-expanded', 'true')
@@ -818,6 +833,7 @@ def test_browser_confirmation_keeps_other_drafts_and_does_not_reload(tmp_path: P
             expect(cards.first.locator('.manual-hint')).to_have_text('请回听填写')
             browser.close()
     finally:
+        worker.stop()
         server.shutdown()
         thread.join(timeout=3)
 
