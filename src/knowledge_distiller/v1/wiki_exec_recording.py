@@ -46,8 +46,15 @@ def _diagnostic(value):
     """Finite private host observations, never exception text or caller material."""
     if value is None:
         return None
-    _require(type(value) is dict and set(value) == {
+    _require(type(value) is dict and set(value) - {'observed_warnings'} == {
         "original_transport_error_code", "cleanup_observation_v1"}, "recording_invalid_metadata")
+    if 'observed_warnings' in value:
+        _require(type(value['observed_warnings']) is list
+                 and 1 <= len(value['observed_warnings']) <= 2
+                 and all(type(code) is str and code in {'model_metadata_fallback', 'cli_item_diagnostic'}
+                         for code in value['observed_warnings'])
+                 and len(set(value['observed_warnings'])) == len(value['observed_warnings']),
+                 "recording_invalid_metadata")
     code, observed = value["original_transport_error_code"], value["cleanup_observation_v1"]
     _require(code is None or (type(code) is str and code in ERRORS), "recording_invalid_metadata")
     choices = {
@@ -71,7 +78,10 @@ def _diagnostic(value):
              "recording_invalid_metadata")
     result = observed["first_result"]
     _require(result is None or type(result) is bool, "recording_invalid_metadata")
-    return {"original_transport_error_code": code, "cleanup_observation_v1": dict(observed)}
+    normalized = {"original_transport_error_code": code, "cleanup_observation_v1": dict(observed)}
+    if 'observed_warnings' in value:
+        normalized['observed_warnings'] = list(value['observed_warnings'])
+    return normalized
 
 
 def _seconds(value, maximum):
@@ -151,7 +161,7 @@ class ExecRecordingV1:
 
     def __init__(self, private_root, *, workspace_root, runtime_root,
                  total_timeout_seconds=1500, per_exec_timeout_seconds=180,
-                 before_spawn=None, after_finish=None):
+                 before_spawn=None, after_finish=None, max_attempts=8):
         self.root = Path(private_root)
         self.workspace = Path(workspace_root)
         self.runtime = Path(runtime_root)
@@ -159,6 +169,8 @@ class ExecRecordingV1:
         self._active = None
         self._stopped = False
         self.attempts = self.reserved = self.actual_spawned = 0
+        _require(type(max_attempts) is int and 1 <= max_attempts <= 11, "recording_invalid_input")
+        self._max_attempts = max_attempts
         self._per_call = _seconds(per_exec_timeout_seconds, 180)
         self._deadline = time.monotonic() + _seconds(total_timeout_seconds, 1500)
         _require(before_spawn is None or callable(before_spawn), "recording_invalid_input")
@@ -215,7 +227,7 @@ class ExecRecordingV1:
         self.attempts += 1
         call = None
         try:
-            _require(self.attempts <= 8, "recording_stopped")
+            _require(self.attempts <= self._max_attempts, "recording_stopped")
             requested = _seconds(timeout_seconds, 900)
             _require(type(argv) is tuple and 0 < len(argv) <= 4096
                      and all(type(a) is str and "\x00" not in a for a in argv), "recording_invalid_input")

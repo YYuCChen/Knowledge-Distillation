@@ -381,14 +381,16 @@ def write_schema(directory, schema):
     return path
 
 
-def require_budget(prompt, schema, measure):
+def require_budget(prompt, schema, measure, *, schema_absent=False):
+    if type(schema_absent) is not bool or (schema_absent and schema is not None):
+        raise TypedError('typed_input_invalid')
     if len(prompt) > INPUT_LIMIT:
         raise TypedError('typed_input_limit')
     if measure is None:
         raise TypedError('input_budget_unavailable')
     # Trusted program capability must measure the ENTIRE actual prompt/schema.
     # Return (tokenizer/version, exact input tokens, hard available tokens).
-    version, count, budget = measure(prompt, encoded(schema))
+    version, count, budget = measure(prompt, b'' if schema_absent else encoded(schema))
     if (type(version) is not str or not version.strip() or type(count) is not int
             or type(budget) is not int or count < 0 or budget <= 0):
         raise TypedError('input_budget_unavailable')
@@ -431,7 +433,7 @@ def validate_input_policy(input_policy, measure, max_application_input_bytes):
 
 
 def admit_input(prompt, schema, measure, *, input_policy=None,
-                max_application_input_bytes=INPUT_LIMIT, schema_bytes=None):
+                max_application_input_bytes=INPUT_LIMIT, schema_bytes=None, schema_absent=False):
     """Exact FULL stdin + independent encoded schema, before model probe/spawn.
 
     application_utf8_v1 proves only application bytes, not CLI internal tools,
@@ -439,11 +441,13 @@ def admit_input(prompt, schema, measure, *, input_policy=None,
     None policy retains the exact-measure requirement; never a byte fallback.
     """
     validate_input_policy(input_policy, measure, max_application_input_bytes)
+    if type(schema_absent) is not bool or (schema_absent and schema is not None):
+        raise TypedError('typed_input_invalid')
     if type(prompt) is not bytes:
         raise TypedError('typed_input_invalid')
     try:
         prompt.decode('utf-8', errors='strict')
-        canonical = encoded(schema)
+        canonical = b'' if schema_absent else encoded(schema)
     except (UnicodeError, TypeError, ValueError):
         raise TypedError('typed_input_invalid') from None
     if schema_bytes is not None and (type(schema_bytes) is not bytes or schema_bytes != canonical):
@@ -454,7 +458,7 @@ def admit_input(prompt, schema, measure, *, input_policy=None,
     if input_policy == APPLICATION_UTF8_POLICY:
         policy, unit, count, limit, version = input_policy, 'utf8_bytes', total, max_application_input_bytes, None
     else:
-        version, count, limit = require_budget(prompt, schema, measure)
+        version, count, limit = require_budget(prompt, schema, measure, schema_absent=schema_absent)
         policy, unit = EXACT_TOKEN_POLICY, 'tokens'
     return InputBinding(policy, unit, count, limit, version, len(prompt), digest(prompt),
                         len(canonical), digest(canonical), max_application_input_bytes)
@@ -768,7 +772,53 @@ def _observable_failure(event):
     return None
 
 
-def pump(process, prompt, final, *, timeout, cancelled, terminate, recording_call=None):
+def _metadata_fallback_warning(event, requested_model):
+    """rust-v0.157.1 Warning mapping, exactly bound to the requested slug.
+
+    turn_context.rs emits this complete message as Warning; the JSONL
+    processor maps it to an error item while retaining Running status.
+    Never apply this exception to turn.failed, top-level error, or other text.
+    """
+    if (type(requested_model) is not str or not requested_model
+            or type(event) is not dict or set(event) != {'type', 'item'}
+            or event['type'] != 'item.completed'):
+        return False
+    item = event['item']
+    return (type(item) is dict and set(item) == {'id', 'type', 'message'}
+            and type(item['id']) is str and bool(item['id']) and item['type'] == 'error'
+            and item['message'] == f'Model metadata for `{requested_model}` not found. '
+                'Defaulting to fallback metadata; this can degrade performance and cause issues.')
+
+
+def _jsonl_item_diagnostic(event, requested_model):
+    """rust-v0.157.1 completed ErrorItem is a Running diagnostic.
+
+    Warning/ConfigWarning/DeprecationNotice/ModelRerouted use this shape.
+    Actual Error uses top-level error; failed turns use turn.failed. A reroute
+    remains a request-model violation even though the CLI regards it Running.
+    """
+    if (type(event) is not dict or set(event) != {'type', 'item'}
+            or event['type'] != 'item.completed'):
+        return False
+    item = event['item']
+    if (type(item) is not dict or set(item) != {'id', 'type', 'message'}
+            or type(item['id']) is not str or not item['id'] or item['type'] != 'error'
+            or type(item['message']) is not str or not item['message']):
+        return False
+    message = item['message']
+    if message.startswith('model rerouted: '):
+        raise TypedError('agent_failed')
+    # A known metadata warning naming another model cannot silently qualify
+    # this request. This is a model-binding guard, not a warning allow-list.
+    model = re.fullmatch(r'Model metadata for `([^`]+)` not found\. Defaulting to fallback metadata; '
+                        r'this can degrade performance and cause issues\.', message)
+    if model is not None and model[1] != requested_model:
+        raise TypedError('agent_failed')
+    return True
+
+
+def pump(process, prompt, final, *, timeout, cancelled, terminate, recording_call=None,
+         requested_model=None, diagnostic=None):
     """Nonblocking POSIX pipe pump; bounded memory and no communicate()."""
     deadline = time.monotonic() + timeout
     from .wiki_exec_recording import RecordingError
@@ -788,7 +838,16 @@ def pump(process, prompt, final, *, timeout, cancelled, terminate, recording_cal
                 event = json.loads(data)
             except (ValueError, UnicodeError):
                 event = None
-            failure = _observable_failure(event)
+            warning = _jsonl_item_diagnostic(event, requested_model)
+            if warning and diagnostic is not None:
+                # Raw event is already in stdout.jsonl.raw. Persist only a
+                # finite private category here, never arbitrary message text.
+                category = ('model_metadata_fallback' if _metadata_fallback_warning(event, requested_model)
+                            else 'cli_item_diagnostic')
+                warnings = diagnostic.setdefault('observed_warnings', [])
+                if category not in warnings:
+                    warnings.append(category)
+            failure = None if warning else _observable_failure(event)
             if failure is not None:
                 raise TypedError(failure)
             usage.update(_usage(data.decode('utf-8')))

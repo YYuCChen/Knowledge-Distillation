@@ -172,6 +172,19 @@ def _specific_reason(reason):
         "不足", "不确定", "too short", "short", "no knowledge", "no_knowledge", "unknown", "none", "n/a"}
 
 
+def retained_no_knowledge_source(source):
+    """Admit a verified retained scope, never infer missing original coverage.
+
+    Only absence of historical ledger/events is non-fatal. The caller still
+    needs the real SourceProof, exact C binding and independent four-way Q.
+    """
+    return (type(source) is dict and type(source.get('gaps')) is list
+            and not set(source['gaps']) - {'canonical_event_unavailable', 'ledger_record_missing'}
+            and type(source.get('capabilities')) is list
+            and {'literal_text', 'declared_attachments_readback'} <= set(source['capabilities'])
+            and source.get('scope', {}).get('kind') in {'retained_literal', 'declared_full'})
+
+
 def plan_explicit_groups(raws: tuple[FrozenRaw, ...], contents: dict[str, bytes],
                          groups: tuple[tuple[str, ...], ...], *, budget: int,
                          measure: Callable[[tuple[tuple[FrozenRaw, bytes], ...]], int],
@@ -400,10 +413,9 @@ class WikiOutcomes:
             if o.status == "processed_no_knowledge":
                 if source_rows is not None:
                     source = next(s for s in source_rows if s["raw_id"] == r.raw_id)
-                    if (source.get("gaps") != [] or type(source.get("capabilities")) is not list
-                            or not {"canonical_source_binding", "canonical_ingestion_event",
-                                    "declared_capture_verified"} <= set(source["capabilities"])
-                            or source.get("scope", {}).get("kind") not in {"retained_literal", "declared_full"}):
+                    # Historical event absence does not invalidate exact retained
+                    # literal bytes. It never upgrades platform/source completeness.
+                    if not retained_no_knowledge_source(source):
                         raise OutcomeError("no_knowledge_unknown")
                 if envelope_fields(content).get("未保留附件"):
                     raise OutcomeError("no_knowledge_unknown")
@@ -446,7 +458,8 @@ class WikiOutcomes:
                     for claim in registry.claims):
                     raise OutcomeError("source_claim_missing")
             result = support_gate.review(support_client)
-            if result.status != "supported_candidate_not_published" or result.diagnostics:
+            if (result.status not in {"supported_candidate_not_published", "no_changed_claims"}
+                    or result.diagnostics or (result.status == 'no_changed_claims' and registry.claims)):
                 raise OutcomeError("source_support_failed")
             if full_contents is not None:
                 try:
@@ -457,6 +470,7 @@ class WikiOutcomes:
             if any(changed.get(p) != sha for o in outcomes for p, sha in o.documents):
                 raise OutcomeError("support_document_mismatch")
             support = {"candidate_hash": result.candidate_hash,
+                       "status": result.status,
                        "receipt_path": str(result.receipt_path),
                        "receipt_sha256": digest(read_regular(result.receipt_path.parent, result.receipt_path.name))}
         payload = {"contract": CONTRACT, "task_id": task.task_id, "batch_no": batch_no,
@@ -467,6 +481,9 @@ class WikiOutcomes:
         if full_contents is not None:
             payload["context_raw"] = [asdict(r) for r, _c in whole]
             payload["check_sha256"] = check_result.final_sha256
+            payload['source_proof_sha256'] = qualification.digest if source_rows is not None else support_client.source_proof(
+                task=task, snapshot=support_client.snapshot, context=whole)
+            payload['documents'] = [[c.path, c.after_sha256] for c in registry.changes]
         receipt_id = digest(encoded(payload).encode())
         self._save(receipt_id, "validated", payload)
         return receipt_id
@@ -480,7 +497,7 @@ class WikiOutcomes:
 
     def _verified_publication(self, receipt_id: str, *, task_store: WikiTaskStore,
                               snapshot: StagingSnapshot, journal: Path, lock,
-                              require_completed_batch=True):
+                              require_completed_batch=True, task=None):
         """Readback information only, never an acceptance/DB capability.
 
         The publishing-only branch is for a future formal caller. It does not
@@ -493,7 +510,7 @@ class WikiOutcomes:
             raise OutcomeError("receipt_binding_invalid")
         if self.path.resolve() == Path(task_store.database_path).resolve():
             raise OutcomeError("candidate_database_required")
-        task = task_store.get(payload["task_id"])
+        task = task or task_store.get(payload["task_id"])
         if (task.boundary_sha256 != payload["boundary_sha256"] or snapshot.task_id != task.task_id
                 or [asdict(r) for r in task.raw if r.batch_no == payload["batch_no"]] != payload["raw"]):
             # JSON normalizes tuple-free FrozenRaw dictionaries exactly.
@@ -518,6 +535,9 @@ class WikiOutcomes:
         after = {entry["path"]: entry["after"] for entry in data["items"]}
         if len(after) != len(data["items"]):
             raise OutcomeError("journal_duplicate_path")
+        if 'documents' in payload and {p: h for p, h in payload['documents']} != {
+                p: h for p, h in after.items() if p.startswith('wiki/') and p.endswith('.md')}:
+            raise OutcomeError('published_document_mismatch')
         for o in payload["outcomes"]:
             for path, sha in o["documents"]:
                 if after.get(path) != sha:

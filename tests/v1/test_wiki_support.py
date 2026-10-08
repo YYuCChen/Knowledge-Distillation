@@ -80,6 +80,26 @@ def cited(text="作者甲认为数值不是 12，而是 10。", anchor=REF):
     return text + "（" + anchor + "）"
 
 
+def test_exact_managed_system_no_claims_is_durable_without_fake_support(h):
+    path='wiki/index.md'; text='# 知识库索引\n\n<!-- 自动生成，勿手改 -->\n'
+    certificate=ws.GeneratedSection(path,ws.sha256(text.encode()),'@system',text.encode())
+    registry=h.make(text,path=path,generated=(certificate,))
+    client=FakeClient(); result=h.gate(registry).review(client)
+    assert result.status=='no_changed_claims' and not client.calls and result.receipt_path.is_file()
+    assert h.gate(registry).review(client).status=='no_changed_claims' and not client.calls
+    changed=h.make(text+'\n用户说所有条件都适用。\n',path=path,generated=(certificate,))
+    assert changed.claims and any(c.diagnostics for c in changed.claims)
+
+
+def test_exact_managed_section_preserves_extra_business_prose(h):
+    path='wiki/主题/测试.md'
+    region='## 核心认知（自动）\n<!-- 自动生成，勿手改 -->\n（暂无）\n\n'
+    text=region+'## 用户观点\n所有温度都为12。\n'
+    certificate=ws.GeneratedSection(path,ws.sha256(text.encode()),'核心认知（自动）',region.encode())
+    registry=h.make(text,path=path,generated=(certificate,))
+    assert len(registry.claims)==2 and all(c.block.section=='用户观点' for c in registry.claims)
+
+
 def test_full_block_registry_does_not_drop_uncited_assertions(h):
     registry = h.make("## 摘要\n无出处摘要。\n\n## 核心论点\n- " + cited() +
                       "\n- 未引列表主张。\n\n> 未引引文。\n\n| 条件 | 值 |\n|---|---|\n| 低温 | 99 |\n\n"

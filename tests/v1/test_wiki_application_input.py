@@ -277,6 +277,20 @@ def test_source_strings_resembling_error_events_are_only_material(text_files):
     assert invoke().succeeded and call_count(tmp) == 1
 
 
+@pytest.mark.parametrize('bad_schema', [False, True])
+def test_requested_metadata_warning_never_bypasses_actual_check_schema(text_files, bad_schema):
+    from .test_wiki_recorded_transport import metadata_warning
+    tmp, _runtime, _snapshot, _task = text_files
+    _runner, _probes, invoke, final = prepare_text(text_files, 'check')
+    if bad_schema:
+        final['contract'] = 'wrong-check-contract'
+    configure(tmp, final, event=metadata_warning('fake'))
+    result = invoke()
+    assert result.succeeded == (not bad_schema)
+    assert result.error_code == ('typed_binding_invalid' if bad_schema else None)
+    assert call_count(tmp) == 1
+
+
 def test_large_unsent_protected_binary_is_streamed_and_tail_drift_is_rejected(support_files, monkeypatch):
     h = support_files
     relative = 'raw/attachments/protected.bin'

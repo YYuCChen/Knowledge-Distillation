@@ -120,7 +120,7 @@ def create_application(
         selected_paths.database, kit_root=kit_runtime.kit_root,
         python_executable=kit_runtime.python_executable, runtime=kit_runtime)
     wiki_runner = CodexWikiRunner(kit_runtime=kit_runtime)
-    wiki_worker = WikiWorker(wiki_store, selected_paths.runtime, wiki_runner)
+    wiki_worker = WikiWorker(wiki_store, selected_paths.runtime, wiki_runner, source_store=store)
     admission_gate = WorkAdmissionGate()
     coordinator = WorkerCoordinator(worker, wiki_worker, admission_gate)
     wiki_kit_installer = WikiKitInstaller(

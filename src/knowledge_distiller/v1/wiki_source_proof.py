@@ -171,7 +171,7 @@ def _record_observation(ingestion, db, record, max_bytes):
     return events, _sha(observation)
 
 
-def verify_wiki_sources(store, task, snapshot, context, lock, *, max_bytes=INPUT_LIMIT):
+def verify_wiki_sources(store, task, snapshot, context, lock, *, max_bytes=INPUT_LIMIT, connection=None):
     """Observe exact frozen raws twice; return finite source capabilities.
 
     Raw/path/hash or owned attachment inconsistency rejects the whole call.
@@ -179,7 +179,7 @@ def verify_wiki_sources(store, task, snapshot, context, lock, *, max_bytes=INPUT
     No initialize, allocation, placement, migration, event writes or release.
     """
     try:
-        return _verify(store, task, snapshot, tuple(context), lock, max_bytes)
+        return _verify(store, task, snapshot, tuple(context), lock, max_bytes, connection)
     except SourceProofError:
         raise
     except (OSError, ValueError, TypeError, KeyError, IndexError, AttributeError,
@@ -187,7 +187,7 @@ def verify_wiki_sources(store, task, snapshot, context, lock, *, max_bytes=INPUT
         raise SourceProofError('source_proof_invalid') from None
 
 
-def _verify(store, task, snapshot, context, lock, max_bytes):
+def _verify(store, task, snapshot, context, lock, max_bytes, connection=None):
     if (type(max_bytes) is not int or not 0 < max_bytes <= INPUT_LIMIT
             or not isinstance(lock, VaultWriteLock)
             or canonical_vault(task.vault_path) != lock.vault
@@ -241,10 +241,19 @@ def _verify(store, task, snapshot, context, lock, max_bytes):
     database_identity = _key(database)
     ingestion = Ingestion(store)  # constructor only; no initialize
     def pass_once():
+        from contextlib import nullcontext
         result = []
-        with closing(sqlite3.connect(database.absolute().as_uri() + '?mode=ro', uri=True)) as db:
+        if connection is not None:
+            attached = connection.execute('PRAGMA database_list').fetchall()
+            if (not connection.in_transaction or not any(
+                    row[1] == 'main' and Path(row[2]).resolve() == database.resolve() for row in attached)):
+                raise SourceProofError('source_database_unavailable')
+        manager = (nullcontext(connection) if connection is not None else
+                   closing(sqlite3.connect(database.absolute().as_uri() + '?mode=ro', uri=True)))
+        with manager as db:
             db.row_factory = sqlite3.Row
-            db.execute('PRAGMA query_only=ON')
+            if connection is None:
+                db.execute('PRAGMA query_only=ON')
             try:
                 schema_version, guard_gaps = source_schema_inventory(db)
             except ValueError:
@@ -279,12 +288,44 @@ def _verify(store, task, snapshot, context, lock, max_bytes):
                 directory = '附件/raw/' + frozen.raw_id
                 if any(PurePosixPath(p).parent.as_posix() != directory for p in declared):
                     raise SourceProofError('source_attachment_set_invalid')
+                # Images are embedded in raw Markdown. Original HTML/wire/body/
+                # extraction members are deliberately not rendered: their
+                # immutable ledger manifest is the attachment declaration.
+                if record is not None:
+                    manifest = json.loads(record['attachments_json'])
+                    if (type(manifest) is not list or any(type(a) is not dict
+                            or set(a) != {'member_id', 'filename', 'sha256', 'mime_type'}
+                            or any(type(a[k]) is not str or not a[k] for k in a)
+                            or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', a['member_id']) is None
+                            or PurePosixPath(a['filename']).name != a['filename']
+                            or a['filename'] in {'.', '..'}
+                            or re.fullmatch(r'[0-9a-f]{64}', a['sha256']) is None for a in manifest)
+                            or len({a['member_id'] for a in manifest}) != len(manifest)
+                            or len({a['filename'] for a in manifest}) != len(manifest)):
+                        raise SourceProofError('source_attachment_set_invalid')
+                    paths = {directory + '/' + a['filename'] for a in manifest}
+                    embedded = {directory + '/' + a['filename'] for a in manifest
+                                if a['member_id'].startswith('image-')}
+                    if not set(declared) <= paths or not embedded <= set(declared):
+                        raise SourceProofError('source_attachment_set_invalid')
+                    if record['subject_kind'] == 'material':
+                        retained = {(m['member_id'], m['sha256'], m['mime_type']) for m in db.execute(
+                            'SELECT member_id,sha256,mime_type FROM source_media WHERE material_id=?',
+                            (record['subject_id'],))}
+                        if retained != {(a['member_id'], a['sha256'], a['mime_type']) for a in manifest}:
+                            raise SourceProofError('source_attachment_set_invalid')
+                    declared = sorted(paths)
                 attachments = []
                 for relative in sorted(declared):
                     data = observe(vault, relative)
                     if observe(workspace, relative) != data:
                         raise SourceProofError('source_attachment_changed')
                     attachments.append({'path': relative, 'sha256': _sha(data), 'byte_count': len(data)})
+                    if record is not None and record['subject_kind'] == 'material':
+                        from .raw import _attachment_bytes
+                        attachment = next(a for a in manifest if directory + '/' + a['filename'] == relative)
+                        if data != _attachment_bytes(store, record, attachment, db=db):
+                            raise SourceProofError('source_attachment_changed')
                 names = tuple(sorted(PurePosixPath(p).name for p in declared))
                 if _files(vault, directory) != names or _files(workspace, directory) != names:
                     raise SourceProofError('source_attachment_set_invalid')
@@ -394,15 +435,18 @@ def _verify(store, task, snapshot, context, lock, max_bytes):
         'boundary_sha256': task.boundary_sha256, 'sources': before}))
 
 
-def trusted_source_callback(store, lock, *, max_bytes=INPUT_LIMIT):
+def trusted_source_callback(store, lock, *, max_bytes=INPUT_LIMIT, connection=None):
     """Only application assembly may supply Store/lock, never a request body.
 
     The caller must use callback.verify(...).manifest to admit the capabilities
     required by its operation; a well-formed returned digest is not admission.
     """
     def verify(*, task, snapshot, context):
-        return verify_wiki_sources(store, task, snapshot, context, lock, max_bytes=max_bytes)
+        return verify_wiki_sources(store, task, snapshot, context, lock, max_bytes=max_bytes,
+                                   connection=connection)
     def callback(**inputs):
         return verify(**inputs).digest
     callback.verify = verify
+    callback.with_connection = lambda db: trusted_source_callback(
+        store, lock, max_bytes=max_bytes, connection=db)
     return callback

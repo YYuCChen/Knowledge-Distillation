@@ -72,6 +72,10 @@ def _legacy_snapshot(path: Path, *, normalize_v24=False) -> tuple[dict[str, str]
             for name in tables
         }
         if normalize_v24:
+            from knowledge_distiller.v1.database import _schema27_check_catalog, _schema27_expected
+            # Validate the entire exact current catalog before projecting its
+            # explicitly approved schema changes for legacy preservation.
+            _schema27_check_catalog(connection, SCHEMA_VERSION)
             # Only the explicitly added A1 objects/columns are projected away.
             # All pre-existing SQL and every original value still compare exact.
             additions = {'ingestion_events', 'ingestion_events_subject',
@@ -90,6 +94,18 @@ def _legacy_snapshot(path: Path, *, normalize_v24=False) -> tuple[dict[str, str]
                            if row[1] not in added]
                 selected = ','.join('"' + name + '"' for name in columns)
                 contents[table] = list(connection.execute(f'SELECT {selected} FROM {table} ORDER BY rowid'))
+            historical, original_tables, _ = _schema27_expected(21)
+            for table in ('distill_items', 'submitted_sources'):
+                objects[table] = historical[table][2]
+                selected = ','.join('"' + c[1] + '"' for c in original_tables[table][0])
+                contents[table] = list(connection.execute(f'SELECT {selected} FROM {table} ORDER BY rowid'))
+            for name in set(objects) - set(historical):
+                objects.pop(name)
+                contents.pop(name, None)
+            for name in tuple(objects):
+                if name not in historical or name.startswith(('distill_items_raw_terminal_', 'submitted_sources_local_', 'source_identity_')):
+                    objects.pop(name)
+                    contents.pop(name, None)
     return objects, contents
 
 
@@ -172,7 +188,7 @@ def test_real_schema21_upgrade_is_additive_and_preserves_legacy_database(tmp_pat
     initialize(database)
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 24
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 27
         assert {
             row[0]
             for row in connection.execute(
@@ -265,7 +281,7 @@ def test_schema23_rebuild_rejects_orphaned_v22_child_and_preserves_source(tmp_pa
         )
 
     with pytest.raises(
-        RuntimeError, match="database migration found broken wiki task references"
+        RuntimeError, match="schema27 broken foreign keys"
     ):
         initialize(database)
 
@@ -321,7 +337,7 @@ def test_schema21_binary_rejects_schema22_and_opens_restored_backup(tmp_path):
         source.backup(target)
 
     initialize(database)
-    with pytest.raises(RuntimeError, match="unsupported database version: 24"):
+    with pytest.raises(RuntimeError, match=f"unsupported database version: {SCHEMA_VERSION}"):
         _schema21_binary_version_gate(database)
 
     shutil.copy2(backup, restored)
@@ -340,13 +356,13 @@ def test_future_schema_is_rejected_without_downgrade(tmp_path):
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE sentinel(value TEXT)")
         connection.execute("INSERT INTO sentinel VALUES ('keep')")
-        connection.execute("PRAGMA user_version=25")
+        connection.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
 
-    with pytest.raises(RuntimeError, match="unsupported database version: 25"):
+    with pytest.raises(RuntimeError, match=f"unsupported frozen migration source: {SCHEMA_VERSION + 1}"):
         initialize(database)
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 25
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION + 1
         assert connection.execute("SELECT value FROM sentinel").fetchone()[0] == "keep"
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE name LIKE 'wiki_%'"

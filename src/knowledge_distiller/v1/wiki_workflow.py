@@ -172,7 +172,7 @@ class WikiWorkflow:
                 task = self.store.create_or_reuse(
                     vault, request_kind="all", trigger_source="local_web",
                     backend="codex_cli", model=model, effort=effort,
-                    allow_supersede_failed=True)
+                    allow_supersede_failed=True, outcome_contract="r08-wiki-outcomes-v1")
                 self._observe_now(vault, task.task_id)
                 self.worker.wake()
                 self.worker.request_observation(vault, force=True)

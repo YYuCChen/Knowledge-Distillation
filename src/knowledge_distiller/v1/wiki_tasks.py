@@ -6,7 +6,7 @@ are never persisted in the task tables.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict, replace
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -108,6 +108,9 @@ class WikiTask:
     updated_at: str
     batches: tuple[WikiBatch, ...] = ()
     raw: tuple[FrozenRaw, ...] = ()
+    outcome_contract: str = 'legacy'
+    plan_json: str = '{}'
+    plan_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -360,6 +363,77 @@ def _boundary(frozen_batches: tuple[tuple[FrozenRaw, ...], ...]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _canonical(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(',', ':'), allow_nan=False).encode('utf-8')
+
+
+def _program_plan(raw, *, boundary, kit_version, kit_sha256, backend, model, effort):
+    """Program-only plan. Source_requirement is an obligation, not proof."""
+    from . import wiki_typed as t
+    from .wiki_support import CONTRACT_VERSION, EXTRACTOR_VERSION, RECOVERY_VERSION
+    configuration = dict(backend=backend, model=model, effort=effort,
+        provider='knowledge_subscription', transport='typed-exec-schema-final-v1',
+        input_policy=t.APPLICATION_UTF8_POLICY, max_application_input_bytes=t.INPUT_LIMIT,
+        stdout_limit=t.STDOUT_LIMIT, stderr_limit=t.STDERR_LIMIT, line_limit=t.LINE_LIMIT,
+        final_limit=t.FINAL_LIMIT, generation_timeout=t.GENERATION_TIMEOUT,
+        check_timeout=t.CHECK_TIMEOUT, max_extra_repairs=2, r14_max_tokens=8192)
+    schemas = {name: dict(contract=contract, revision=1, sha256=t.digest(t.encoded(schema)))
+        for name, contract, schema in (
+            ('proposal', t.CONTRACT, t.PROPOSAL_SCHEMA),
+            ('check', t.CHECK_CONTRACT, t.CHECK_SCHEMA),
+            ('support', t.SUPPORT_CONTRACT, t.SUPPORT_SCHEMA))}
+    batch_numbers = sorted({r.batch_no for r in raw})
+    if (not raw or batch_numbers != list(range(1, len(batch_numbers) + 1))
+            or [r.ordinal for r in raw] != list(range(1, len(raw) + 1))
+            or len({r.raw_id for r in raw}) != len(raw)
+            or [r.batch_no for r in raw] != sorted(r.batch_no for r in raw)):
+        raise WikiTaskError('plan_binding_invalid')
+    groups = tuple(tuple(r for r in raw if r.batch_no == n) for n in batch_numbers)
+    if _boundary(groups) != boundary:
+        raise WikiTaskError('plan_binding_invalid')
+    return dict(contract='r08-task-plan-v1', schema_revision=1, outcome_contract=t.CONTRACT,
+        boundary_sha256=boundary,
+        source_requirement=dict(contract='wiki-source-proof-v1', scope='finite_retained_sources'),
+        kit=dict(version=kit_version, manifest_sha256=kit_sha256), configuration=configuration,
+        schemas=schemas, r14_versions=[CONTRACT_VERSION, EXTRACTOR_VERSION, RECOVERY_VERSION],
+        raw=[asdict(r) for r in raw],
+        batches=[dict(batch_no=n, raw_ids=[r.raw_id for r in raw if r.batch_no == n])
+                 for n in batch_numbers])
+
+
+def execution_policy_sha256(task):
+    plan = _validated_plan(task)
+    return hashlib.sha256(_canonical({k: plan[k] for k in
+                                    ('configuration', 'schemas', 'r14_versions')})).hexdigest()
+
+
+def _validated_plan(task):
+    expected = _program_plan(task.raw, boundary=task.boundary_sha256,
+        kit_version=task.kit_version, kit_sha256=task.kit_manifest_sha256,
+        backend=task.backend, model=task.model, effort=task.effort)
+    content = _canonical(expected)
+    if (task.outcome_contract != expected['outcome_contract']
+            or task.plan_json != content.decode('utf-8')
+            or task.plan_sha256 != hashlib.sha256(content).hexdigest()
+            or task.raw_count != len(task.raw) or task.batch_count != len(expected['batches'])
+            or [(b.batch_no, b.item_count) for b in task.batches] != [
+                (b['batch_no'], len(b['raw_ids'])) for b in expected['batches']]):
+        raise WikiTaskError('plan_binding_invalid')
+    return expected
+
+
+def _execution_schema(connection):
+    # Frozen schema27 owner API; no migration or runtime catalog adoption here.
+    try:
+        from .database import _wiki_execution_schema_inventory
+    except ImportError:
+        raise WikiTaskError('execution_schema_unavailable') from None
+    if connection.execute('PRAGMA user_version').fetchone()[0] != 27:
+        raise WikiTaskError('execution_schema_unavailable')
+    _wiki_execution_schema_inventory(connection)
+
+
 class WikiTaskStore:
     def __init__(self, database_path: Path | str, *, kit_root: Path | str,
                  python_executable: Path | str, kb_path: Path | str | None = None,
@@ -390,6 +464,7 @@ class WikiTaskStore:
             row["state"], row["raw_count"], row["batch_count"], row["completed_batch_count"],
             row["error_code"], row["recovery_state"], row["recovery_phase"],
             row["created_at"], row["updated_at"], batches, raw,
+            row['outcome_contract'], row['plan_json'], row['plan_sha256'],
         )
 
     def get(self, task_id: str) -> WikiTask:
@@ -527,7 +602,10 @@ class WikiTaskStore:
 
     def create_or_reuse(self, vault: Path | str, *, request_kind: str,
                         trigger_source: str, backend: str, model: str, effort: str,
-                        allow_supersede_failed: bool = False) -> WikiTask:
+                        allow_supersede_failed: bool = False,
+                        outcome_contract: str = 'legacy') -> WikiTask:
+        if outcome_contract not in {'legacy', 'r08-wiki-outcomes-v1'}:
+            raise WikiTaskError('outcome_contract_invalid')
         if request_kind not in {"one_batch", "all"}:
             raise WikiTaskError("request_kind_invalid")
         if trigger_source not in {"local_web", "claudian", "cli"}:
@@ -559,15 +637,25 @@ class WikiTaskStore:
                 if not rows:
                     raise WikiTaskError("no_pending_raw")
                 planned = plan_batches(rows)
-                if request_kind == "one_batch":
+                if request_kind == "one_batch" and outcome_contract == 'legacy':
                     planned = planned[:1]
                 frozen_batches = tuple(tuple(_freeze_one(root, item) for item in batch)
                                        for batch in planned)
                 boundary = _boundary(frozen_batches)
+                frozen_raw = tuple(replace(item, ordinal=ordinal, batch_no=batch_no)
+                    for ordinal, (batch_no, item) in enumerate(
+                        ((n, r) for n, batch in enumerate(frozen_batches, 1) for r in batch), 1))
+                plan_bytes = (_canonical(_program_plan(frozen_raw, boundary=boundary,
+                    kit_version=desired.kit_version, kit_sha256=desired.manifest_sha256,
+                    backend=backend, model=model, effort=effort))
+                    if outcome_contract != 'legacy' else b'{}')
+                plan_sha = hashlib.sha256(plan_bytes).hexdigest() if outcome_contract != 'legacy' else None
                 now, key = _timestamp(), held.key
                 try:
                     with connect(self.database_path) as connection:
                         connection.execute("BEGIN IMMEDIATE")
+                        if outcome_contract != 'legacy':
+                            _execution_schema(connection)
                         unresolved_recovery = connection.execute(
                             """SELECT 1 FROM wiki_tasks WHERE vault_key=? AND state='failed'
                                AND recovery_state NOT IN ('not_needed','succeeded') LIMIT 1""",
@@ -578,11 +666,18 @@ class WikiTaskStore:
                         existing = connection.execute(
                             """SELECT task_id FROM wiki_tasks
                                WHERE vault_key=? AND boundary_sha256=? AND kit_manifest_sha256=?
-                                 AND backend=? AND model=? AND effort=?""",
-                            (key, boundary, desired.manifest_sha256, backend, model, effort),
+                                 AND backend=? AND model=? AND effort=? AND outcome_contract=?
+                                 AND (?='legacy' OR plan_sha256=?)""",
+                            (key, boundary, desired.manifest_sha256, backend, model, effort,
+                             outcome_contract, outcome_contract, plan_sha),
                         ).fetchone()
                         if existing:
-                            return self._task(connection, existing["task_id"])
+                            reused = self._task(connection, existing["task_id"])
+                            if outcome_contract != 'legacy':
+                                _validated_plan(reused)
+                                if reused.raw != frozen_raw:
+                                    raise WikiTaskError('plan_binding_invalid')
+                            return reused
                         active = connection.execute(
                             """SELECT task_id FROM wiki_tasks WHERE vault_key=?
                                AND state IN ('queued','preparing','running','validating','publishing')""",
@@ -605,19 +700,19 @@ class WikiTaskStore:
                                 raise WikiTaskError("vault_busy")
                         task_id = uuid.uuid4().hex
                         raw_count = sum(len(batch) for batch in frozen_batches)
-                        connection.execute(
-                            """INSERT INTO wiki_tasks(
-                                task_id,vault_path,vault_key,request_kind,trigger_source,
-                                backend,model,effort,kit_version,kit_manifest_sha256,
-                                boundary_sha256,state,raw_count,batch_count,
-                                completed_batch_count,error_code,recovery_state,recovery_phase,
-                                created_at,updated_at
-                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (task_id, os.fspath(root), key, request_kind, trigger_source,
-                             backend, model, effort, desired.kit_version, desired.manifest_sha256,
-                             boundary, "queued", raw_count, len(frozen_batches), 0, None,
-                             "not_needed", "none", now, now),
-                        )
+                        columns = ('task_id,vault_path,vault_key,request_kind,trigger_source,'
+                            'backend,model,effort,kit_version,kit_manifest_sha256,'
+                            'boundary_sha256,state,raw_count,batch_count,completed_batch_count,'
+                            'error_code,recovery_state,recovery_phase,created_at,updated_at')
+                        values = (task_id, os.fspath(root), key, request_kind, trigger_source,
+                            backend, model, effort, desired.kit_version, desired.manifest_sha256,
+                            boundary, 'queued', raw_count, len(frozen_batches), 0, None,
+                            'not_needed', 'none', now, now)
+                        if outcome_contract != 'legacy':
+                            columns += ',outcome_contract,plan_json,plan_sha256'
+                            values += (outcome_contract, plan_bytes.decode('utf-8'), plan_sha)
+                        connection.execute(f"INSERT INTO wiki_tasks({columns}) VALUES ({','.join('?' for _ in values)})",
+                                           values)
                         ordinal = 0
                         for batch_no, batch in enumerate(frozen_batches, 1):
                             connection.execute(
@@ -646,6 +741,61 @@ class WikiTaskStore:
             if code not in {"kit_missing", "kit_drift", "kit_incompatible"}:
                 code = "kit_drift"
             raise WikiTaskError(code) from error
+
+    def read_execution_task(self, task_id: str, *, expected_plan_sha256: str,
+                            connection=None) -> WikiTask:
+        if connection is None:
+            with connect(self.database_path) as db:
+                return self.read_execution_task(task_id, expected_plan_sha256=expected_plan_sha256,
+                                                connection=db)
+        _execution_schema(connection)
+        task = self._task(connection, task_id)
+        _validated_plan(task)
+        if task.plan_sha256 != expected_plan_sha256:
+            raise WikiTaskError('plan_binding_invalid')
+        return task
+
+    def reserve_generation(self, task_id: str, snapshot, runtime_root, *,
+                           expected_plan_sha256: str, batch_no: int, lock,
+                           source_proof, argv, stdin_bytes, schema_bytes,
+                           input_binding, recording_call, timeout_seconds, allow_recovery=False):
+        """One host permit, durable before Popen; no queue or state mutation."""
+        from .wiki_staging import reserve_generation
+        with connect(self.database_path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            task = self.read_execution_task(task_id, expected_plan_sha256=expected_plan_sha256,
+                                            connection=db)
+            batch = next((b for b in task.batches if b.batch_no == batch_no), None)
+            if batch is None or batch.state != 'running' or task.state != 'running':
+                raise WikiTaskError('invalid_transition')
+            return reserve_generation(snapshot, runtime_root, task=task, batch_no=batch_no,
+                lock=lock, source_proof=(source_proof.with_connection(db)
+                    if hasattr(source_proof, 'with_connection') else source_proof), argv=argv, stdin_bytes=stdin_bytes,
+                schema_bytes=schema_bytes, input_binding=input_binding,
+                recording_call=recording_call, timeout_seconds=timeout_seconds, allow_recovery=allow_recovery)
+
+    def save_generation_result(self, permit, result, *, lock, source_proof):
+        from .wiki_staging import save_generation_result
+        with connect(self.database_path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            task = self.read_execution_task(permit.task.task_id,
+                expected_plan_sha256=permit.task.plan_sha256, connection=db)
+            if task.raw != permit.task.raw or task.boundary_sha256 != permit.task.boundary_sha256:
+                raise WikiTaskError('plan_binding_invalid')
+            return save_generation_result(permit, result, lock=lock, source_proof=(
+                source_proof.with_connection(db) if hasattr(source_proof, 'with_connection') else source_proof))
+
+    def load_generation_checkpoint(self, task_id, runtime_root, *, batch_no, lock,
+                                   expected_plan_sha256, source_proof, allow_regenerated_graph=False):
+        from .wiki_staging import load_generation_checkpoint
+        with connect(self.database_path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            task = self.read_execution_task(task_id, expected_plan_sha256=expected_plan_sha256,
+                                            connection=db)
+            return load_generation_checkpoint(Path(runtime_root) / 'wiki-tasks' / task_id,
+                runtime_root, task=task, batch_no=batch_no, lock=lock, source_proof=(
+                    source_proof.with_connection(db) if hasattr(source_proof, 'with_connection') else source_proof),
+                allow_regenerated_graph=allow_regenerated_graph)
 
     def set_task_state(self, task_id: str, state: str) -> WikiTask:
         if state not in TASK_STATES - {"failed"}:
@@ -710,6 +860,54 @@ class WikiTaskStore:
                 return self._task(connection, task_id)
         except sqlite3.IntegrityError as error:
             raise WikiTaskError("invalid_transition") from error
+
+    def accept_published_batch(self, task_id, batch_no, *, verify, recovered=False):
+        """Locked caller proves publication on this transaction, then records success.
+
+        The nine-field schema27 capability is exact and one-use; normal database
+        connections retain their default denial. No caller success boolean is used.
+        """
+        from .wiki_outcomes import CONTRACT
+        with connect(self.database_path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            task = self._task(db, task_id)
+            _validated_plan(task)
+            batch = next(b for b in task.batches if b.batch_no == batch_no)
+            if batch.state == 'succeeded':
+                return task
+            if recovered and batch.state == 'failed':
+                for state in ('queued', 'preparing', 'running', 'validating', 'publishing'):
+                    db.execute('UPDATE wiki_task_batches SET state=?,error_code=NULL WHERE task_id=? AND batch_no=?',
+                               (state, task_id, batch_no))
+                task = self._task(db, task_id)
+            elif batch.state != 'publishing':
+                raise WikiTaskError('invalid_transition')
+            receipt_id, payload_json = verify(task, db)
+            created_at = _timestamp()
+            values = (receipt_id, task_id, batch_no, 'accepted', CONTRACT,
+                      task.boundary_sha256, task.plan_sha256, payload_json, created_at)
+            old = db.execute("SELECT receipt_id,payload_json FROM wiki_outcome_receipts WHERE task_id=? AND batch_no=? AND phase='accepted'",
+                             (task_id, batch_no)).fetchone()
+            if old is not None:
+                if tuple(old) != (receipt_id, payload_json):
+                    raise WikiTaskError('readback_failed')
+            else:
+                available = [True]
+                def permission(*actual):
+                    if available[0] and actual == values:
+                        available[0] = False
+                        return 1
+                    return 0
+                db.create_function('wiki_outcome_accept', 9, permission)
+                try:
+                    db.execute('INSERT INTO wiki_outcome_receipts VALUES(?,?,?,?,?,?,?,?,?)', values)
+                finally:
+                    db.create_function('wiki_outcome_accept', 9, lambda *_: 0)
+            db.execute("UPDATE wiki_task_batches SET state='succeeded',error_code=NULL WHERE task_id=? AND batch_no=?",
+                       (task_id, batch_no))
+            db.execute('UPDATE wiki_tasks SET completed_batch_count=completed_batch_count+1,updated_at=? WHERE task_id=?',
+                       (_timestamp(), task_id))
+            return self._task(db, task_id)
 
     def mark_recovered_batch_readback_succeeded(self, task_id: str,
                                                 batch_no: int) -> WikiTask:

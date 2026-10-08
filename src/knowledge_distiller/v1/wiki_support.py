@@ -265,6 +265,9 @@ class Registry:
                 "claim_mapping": [asdict(m) for m in self.claim_mapping], "contract": CONTRACT_VERSION,
                 "claims": [{"claim_id": c.block.claim_id, **asdict(c.block),
                             "evidence": c.evidence} for c in self.claims],
+                "generated": [{"path": g.path, "document_sha256": g.document_sha256,
+                               "heading": g.heading, "content": g.content.decode('utf-8')}
+                              for g in self.generated],
                 "documents": [{"path": c.path, "before_sha256": c.before_sha256,
                                "after_sha256": c.after_sha256,
                                "before": c.before.decode("utf-8") if c.before is not None else None,
@@ -363,6 +366,12 @@ def _blocks(path, text, generated=()):
         for n in range(start + offset, end + offset + 1):
             original[n] = "\n"
     tokens = MarkdownIt("commonmark").enable("table").parse("".join(original[offset:]))
+    # A trusted renderer may certify a complete system shell, but only exact
+    # bytes, never a path exemption. Extra user/model prose remains a claim.
+    if path in {'wiki/index.md', 'wiki/待确认.md'} and any(p.path == path and p.heading == '@system'
+           and p.document_sha256 == sha256(text.encode('utf-8'))
+           and p.content == text.encode('utf-8') for p in generated):
+        return ()
     section = ""
     counts = Counter()
     blocks = []
@@ -379,7 +388,9 @@ def _blocks(path, text, generated=()):
         if token.type != "heading_open" or token.tag != "h2":
             continue
         title = tokens[i + 1].content
-        if title not in AUTO_HEADINGS.get(PurePosixPath(path).parent.name, set()):
+        if not (title in AUTO_HEADINGS.get(PurePosixPath(path).parent.name, set())
+                or (PurePosixPath(path).parent.name == '主题' and title == '概览')
+                or (path == 'wiki/log.md' and re.fullmatch(r'\[\d{4}-\d{2}-\d{2}\] check \| 程序检查', title))):
             continue
         start = token.map[0] + offset
         end = len(original)
@@ -900,6 +911,7 @@ class WikiSupportGate:
             status, checks, diagnostics = "source_boundary_failed", (), deterministic
         elif not registry.claims:
             status, checks, diagnostics = "no_changed_claims", (), ()
+            receipt = self.directory / ("candidate-" + attempt["request_id"] + ".json")
         elif not receipt.exists() and not receipt.is_symlink():
             status, checks, diagnostics = "interrupted", (), (
                 Diagnostic("", "", "$", "response", "request_interrupted"),)
@@ -1036,15 +1048,33 @@ class WikiSupportGate:
         # exactly. Mask only spans assigned explicitly to original failed IDs;
         # no line-number-based attempt to infer the correspondence.
         failed_ids = {cid for cid, _ in allowed}
-        def masked(text, blocks):
+        def masked(text, blocks, path, proofs):
             lines = text.splitlines(keepends=True)
             spans = sorted((b["start_line"] - 1, b["end_line"], cid)
                            for cid, b in blocks.items() if cid in failed_ids)
-            for start, end, cid in reversed(spans):
-                lines[start:end] = ["<" + cid + ">\n"]
+            for proof in proofs:
+                if proof['path'] != path or proof['document_sha256'] != sha256(text.encode()):
+                    continue
+                region = proof['content']
+                if proof['heading'] == '@system' and region == text:
+                    return '<managed-system>\n'
+                # Use the same extractor's exact certified section spans.
+                for match in re.finditer(r'(?m)^## '+re.escape(proof['heading'])+r'\n[\s\S]*?(?=^#{1,2} |\Z)', text):
+                    if match[0] == region:
+                        start = text[:match.start()].count('\n')
+                        if path == 'wiki/log.md' and start and lines[start - 1] == '\n':
+                            start -= 1  # kb's exact append separator
+                        spans.append((start,
+                                      text[:match.end()].count('\n') + (0 if region.endswith('\n') else 1),
+                                      'managed:'+proof['heading']))
+            for start, end, cid in sorted(spans, reverse=True):
+                lines[start:end] = ([] if path == 'wiki/log.md' and cid.startswith('managed:')
+                                    else ["<" + cid + ">\n"])
             return "".join(lines)
         old_docs = {d["path"]: d for d in repair["candidate"]["documents"]}
         for doc in self.registry.changes:
-            if masked(old_docs[doc.path]["after"], {cid: b for cid, b in before.items() if b["path"] == doc.path}) != masked(
-                    doc.after.decode("utf-8"), {cid: b for cid, b in after.items() if b["path"] == doc.path}):
+            if masked(old_docs[doc.path]["after"], {cid: b for cid, b in before.items() if b["path"] == doc.path},
+                      doc.path, repair['candidate'].get('generated', [])) != masked(
+                    doc.after.decode("utf-8"), {cid: b for cid, b in after.items() if b["path"] == doc.path},
+                    doc.path, self.registry.payload()['generated']):
                 raise WikiSupportError("repair_invalid")

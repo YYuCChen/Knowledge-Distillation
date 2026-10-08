@@ -129,6 +129,73 @@ def successful(*, usage=True):
             'os.write(2,b"synthetic stderr\\n")\n' + f'final.write_bytes({FINAL!r})\n')
 
 
+def metadata_warning(model='synthetic-transport'):
+    return {'type':'item.completed', 'item':{'id':'item_0', 'type':'error',
+        'message':f'Model metadata for `{model}` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.'}}
+
+
+@pytest.mark.parametrize('after,code', [
+    ('success', None), ('error', 'agent_failed'), ('turn.failed', 'agent_failed'),
+    ('exit', 'agent_failed'), ('timeout', 'runner_timeout'), ('invalid_final', 'typed_protocol_invalid')])
+def test_exact_requested_metadata_warning_is_recorded_then_real_terminal_decides(layout, after, code):
+    event=typed.encoded(metadata_warning())+b'\n'
+    body='sys.stdin.buffer.read()\n'+f'os.write(1,{event!r})\n'
+    if after in {'error','turn.failed'}:
+        failure={'type':after,'error':{'message':'controlled genuine failure'}}
+        body+=f'os.write(1,{(typed.encoded(failure)+bytes([10]))!r})\n'
+    elif after=='exit': body+='sys.exit(7)\n'
+    elif after=='timeout': body+='time.sleep(20)\n'
+    elif after=='invalid_final': body+="final.write_bytes(b'{invalid schema final')\n"
+    else: body+=f'os.write(1,{USAGE!r})\nfinal.write_bytes({FINAL!r})\n'
+    with session(layout) as recording:
+        result=run(layout,instance(layout,body,recording),timeout=3 if after=='timeout' else 4)
+        assert result.error_code==code and result.succeeded==(code is None)
+        path,terminal=artifacts(layout)
+        assert event in (path/'stdout.jsonl.raw').read_bytes()
+        assert terminal['diagnostic']['observed_warnings']==['model_metadata_fallback']
+        if after == 'timeout':
+            assert terminal['actual_spawned'] and terminal['timed_out']
+            assert terminal['diagnostic']['original_transport_error_code'] == 'runner_timeout'
+            assert terminal['diagnostic']['cleanup_observation_v1']['term'] == 'sent'
+        if code is None:
+            assert result.final_bytes==FINAL and terminal['returncode']==0
+            assert terminal['complete_stdout_eof'] and terminal['complete_stderr_eof']
+            assert terminal['diagnostic']['cleanup_observation_v1']['phase']=='finally'
+
+
+@pytest.mark.parametrize('damage', ['model','extra_error','item.started','top_error','model_rerouted'])
+def test_other_model_or_error_shape_cannot_use_metadata_warning_exception(layout, damage):
+    event=metadata_warning()
+    if damage=='model': event=metadata_warning('different-requested-model')
+    elif damage=='extra_error': event['item']['code']='real_failure'
+    elif damage=='item.started': event['type']='item.started'
+    elif damage=='top_error': event={'type':'error','message':event['item']['message']}
+    else: event['item']['message']='model rerouted: synthetic-transport -> replacement-model (ModelUnavailable)'
+    body='sys.stdin.buffer.read()\n'+f'os.write(1,{(typed.encoded(event)+bytes([10]))!r})\nfinal.write_bytes({FINAL!r})\n'
+    with session(layout) as recording:
+        result=run(layout,instance(layout,body,recording))
+        assert result.error_code=='agent_failed' and not result.succeeded
+        assert 'observed_warnings' not in artifacts(layout)[1]['diagnostic']
+
+
+@pytest.mark.parametrize('message', [
+    'Under-development features enabled: skip_host_skill_discovery. Under-development features are incomplete and may behave unpredictably.',
+    'Configuration warning from this controlled CLI fixture.',
+    'Deprecation notice from this controlled CLI fixture.',
+    'Diagnostic containing words error and turn.failed is not a terminal failure.'])
+def test_completed_error_item_is_protocol_diagnostic_not_text_whitelist(layout, message):
+    event=metadata_warning(); event['item']['message']=message
+    raw=typed.encoded(event)+b'\n'
+    body='sys.stdin.buffer.read()\n'+f'os.write(1,{raw!r})\nos.write(1,{USAGE!r})\nfinal.write_bytes({FINAL!r})\n'
+    with session(layout) as recording:
+        result=run(layout,instance(layout,body,recording))
+        assert result.succeeded and result.final_bytes==FINAL
+        path,terminal=artifacts(layout)
+        assert raw in (path/'stdout.jsonl.raw').read_bytes()
+        assert terminal['diagnostic']['observed_warnings']==['cli_item_diagnostic']
+        assert terminal['complete_stdout_eof'] and terminal['complete_stderr_eof']
+
+
 @pytest.mark.parametrize('with_usage', [True, False])
 def test_real_success_raw_inputs_usage_eof_and_none_compatibility(layout, with_usage):
     body = successful(usage=with_usage)

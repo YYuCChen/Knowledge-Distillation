@@ -108,6 +108,9 @@ def test_changed_model_creates_new_task_and_preserves_failed_history(tmp_path):
     created = workflow.submit_all()
     assert created["task_id"] != old.task_id
     assert created["state"] == "queued"
+    typed = store.get(created['task_id'])
+    assert typed.outcome_contract == 'r08-wiki-outcomes-v1'
+    assert typed.plan_sha256 and typed.plan_json != '{}'
     assert worker.wakes == 1
     assert store.get(old.task_id) == old
     with sqlite3.connect(store.database_path) as connection:

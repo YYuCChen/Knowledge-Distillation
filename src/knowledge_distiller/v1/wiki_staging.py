@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import shutil
@@ -579,3 +580,483 @@ def cleanup_staging(snapshot: StagingSnapshot) -> None:
         raise
     except OSError as error:
         raise WikiStagingError("staging_cleanup_failed") from error
+
+
+# Host evidence only; separate from application stdin/schema and model budgets.
+CHECKPOINT_LIMIT = 32 * 1024 * 1024
+_PERMIT_KEY = object()
+
+
+def _checkpoint_bytes(value):
+    content = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                         separators=(',', ':'), allow_nan=False).encode('utf-8')
+    if len(content) > CHECKPOINT_LIMIT:
+        raise WikiStagingError('checkpoint_limit')
+    return content
+
+
+def _checkpoint_read(path):
+    from .wiki_typed import read_final
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise WikiStagingError('checkpoint_invalid')
+            result[key] = value
+        return result
+    def invalid(_value):
+        raise WikiStagingError('checkpoint_invalid')
+    content = read_final(path.parent, path.name, limit=CHECKPOINT_LIMIT)
+    try:
+        value = json.loads(content, object_pairs_hook=pairs, parse_constant=invalid)
+        def finite(node, key=None):
+            if type(node) is float and (key != 'timeout_seconds' or not math.isfinite(node) or node <= 0):
+                raise WikiStagingError('checkpoint_invalid')
+            if type(node) is dict:
+                for name, child in node.items():
+                    finite(child, name)
+            elif type(node) is list:
+                for child in node:
+                    finite(child)
+        finite(value)
+        if _checkpoint_bytes(value) != content:
+            raise WikiStagingError('checkpoint_invalid')
+        return value
+    except (ValueError, UnicodeError):
+        raise WikiStagingError('checkpoint_invalid') from None
+
+
+def _checkpoint_dir(path):
+    from .wiki_typed import _directory
+    if not path.exists():
+        path.mkdir(mode=0o700)
+        parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+    _directory(path)
+    info = path.lstat()
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise WikiStagingError('checkpoint_path_invalid')
+    return path
+
+
+def _checkpoint_write(path, content):
+    from .wiki_typed import _directory, _file_key, read_final
+    root = _directory(path.parent)
+    identity = (root.stat().st_dev, root.stat().st_ino, root.stat().st_mode)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        view = memoryview(content)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise WikiStagingError('checkpoint_invalid')
+            view = view[written:]
+        os.fsync(fd)
+        if _file_key(os.fstat(fd)) != _file_key(path.lstat()):
+            raise WikiStagingError('checkpoint_path_invalid')
+    finally:
+        os.close(fd)
+    parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        held = os.fstat(parent)
+        if identity != (held.st_dev, held.st_ino, held.st_mode):
+            raise WikiStagingError('checkpoint_path_invalid')
+        os.fsync(parent)
+    finally:
+        os.close(parent)
+    if read_final(root, path.name, limit=max(CHECKPOINT_LIMIT, len(content))) != content:
+        raise WikiStagingError('checkpoint_invalid')
+
+
+def _checkpoint_tree(snapshot):
+    from .wiki_typed import _input_digest
+    rows = []
+    for path in _all_files(snapshot.workspace):
+        sha, size = _input_digest(snapshot.workspace, path)
+        rows.append(dict(relative_path=path, role=_role(path), byte_count=size, sha256=sha))
+    return rows
+
+
+def _checkpoint_sources(task, snapshot):
+    from .wiki_typed import _input_digest
+    for raw in task.raw:
+        if _input_digest(snapshot.workspace, raw.relative_path) != (raw.content_sha256, raw.byte_count):
+            raise WikiStagingError('raw_changed')
+
+
+def _copy_checkpoint_before(source, target, expected):
+    """Stream original bytes without a Vault-sized allocation or input cap."""
+    from .wiki_typed import _directory, _file_key, _input_digest
+    parents = [(p, (p.stat().st_dev, p.stat().st_ino, p.stat().st_mode))
+               for p in (_directory(source.parent), *source.parent.parents)]
+    before = source.lstat()
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or before.st_uid != os.getuid()):
+        raise WikiStagingError('checkpoint_path_invalid')
+    src = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    dst = None
+    try:
+        if _file_key(os.fstat(src)) != _file_key(before):
+            raise WikiStagingError('input_changed')
+        dst = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        hasher, size = hashlib.sha256(), 0
+        while True:
+            chunk = os.read(src, min(65536, before.st_size + 1 - size))
+            if not chunk:
+                break
+            size += len(chunk); hasher.update(chunk)
+            if size > before.st_size:
+                raise WikiStagingError('input_changed')
+            view = memoryview(chunk)
+            while view:
+                written = os.write(dst, view)
+                if written <= 0:
+                    raise WikiStagingError('checkpoint_invalid')
+                view = view[written:]
+        if ((hasher.hexdigest(), size) != expected
+                or _file_key(os.fstat(src)) != _file_key(before)
+                or _file_key(source.lstat()) != _file_key(before)):
+            raise WikiStagingError('input_changed')
+        os.fsync(dst)
+        if _file_key(os.fstat(dst)) != _file_key(target.lstat()):
+            raise WikiStagingError('checkpoint_path_invalid')
+        for path, key in parents:
+            info = path.lstat()
+            if not stat.S_ISDIR(info.st_mode) or key != (info.st_dev, info.st_ino, info.st_mode):
+                raise WikiStagingError('checkpoint_path_invalid')
+    finally:
+        os.close(src)
+        if dst is not None:
+            os.close(dst)
+    if _input_digest(target.parent, target.name) != expected:
+        raise WikiStagingError('input_changed')
+    fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _execution_location(snapshot, runtime_root, task, lock):
+    from .wiki_typed import validate_layout
+    from .wiki_tasks import _validated_plan
+    _require_lock(canonical_vault(task.vault_path), lock)
+    _validated_plan(task)
+    validate_layout(snapshot, runtime_root, dict(task_id=task.task_id,
+        attempt_id=snapshot.task_root.name, batch_no=1,
+        boundary_sha256=task.boundary_sha256, input_sha256='0' * 64))
+    container = snapshot.task_root.parent.parent
+    pointer = _checkpoint_read_pointer(container)
+    if pointer != snapshot.task_root.name:
+        raise WikiStagingError('checkpoint_attempt_changed')
+    return container
+
+
+def _checkpoint_read_pointer(container):
+    from .wiki_typed import read_final
+    value = read_final(container, 'current-attempt', limit=33)
+    try:
+        attempt = value.decode('ascii')
+    except UnicodeError:
+        raise WikiStagingError('checkpoint_invalid') from None
+    if len(attempt) != 33 or attempt[-1] != '\n' or any(c not in _TASK_ID for c in attempt[:-1]):
+        raise WikiStagingError('checkpoint_invalid')
+    return attempt[:-1]
+
+
+def bind_task_execution(snapshot, runtime_root, *, task, lock):
+    from .wiki_tasks import execution_policy_sha256
+    container = _execution_location(snapshot, runtime_root, task, lock)
+    root = _checkpoint_dir(container / 'execution')
+    record = dict(contract='wiki-task-execution-v1', task_id=task.task_id,
+        plan_sha256=task.plan_sha256, execution_policy_sha256=execution_policy_sha256(task),
+        boundary_sha256=task.boundary_sha256, kit_manifest_sha256=task.kit_manifest_sha256,
+        first_attempt=snapshot.task_root.name)
+    path = root / 'binding.json'
+    if path.exists() or path.is_symlink():
+        if _checkpoint_read(path) != record:
+            raise WikiStagingError('checkpoint_binding_changed')
+    else:
+        _checkpoint_write(path, _checkpoint_bytes(record))
+    return root
+
+
+def preserve_batch_baseline(snapshot, runtime_root, *, task, batch_no, lock):
+    root = bind_task_execution(snapshot, runtime_root, task=task, lock=lock)
+    if type(batch_no) is not int or not any(b.batch_no == batch_no for b in task.batches):
+        raise WikiStagingError('batch_invalid')
+    root = _checkpoint_dir(root / f'batch-{batch_no}')
+    manifest = _manifest(snapshot)
+    path = root / 'baseline.json'
+    if path.exists() or path.is_symlink():
+        if _checkpoint_read(path) != manifest:
+            raise WikiStagingError('checkpoint_baseline_changed')
+    else:
+        if _checkpoint_tree(snapshot) != manifest['files']:
+            raise WikiStagingError('input_changed')
+        before_root = _checkpoint_dir(root / 'before')
+        for item in snapshot.files:
+            target = before_root / item.relative_path
+            current = before_root
+            for part in PurePosixPath(item.relative_path).parts[:-1]:
+                current = _checkpoint_dir(current / part)
+            _copy_checkpoint_before(snapshot.workspace / item.relative_path, target,
+                                    (item.sha256, item.byte_count))
+        _checkpoint_write(path, _checkpoint_bytes(manifest))
+    from .wiki_typed import _input_digest
+    for item in snapshot.files:
+        if _input_digest(root / 'before', item.relative_path) != (item.sha256, item.byte_count):
+            raise WikiStagingError('checkpoint_baseline_changed')
+    return root
+
+
+class GenerationPermit:
+    """Controller capability, not a certificate against malicious same-UID code."""
+    def __init__(self, key, root, reservation, task, snapshot):
+        if key is not _PERMIT_KEY:
+            raise WikiStagingError('checkpoint_invalid')
+        self.root, self.reservation, self.task, self.snapshot = root, reservation, task, snapshot
+        self._pid, self._key, self._claimed, self._saved = os.getpid(), key, False, False
+
+    def claim_spawn(self):
+        if self._pid != os.getpid() or self._key is not _PERMIT_KEY or self._claimed:
+            raise WikiStagingError('generation_already_reserved')
+        self._claimed = True
+
+
+def reserve_generation(snapshot, runtime_root, *, task, batch_no, lock, source_proof,
+                       argv, stdin_bytes, schema_bytes, input_binding,
+                       recording_call, timeout_seconds, allow_recovery=False):
+    from dataclasses import asdict
+    from . import wiki_typed as t
+    root = preserve_batch_baseline(snapshot, runtime_root, task=task, batch_no=batch_no, lock=lock)
+    path = root / 'reservation.json'
+    if path.exists() or path.is_symlink():
+        if not allow_recovery:
+            raise WikiStagingError('generation_already_reserved')
+        for number in (2, 3):
+            path = root / f'reservation-{number}.json'
+            if not path.exists() and not path.is_symlink():
+                break
+        else:
+            raise WikiStagingError('generation_already_reserved')
+    if (type(argv) is not tuple or not argv or any(type(a) is not str or '\x00' in a for a in argv)
+            or argv.count('-o') != 1 or type(timeout_seconds) not in (int, float)
+            or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= t.GENERATION_TIMEOUT
+            or not isinstance(input_binding, t.InputBinding)):
+        raise WikiStagingError('checkpoint_invalid')
+    index = argv.index('-o')
+    if index + 1 >= len(argv):
+        raise WikiStagingError('checkpoint_invalid')
+    final = Path(argv[index + 1])
+    try:
+        relative = final.relative_to(snapshot.control).as_posix()
+        if relative == '.' or any(p in {'', '.', '..'} for p in relative.split('/')):
+            raise ValueError()
+        t._directory(final.parent)
+    except (ValueError, OSError):
+        raise WikiStagingError('checkpoint_path_invalid') from None
+    if final.exists() or final.is_symlink() or schema_bytes != t.encoded(t.PROPOSAL_SCHEMA):
+        raise WikiStagingError('checkpoint_invalid')
+    if type(stdin_bytes) is not bytes or type(schema_bytes) is not bytes:
+        raise WikiStagingError('checkpoint_invalid')
+    measured = t.admit_input(stdin_bytes, t.PROPOSAL_SCHEMA, None,
+        input_policy=t.APPLICATION_UTF8_POLICY, max_application_input_bytes=t.INPUT_LIMIT,
+        schema_bytes=schema_bytes)
+    if measured != input_binding:
+        raise WikiStagingError('checkpoint_binding_changed')
+    binding, rows, payload = t.freeze_input(task, snapshot, batch_no, source_proof, runtime_root=runtime_root)
+    if not stdin_bytes.endswith(t.encoded(dict(binding=binding, input=payload))):
+        raise WikiStagingError('checkpoint_binding_changed')
+    _checkpoint_sources(task, snapshot)
+    from .wiki_typed import read_final
+    recording_call = Path(recording_call)
+    recorded = (read_final(recording_call, 'argv.json', limit=65536),
+                read_final(recording_call, 'stdin.utf8', limit=t.INPUT_LIMIT),
+                read_final(recording_call, 'schema.json', limit=t.INPUT_LIMIT))
+    if recorded != (t.encoded(argv), stdin_bytes, schema_bytes):
+        raise WikiStagingError('checkpoint_binding_changed')
+    record = dict(contract='wiki-generation-reservation-v1', task_id=task.task_id,
+        batch_no=batch_no, plan_sha256=task.plan_sha256,
+        first_attempt=snapshot.task_root.name, binding=binding, input_binding=asdict(input_binding),
+        argv=list(argv), stdin_sha256=t.digest(stdin_bytes), schema_sha256=t.digest(schema_bytes),
+        final_relative_path=relative, recording_call=str(recording_call),
+        timeout_seconds=timeout_seconds)
+    if path.name != 'reservation.json':
+        record['generation_attempt'] = number
+    try:
+        _checkpoint_write(path, _checkpoint_bytes(record))
+    except FileExistsError:
+        raise WikiStagingError('generation_already_reserved') from None
+    return GenerationPermit(_PERMIT_KEY, root, record, task, snapshot)
+
+
+def save_generation_result(permit, result, *, lock, source_proof):
+    from dataclasses import asdict
+    from . import wiki_typed as t
+    if (not isinstance(permit, GenerationPermit) or permit._key is not _PERMIT_KEY
+            or permit._pid != os.getpid() or not permit._claimed or permit._saved
+            or not isinstance(result, t.TypedRunnerResult) or not result.succeeded):
+        raise WikiStagingError('checkpoint_invalid')
+    task, snapshot, record = permit.task, permit.snapshot, permit.reservation
+    _require_lock(canonical_vault(task.vault_path), lock)
+    runtime_root = snapshot.task_root.parent.parent.parent.parent
+    if preserve_batch_baseline(snapshot, runtime_root, task=task, batch_no=record['batch_no'], lock=lock) != permit.root:
+        raise WikiStagingError('checkpoint_binding_changed')
+    suffix = '' if record.get('generation_attempt', 1) == 1 else '-' + str(record['generation_attempt'])
+    if _checkpoint_read(permit.root / f'reservation{suffix}.json') != record:
+        raise WikiStagingError('checkpoint_binding_changed')
+    if result.input_binding is None or asdict(result.input_binding) != record['input_binding']:
+        raise WikiStagingError('checkpoint_binding_changed')
+    terminal_root = Path(record['recording_call'])
+    terminal = _checkpoint_read(terminal_root / 'terminal.json')
+    _verify_generation_terminal(terminal, terminal_root, record)
+    if dict(result.usage) != terminal['usage']:
+        raise WikiStagingError('checkpoint_binding_changed')
+    final = snapshot.control / record['final_relative_path']
+    content = t.read_final(final.parent, final.name)
+    if result.final_bytes != content or result.final_sha256 != t.digest(content):
+        raise WikiStagingError('checkpoint_binding_changed')
+    rows = tuple((r, b'') for r in task.raw if r.batch_no == record['batch_no'])
+    t.parse_proposal(content, record['binding'], rows)
+    _checkpoint_sources(task, snapshot)
+    current_binding, _rows, _payload = t.freeze_input(task, snapshot, record['batch_no'],
+        source_proof, runtime_root=runtime_root)
+    if current_binding != record['binding']:
+        raise WikiStagingError('checkpoint_binding_changed')
+    tree = _checkpoint_tree(snapshot)
+    baseline = {f.relative_path: f for f in snapshot.files}
+    for entry in tree:
+        if entry['role'] not in {'wiki', 'graph_regenerable'}:
+            previous = baseline.get(entry['relative_path'])
+            if previous is None or previous.__dict__ != entry:
+                raise WikiStagingError('input_changed')
+    if set(baseline) - {r['relative_path'] for r in tree}:
+        raise WikiStagingError('input_changed')
+    _checkpoint_write(permit.root / f'proposal{suffix}.json', content)
+    receipt = dict(contract='wiki-generation-result-v1',
+        reservation_sha256=t.digest(_checkpoint_bytes(record)), terminal_sha256=t.digest(_checkpoint_bytes(terminal)),
+        proposal_sha256=t.digest(content), proposal_bytes=len(content), output_tree=tree,
+        input_binding=record['input_binding'])
+    _checkpoint_write(permit.root / f'result{suffix}.json', _checkpoint_bytes(receipt))
+    permit._saved = True
+    return receipt
+
+
+def _verify_generation_terminal(terminal, root, record, *, schema_definition='proposal'):
+    from . import wiki_typed as t
+    if (type(terminal) is not dict or terminal.get('contract') != 'g3-exec-recording-v1'
+            or terminal.get('reserved') is not True or terminal.get('actual_spawned') is not True
+            or type(terminal.get('pid')) is not int or terminal['pid'] <= 0
+            or type(terminal.get('returncode')) is not int or terminal['returncode'] != 0
+            or terminal.get('error_code') is not None
+            or any(terminal.get(k) is not False for k in
+                   ('cancelled', 'timed_out', 'not_observed_tail', 'truncated_due_to_overflow'))
+            or any(terminal.get(k) is not True for k in ('complete_stdout_eof', 'complete_stderr_eof'))
+            or type(terminal.get('stdin_size')) is not int
+            or type(terminal.get('stdin_written')) is not int
+            or terminal['stdin_size'] != record['input_binding']['prompt_bytes']
+            or terminal['stdin_written'] != terminal['stdin_size']
+            or terminal.get('timeout_seconds') != record['timeout_seconds']):
+        raise WikiStagingError('generation_interrupted')
+    if (t.read_final(root, 'argv.json', limit=65536) != t.encoded(record['argv'])
+            or t.digest(t.read_final(root, 'stdin.utf8', limit=t.INPUT_LIMIT)) != record['stdin_sha256']
+            or t.digest(t.read_final(root, 'schema.json', limit=t.INPUT_LIMIT)) != record['schema_sha256']):
+        raise WikiStagingError('checkpoint_binding_changed')
+    stdin = t.read_final(root, 'stdin.utf8', limit=t.INPUT_LIMIT)
+    schema = t.read_final(root, 'schema.json', limit=t.INPUT_LIMIT)
+    expected_schema = t.PROPOSAL_SCHEMA if schema_definition == 'proposal' else schema_definition
+    measured = t.admit_input(stdin, expected_schema, None,
+        input_policy=t.APPLICATION_UTF8_POLICY, schema_bytes=schema, schema_absent=expected_schema is None)
+    if schema != (b'' if expected_schema is None else t.encoded(expected_schema)) or measured.__dict__ != record['input_binding']:
+        raise WikiStagingError('checkpoint_binding_changed')
+    if type(terminal.get('call_id')) is not int or root.name != f"exec-{terminal['call_id']:04d}":
+        raise WikiStagingError('checkpoint_invalid')
+    usage = terminal.get('usage')
+    if (type(usage) is not dict or set(usage) - {'input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens'}
+            or any(type(v) is not int or v < 0 for v in usage.values())):
+        raise WikiStagingError('checkpoint_invalid')
+    for tag, filename, limit in (('out', 'stdout.jsonl.raw', t.STDOUT_LIMIT), ('err', 'stderr.raw', t.STDERR_LIMIT)):
+        data = t.read_final(root, filename, limit=limit)
+        observed, retained = terminal.get('observed_bytes'), terminal.get('retained_bytes')
+        if (type(observed) is not dict or type(retained) is not dict
+                or type(observed.get(tag)) is not int or type(retained.get(tag)) is not int
+                or observed[tag] != len(data) or retained[tag] != len(data)):
+            raise WikiStagingError('generation_interrupted')
+
+
+def load_bound_staging(task_root, runtime_root, *, task, lock):
+    from .wiki_typed import _directory
+    container = _directory(task_root)
+    record = _checkpoint_read(container / 'execution/binding.json')
+    if record.get('first_attempt') != _checkpoint_read_pointer(container):
+        raise WikiStagingError('checkpoint_attempt_changed')
+    snapshot = load_staging_snapshot(container)
+    bind_task_execution(snapshot, runtime_root, task=task, lock=lock)
+    _checkpoint_sources(task, snapshot)
+    return snapshot
+
+
+def load_generation_checkpoint(task_root, runtime_root, *, task, batch_no, lock, source_proof,
+                               allow_regenerated_graph=False):
+    from . import wiki_typed as t
+    if type(batch_no) is not int or not any(b.batch_no == batch_no for b in task.batches):
+        raise WikiStagingError('batch_invalid')
+    snapshot = load_bound_staging(task_root, runtime_root, task=task, lock=lock)
+    root = snapshot.task_root.parent.parent / 'execution' / f'batch-{batch_no}'
+    baseline = _checkpoint_read(root / 'baseline.json')
+    if (type(baseline) is not dict or set(baseline) != {'version', 'task_id', 'files', 'pending_before'}
+            or type(baseline['version']) is not int or baseline['version'] != 1
+            or baseline['task_id'] != task.task_id or type(baseline['files']) is not list):
+        raise WikiStagingError('checkpoint_baseline_changed')
+    files = []
+    for row in baseline['files']:
+        if type(row) is not dict or set(row) != {'relative_path', 'role', 'byte_count', 'sha256'}:
+            raise WikiStagingError('checkpoint_baseline_changed')
+        path = _relative(row['relative_path'])
+        if (row['role'] != _role(path) or type(row['byte_count']) is not int
+                or row['byte_count'] < 0 or type(row['sha256']) is not str
+                or len(row['sha256']) != 64 or any(c not in _SHA256 for c in row['sha256'])
+                or t._input_digest(root / 'before', path) != (row['sha256'], row['byte_count'])):
+            raise WikiStagingError('checkpoint_baseline_changed')
+        files.append(SnapshotFile(**row))
+    if (len({f.relative_path for f in files}) != len(files)
+            or type(baseline['pending_before']) is not list
+            or any(p not in {f.relative_path for f in files} for p in baseline['pending_before'])):
+        raise WikiStagingError('checkpoint_baseline_changed')
+    snapshot = replace(snapshot, files=tuple(files), pending_before=tuple(baseline['pending_before']))
+    suffix = next(('-' + str(n) for n in (3, 2) if (root / f'reservation-{n}.json').exists()), '')
+    reservation = _checkpoint_read(root / f'reservation{suffix}.json')
+    expected = (task.task_id, task.plan_sha256, snapshot.task_root.name, batch_no)
+    if tuple(reservation.get(k) for k in ('task_id', 'plan_sha256', 'first_attempt', 'batch_no')) != expected:
+        raise WikiStagingError('checkpoint_binding_changed')
+    current_binding, _rows, _payload = t.freeze_input(task, snapshot, batch_no, source_proof,
+                                                      runtime_root=runtime_root)
+    if current_binding != reservation['binding']:
+        raise WikiStagingError('checkpoint_binding_changed')
+    if not (root / f'result{suffix}.json').exists():
+        raise WikiStagingError('generation_interrupted')
+    receipt = _checkpoint_read(root / f'result{suffix}.json')
+    terminal_root = Path(reservation['recording_call'])
+    terminal = _checkpoint_read(terminal_root / 'terminal.json')
+    _verify_generation_terminal(terminal, terminal_root, reservation)
+    proposal = t.read_final(root, f'proposal{suffix}.json')
+    current_tree = _checkpoint_tree(snapshot)
+    if receipt.get('output_tree') != current_tree:
+        old = {r['relative_path']: r for r in receipt.get('output_tree', [])}
+        current = {r['relative_path']: r for r in current_tree}
+        if (not allow_regenerated_graph or not {
+                p for p in set(old) | set(current) if old.get(p) != current.get(p)} <= set(REGENERABLE_GRAPH)):
+            raise WikiStagingError('checkpoint_binding_changed')
+    if (receipt != dict(contract='wiki-generation-result-v1',
+            reservation_sha256=t.digest(_checkpoint_bytes(reservation)),
+            terminal_sha256=t.digest(_checkpoint_bytes(terminal)), proposal_sha256=t.digest(proposal),
+            proposal_bytes=len(proposal), output_tree=receipt['output_tree'],
+            input_binding=reservation['input_binding'])):
+        raise WikiStagingError('checkpoint_binding_changed')
+    rows = tuple((r, b'') for r in task.raw if r.batch_no == batch_no)
+    t.parse_proposal(proposal, reservation['binding'], rows)
+    return snapshot, proposal, receipt

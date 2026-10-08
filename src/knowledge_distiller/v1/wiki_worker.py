@@ -50,13 +50,15 @@ class WikiWorker:
 
     def __init__(self, store: WikiTaskStore, runtime_root: Path | str,
                  runner: CodexWikiRunner, *, idle_seconds: float = 0.5,
-                 publish: Callable = publish_wiki, recover: Callable = recover_wiki):
+                 publish: Callable = publish_wiki, recover: Callable = recover_wiki,
+                 source_store=None):
         self.store = store
         self.runtime_root = Path(runtime_root)
         self.runner = runner
         self.idle_seconds = idle_seconds
         self.publish = publish
         self.recover = recover
+        self.source_store = source_store
         self._wake = threading.Event()
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
@@ -213,6 +215,8 @@ class WikiWorker:
             return WikiWorkResult(task.task_id, "internal_error")
 
     def _run_locked(self, task: WikiTask, lock: VaultWriteLock) -> WikiWorkResult:
+        if task.outcome_contract == 'r08-wiki-outcomes-v1':
+            return self._run_typed_locked(task, lock)
         recovered = self._recover_interrupted_publish(task, lock)
         if isinstance(recovered, WikiWorkResult):
             return recovered
@@ -319,6 +323,417 @@ class WikiWorker:
 
         cleanup_staging(snapshot)
         return self._finalize(self.store.get(task.task_id))
+
+    def _typed_source(self, lock):
+        from .wiki_source_proof import trusted_source_callback
+        if self.source_store is None or Path(self.source_store.path).resolve() != self.store.database_path.resolve():
+            raise WikiTaskError('validation_failed')
+        return trusted_source_callback(self.source_store, lock)
+
+    def _typed_call(self, task, snapshot, batch_no, phase, lock, source, invoke):
+        """Persist phase reservation before spawn; recorder limits grant no retries."""
+        import uuid
+        from . import wiki_typed as t
+        from .wiki_exec_recording import ExecRecordingV1
+        from .wiki_staging import preserve_batch_baseline, _checkpoint_write
+        root = preserve_batch_baseline(snapshot, self.runtime_root, task=task,
+                                       batch_no=batch_no, lock=lock)
+        from .wiki_staging import (_checkpoint_read, _checkpoint_tree,
+                                   _verify_generation_terminal, REGENERABLE_GRAPH)
+        from dataclasses import asdict
+        generation = 'generation' in phase
+        schema = None if phase == 'health' else (t.PROPOSAL_SCHEMA if generation else t.CHECK_SCHEMA)
+        phase_record = root / (phase + '-result.json')
+        if phase_record.exists():
+            saved = _checkpoint_read(phase_record)
+            record = saved['record']
+            current_tree = _checkpoint_tree(snapshot)
+            old = {row['relative_path']: row for row in saved['tree']}
+            current = {row['relative_path']: row for row in current_tree}
+            changed = {path for path in set(old) | set(current)
+                       if old.get(path) != current.get(path)}
+            if not changed <= REGENERABLE_GRAPH or saved['plan_sha256'] != task.plan_sha256:
+                raise WikiStagingError('checkpoint_binding_changed')
+            recorded = Path(record['recording_call'])
+            _verify_generation_terminal(_checkpoint_read(recorded / 'terminal.json'), recorded, record,
+                                        schema_definition=schema)
+            final = Path(record['argv'][record['argv'].index('-o') + 1])
+            content = t.read_final(final.parent, final.name)
+            if t.digest(content) != saved['final_sha256']:
+                raise WikiStagingError('checkpoint_binding_changed')
+            return t.TypedRunnerResult(None, tuple(saved['usage']), content, saved['final_sha256'],
+                                       t.InputBinding(**record['input_binding']))
+        attempt_path = None
+        if not generation:
+            for attempt in range(1, 4):
+                candidate = root / f'{phase}-reservation-{attempt}.json'
+                if not candidate.exists():
+                    attempt_path = candidate
+                    break
+            if attempt_path is None:
+                raise WikiRunnerError('agent_failed')
+        evidence = self.runtime_root.parent / ('wiki-exec-' + uuid.uuid4().hex)
+        evidence.mkdir(mode=0o700)
+        permit = []
+        records = []
+        def before_spawn(**actual):
+            if generation:
+                binding = t.admit_input(actual['stdin_bytes'], t.PROPOSAL_SCHEMA, None,
+                    input_policy=t.APPLICATION_UTF8_POLICY, schema_bytes=actual['schema_bytes'])
+                value = self.store.reserve_generation(task.task_id, snapshot, self.runtime_root,
+                    expected_plan_sha256=task.plan_sha256, batch_no=batch_no, lock=lock,
+                    source_proof=source, argv=actual['argv'], stdin_bytes=actual['stdin_bytes'],
+                    schema_bytes=actual['schema_bytes'], input_binding=binding,
+                    recording_call=evidence / f"exec-{actual['call_id']:04d}", timeout_seconds=actual['timeout_seconds'],
+                    allow_recovery=True)
+                permit.append(value)
+                value.claim_spawn()
+            else:
+                admission = t.admit_input(actual['stdin_bytes'], schema, None,
+                    input_policy=t.APPLICATION_UTF8_POLICY, schema_bytes=actual['schema_bytes'], schema_absent=schema is None)
+                record = {
+                    'task_id': task.task_id, 'plan_sha256': task.plan_sha256,
+                    'batch_no': batch_no, 'phase': phase,
+                    'recording_call': str(evidence / f"exec-{actual['call_id']:04d}"),
+                    'argv': list(actual['argv']), 'stdin_sha256': t.digest(actual['stdin_bytes']),
+                    'schema_sha256': t.digest(actual['schema_bytes']), 'input_binding': asdict(admission),
+                    'timeout_seconds': actual['timeout_seconds']}
+                _checkpoint_write(attempt_path, t.encoded(record))
+                records.append(record)
+        previous = self.runner.recording
+        recording = ExecRecordingV1(evidence, workspace_root=snapshot.workspace,
+            runtime_root=self.runtime_root, before_spawn=before_spawn, max_attempts=1)
+        self.runner.recording = recording
+        try:
+            result = invoke()
+            if not result.succeeded:
+                raise WikiRunnerError(result.error_code or 'agent_failed')
+            if generation:
+                if len(permit) != 1:
+                    raise WikiTaskError('validation_failed')
+                self.store.save_generation_result(permit[0], result, lock=lock, source_proof=source)
+            elif len(records) == 1 and (schema is None or not any(
+                    r['status'] == 'unknown' or r['source_check']['status'] != 'complete'
+                    or any(d['status'] == 'unknown' for d in r['dimensions'])
+                    for r in t.strict_json(result.final_bytes)['reviews'])):
+                _checkpoint_write(phase_record, t.encoded({'record': records[0], 'plan_sha256': task.plan_sha256,
+                    'tree': _checkpoint_tree(snapshot), 'final_sha256': result.final_sha256,
+                    'usage': result.usage}))
+            return result
+        finally:
+            self.runner.recording = previous
+            recording.close()
+
+    def _typed_validate(self, snapshot, task, batch_no):
+        if not self._trusted_kb(snapshot, task):
+            raise WikiStagingError('validation_failed')
+        return validate_staging(snapshot, batch_no,
+            [r.relative_path for r in task.raw if r.batch_no == batch_no],
+            python_executable=self.store.python_executable,
+            source_kit_root=self.store.kit_root, kit_runtime=self.store.runtime)
+
+    def _typed_candidate(self, task, snapshot, batch_no, validated, proposal, checked, source,
+                         *, parent_registry=None, reservation=None):
+        from . import wiki_support as support
+        from . import wiki_typed as t
+        from .wiki_outcomes import WikiOutcomes, Outcome, CONTRACT
+        from .wiki_staging import _stable_bytes
+        baseline = snapshot.task_root.parent.parent / 'execution' / f'batch-{batch_no}' / 'before'
+        changes = tuple(support.DocumentChange(c.relative_path,
+            None if c.before_sha256 is None else _stable_bytes(baseline / c.relative_path, changed_code='validation_failed'),
+            c.before_sha256, _stable_bytes(snapshot.workspace / c.relative_path, changed_code='validation_failed'),
+            c.after_sha256) for c in validated.changes
+            if c.relative_path.startswith('wiki/') and c.relative_path.endswith('.md'))
+        contents = {r.raw_id: _stable_bytes(snapshot.workspace / r.relative_path, changed_code='raw_changed') for r in task.raw}
+        pages = tuple(support.FrozenPage(f.relative_path,
+            _stable_bytes(baseline / f.relative_path, changed_code='validation_failed'), f.sha256)
+            for f in snapshot.files if f.relative_path.startswith('wiki/') and f.relative_path.endswith('.md')
+            and f.relative_path not in {c.path for c in changes})
+        registry = support.build_registry(snapshot.workspace, changes,
+            tuple(support.FrozenRaw(r.relative_path, r.raw_id, contents[r.raw_id], r.content_sha256) for r in task.raw),
+            pages=pages, generated=self._managed_sections(snapshot, task), parent_registry=parent_registry,
+            claim_mapping=() if parent_registry is None else tuple(support.ClaimMapping(
+                c.block.claim_id, c.block.path, c.block.position) for c in parent_registry.claims))
+        client = self.runner.support_client(snapshot, self.runtime_root, task=task,
+            registry=registry, model=task.model, effort=task.effort, source_proof=source,
+            input_policy=t.APPLICATION_UTF8_POLICY)
+        gate = support.WikiSupportGate(snapshot.task_root.parent.parent / 'execution',
+            f'batch-{batch_no}-final', registry, client.model_config_hash)
+        if reservation is None:
+            # Resume the Gate's own persisted reservation; no new repair budget
+            # or manufactured success. Its normal field/document checks apply.
+            with gate._lock():
+                state = gate._state()
+                pending = state['repair']
+            if pending is not None and not pending['consumed'] and registry.candidate_hash != pending['parent_hash']:
+                from dataclasses import replace
+                registry = replace(registry, parent_hash=pending['parent_hash'],
+                    claim_mapping=tuple(support.ClaimMapping(c.block.claim_id, c.block.path, c.block.position)
+                                        for c in registry.claims))
+                client = self.runner.support_client(snapshot, self.runtime_root, task=task,
+                    registry=registry, model=task.model, effort=task.effort, source_proof=source,
+                    input_policy=t.APPLICATION_UTF8_POLICY)
+                gate = support.WikiSupportGate(snapshot.task_root.parent.parent / 'execution',
+                    f'batch-{batch_no}-final', registry, client.model_config_hash)
+                reservation = support.RepairReservation(pending['token'], pending['number'], pending['parent_hash'], {})
+        result = gate.review(client, reservation=reservation)
+        if result.status not in {'supported_candidate_not_published', 'no_changed_claims'} or result.diagnostics:
+            self._support_failure = (registry, gate, result)
+            raise support.WikiSupportError('source_support_failed')
+        binding, rows, _ = t.freeze_input(task, snapshot, batch_no, source, runtime_root=self.runtime_root)
+        parsed = t.parse_proposal(proposal, binding, rows)
+        outcomes = tuple(Outcome(o['raw_id'], o['content_sha256'], CONTRACT, task.boundary_sha256,
+            o['status'], o['reason_code'], o['reason'], tuple((d['path'], d['sha256']) for d in o['documents']))
+            for o in parsed['outcomes'])
+        candidate = WikiOutcomes(snapshot.control / 'outcomes.sqlite3')
+        candidate.initialize()
+        receipt = candidate.validate(task, batch_no,
+            {r.raw_id: contents[r.raw_id] for r in task.raw if r.batch_no == batch_no}, outcomes,
+            checker=None, support_gate=gate, support_client=client, full_contents=contents,
+            check_result=checked, proposal=proposal)
+        return candidate, receipt
+
+    def _managed_sections(self, snapshot, task):
+        """Render existing kb-managed regions; certify only exact current bytes."""
+        from .wiki_support import GeneratedSection
+        from .wiki_typed import digest
+        verify_staging_protected(snapshot)
+        if verify_source_kit(self.store.kit_root).manifest_sha256 != task.kit_manifest_sha256:
+            raise WikiStagingError('validation_failed')
+        run = self.store.runtime.run('managed', snapshot.workspace, ('describe-generated',))
+        if run.returncode:
+            raise WikiStagingError('validation_failed')
+        rows = json.loads(run.stdout)
+        # Check entries have a fixed operational grammar, no free prose field.
+        log = (snapshot.workspace / 'wiki/log.md').read_text(encoding='utf-8')
+        for match in re.finditer(r'(?m)^## (\[\d{4}-\d{2}-\d{2}\] check \| 程序检查)\n'
+                r'- 修改页面 \d+ 个；错误 \d+ 条，提醒 \d+ 条\n(?:\n|$)', log):
+            rows.append(['wiki/log.md', match[1], match[0]])
+        proofs = []
+        for path, heading, text in rows:
+            content = (snapshot.workspace / path).read_bytes()
+            # Section line endings from pg.render include the next separator;
+            # take the actual full section only when the renderer equals it.
+            if heading != '@system':
+                actual = next((m for m in re.finditer(r'(?m)^## '+re.escape(heading)+r'\n[\s\S]*?(?=^#{1,2} |\Z)', content.decode())
+                               if m[0].rstrip('\n') == text.rstrip('\n')), None)
+                if actual is None:
+                    continue
+                text = actual[0]
+            if heading == '@system' and content != text.encode():
+                continue
+            proofs.append(GeneratedSection(path, digest(content), heading, text.encode()))
+        return tuple(dict.fromkeys(proofs))
+
+    def _accept_typed(self, task, batch_no, snapshot, journal, lock, candidate, receipt, *, recovered=False):
+        from .wiki_source_proof import trusted_source_callback
+        from .wiki_outcomes import full_frozen_context
+        from .ingestion import encoded, read_regular
+        def verify(fresh, db):
+            accepted = candidate._verified_publication(receipt, task_store=self.store,
+                snapshot=snapshot, journal=journal, lock=lock, require_completed_batch=False, task=fresh)
+            if (accepted.get('context_raw') is None or accepted.get('documents') is None
+                    or accepted.get('check_sha256') is None or accepted.get('support') is None):
+                raise WikiTaskError('readback_failed')
+            context = full_frozen_context(fresh, {r.raw_id: read_regular(snapshot.workspace, r.relative_path) for r in fresh.raw})
+            source = trusted_source_callback(self.source_store, lock, connection=db)
+            if source(task=fresh, snapshot=snapshot, context=context) != accepted['source_proof_sha256']:
+                raise WikiTaskError('readback_failed')
+            accepted['plan_sha256'] = fresh.plan_sha256
+            return receipt, encoded(accepted)
+        return self.store.accept_published_batch(task.task_id, batch_no, verify=verify, recovered=recovered)
+
+    def _run_typed_locked(self, task, lock):
+        from . import wiki_typed as t
+        from .wiki_staging import (bind_task_execution, load_bound_staging, _checkpoint_write,
+                                   _checkpoint_read)
+        from .wiki_outcomes import WikiOutcomes, OutcomeError
+        from .wiki_source_proof import SourceProofError
+        from .wiki_support import WikiSupportError
+        snapshot = None
+        batch_no = None
+        self._support_failure = None
+        try:
+            source = self._typed_source(lock)
+            container = self.runtime_root / 'wiki-tasks' / task.task_id
+            if (container / 'execution' / 'binding.json').exists():
+                snapshot = load_bound_staging(container, self.runtime_root, task=task, lock=lock)
+            else:
+                snapshot = prepare_staging(task.vault_path, self.runtime_root, task.task_id, task.raw,
+                    python_executable=self.store.python_executable, source_kit_root=self.store.kit_root,
+                    lock=lock, kit_runtime=self.store.runtime)
+                bind_task_execution(snapshot, self.runtime_root, task=task, lock=lock)
+            if task.state == 'queued':
+                task = self.store.set_task_state(task.task_id, 'preparing')
+            if task.state == 'preparing':
+                task = self.store.set_task_state(task.task_id, 'running')
+            for batch in task.batches:
+                batch_no = batch.batch_no
+                if batch.state == 'succeeded':
+                    if any(r.relative_path in snapshot.pending_before for r in task.raw if r.batch_no == batch_no):
+                        validated = self._typed_validate(snapshot, task, batch_no)
+                        snapshot = accept_validated_batch(snapshot, validated)
+                    continue
+                root = container / 'execution' / f'batch-{batch_no}'
+                journal = snapshot.control / f'publish-{batch_no}'
+                if batch.state == 'publishing':
+                    result = self.recover(task.vault_path, journal, lock=lock)
+                    if result.state != PublishState.COMMITTED or not self._committed_publish_proven(
+                            task, batch_no, snapshot, journal, result.paths, lock):
+                        raise WikiPublishError('publish_conflict')
+                    receipt = _checkpoint_read(root / 'validated.json')['receipt_id']
+                    task = self._accept_typed(task, batch_no, snapshot, journal, lock,
+                        WikiOutcomes(snapshot.control / 'outcomes.sqlite3'), receipt)
+                    validated = self._typed_validate(snapshot, task, batch_no)
+                    snapshot = accept_validated_batch(snapshot, validated)
+                    continue
+                if batch.state != 'queued':
+                    task = self._reset_unpublished_batch(task, batch_no)
+                    task = self.store.set_task_state(task.task_id, 'preparing')
+                    task = self.store.set_task_state(task.task_id, 'running')
+                self.store.set_batch_state(task.task_id, batch_no, 'preparing')
+                task = self.store.set_batch_state(task.task_id, batch_no, 'running')
+                args = dict(task=task, batch_no=batch_no, model=task.model, effort=task.effort,
+                            source_proof=source, input_policy=t.APPLICATION_UTF8_POLICY)
+                final_phase = next((root / f'final-stage-{n}.json' for n in (2, 1, 0)
+                                    if (root / f'final-stage-{n}.json').exists()), None)
+                if final_phase is not None:
+                    saved = _checkpoint_read(final_phase)
+                    proposal = saved['proposal'].encode('utf-8')
+                    validated = self._typed_validate(snapshot, task, batch_no)
+                    changes = {c.relative_path: c.after_sha256 for c in validated.changes
+                               if c.relative_path.startswith('wiki/') and c.relative_path.endswith('.md')}
+                    checked = self._typed_call(task, snapshot, batch_no, saved['check_phase'], lock, source,
+                        lambda: self.runner.check_json(snapshot, self.runtime_root, proposal=proposal, changes=changes, **args))
+                    binding, rows, payload = t.freeze_input(task, snapshot, batch_no, source, runtime_root=self.runtime_root)
+                    t.parse_proposal(proposal, binding, rows)
+                    t.parse_check(checked.final_bytes, binding, rows, proposal_sha256=t.digest(proposal),
+                        changes_sha256=t.digest(t.encoded(t.checked_documents(snapshot, changes))),
+                        source_proof_sha256=payload['source_proof_sha256'],
+                        full_context=tuple((r, (snapshot.workspace / r.relative_path).read_bytes()) for r in task.raw))
+                    health = saved['health']
+                else:
+                    if (root / 'reservation.json').exists():
+                        try:
+                            snapshot, proposal, _ = self.store.load_generation_checkpoint(task.task_id, self.runtime_root,
+                                batch_no=batch_no, lock=lock, expected_plan_sha256=task.plan_sha256, source_proof=source,
+                                allow_regenerated_graph=True)
+                        except WikiStagingError as error:
+                            if str(error) != 'generation_interrupted':
+                                raise
+                            proposal = self._typed_call(task, snapshot, batch_no, 'generation', lock, source,
+                                lambda: self.runner.run_outcomes(snapshot, self.runtime_root, **args)).final_bytes
+                    else:
+                        proposal = self._typed_call(task, snapshot, batch_no, 'generation', lock, source,
+                            lambda: self.runner.run_outcomes(snapshot, self.runtime_root, **args)).final_bytes
+                    validated = self._typed_validate(snapshot, task, batch_no)
+                    changes = {c.relative_path: c.after_sha256 for c in validated.changes
+                               if c.relative_path.startswith('wiki/') and c.relative_path.endswith('.md')}
+                    checked = self._typed_call(task, snapshot, batch_no, 'check', lock, source,
+                        lambda: self.runner.check_json(snapshot, self.runtime_root, proposal=proposal, changes=changes, **args))
+                    stage = t.freeze_outcome_stage(snapshot, self.runtime_root, task=task, batch_no=batch_no,
+                        proposal=proposal, check_result=checked, validated=validated, source_proof=source)
+                    health = False
+                    if validated.health_due and verify_formal_inputs(snapshot, task.vault_path, lock=lock).late_raw_count == 0:
+                        before = validated
+                        self._typed_call(task, snapshot, batch_no, 'health', lock, source,
+                            lambda: self.runner.run_health_bounded(snapshot, self.runtime_root, lock=lock, **args))
+                        validated = self._typed_validate(snapshot, task, batch_no)
+                        if not self._health_completed(snapshot, before, validated):
+                            raise WikiStagingError('validation_failed')
+                        health = True
+                    refreshed = t.refresh_outcome_documents(snapshot, self.runtime_root, task=task, batch_no=batch_no,
+                        stage=stage, validated=validated, source_proof=source)
+                    proposal = refreshed.proposal
+                    if refreshed.reusable_check is None:
+                        changes = {c.relative_path: c.after_sha256 for c in validated.changes
+                                   if c.relative_path.startswith('wiki/') and c.relative_path.endswith('.md')}
+                        checked = self._typed_call(task, snapshot, batch_no, 'final-check', lock, source,
+                            lambda: self.runner.check_json(snapshot, self.runtime_root, proposal=proposal, changes=changes, **args))
+                    _checkpoint_write(root / 'final-stage-0.json', t.encoded({
+                        'proposal': proposal.decode('utf-8'), 'health': health,
+                        'check_phase': 'final-check' if refreshed.reusable_check is None else 'check'}))
+                # Gate invokes the real runner support client inside a recorded call.
+                previous = self.runner.recording
+                import uuid
+                from .wiki_exec_recording import ExecRecordingV1
+                evidence = self.runtime_root.parent / ('wiki-exec-' + uuid.uuid4().hex)
+                evidence.mkdir(mode=0o700)
+                recorder = ExecRecordingV1(evidence, workspace_root=snapshot.workspace, runtime_root=self.runtime_root)
+                self.runner.recording = recorder
+                try:
+                    parent, reservation = None, None
+                    while True:
+                        try:
+                            candidate, receipt = self._typed_candidate(task, snapshot, batch_no, validated,
+                                proposal, checked, source, parent_registry=parent, reservation=reservation)
+                            break
+                        except WikiSupportError:
+                            if self._support_failure is None:
+                                raise
+                            parent, gate, failure = self._support_failure
+                            self._support_failure = None
+                            if failure.status not in {'source_support_failed', 'source_boundary_failed'}:
+                                raise
+                            with gate._lock():
+                                state = gate._state()
+                                abandoned = state['repair']
+                                if abandoned is not None and not abandoned['consumed']:
+                                    # Unknown completion consumes its reserved
+                                    # extra attempt; retain evidence and used.
+                                    from .wiki_staging import _checkpoint_bytes
+                                    path = root / f"repair-interrupted-{abandoned['number']}.json"
+                                    if not path.exists():
+                                        _checkpoint_write(path, _checkpoint_bytes(abandoned))
+                                    abandoned['consumed'] = True
+                                    gate._save(state)
+                            reservation = gate.reserve_repair()
+                            if not reservation.token:
+                                raise WikiSupportError('source_support_failed')
+                            proposal = self._typed_call(task, snapshot, batch_no,
+                                f'repair-{reservation.number}-generation', lock, source,
+                                lambda: self.runner.run_outcomes(snapshot, self.runtime_root,
+                                    repair_feedback=reservation.feedback, **args)).final_bytes
+                            validated = self._typed_validate(snapshot, task, batch_no)
+                            changes = {c.relative_path: c.after_sha256 for c in validated.changes
+                                       if c.relative_path.startswith('wiki/') and c.relative_path.endswith('.md')}
+                            checked = self._typed_call(task, snapshot, batch_no,
+                                f'repair-{reservation.number}-check', lock, source,
+                                lambda: self.runner.check_json(snapshot, self.runtime_root,
+                                    proposal=proposal, changes=changes, **args))
+                            _checkpoint_write(root / f'final-stage-{reservation.number}.json', t.encoded({
+                                'proposal': proposal.decode('utf-8'), 'health': health,
+                                'check_phase': f'repair-{reservation.number}-check'}))
+                finally:
+                    self.runner.recording = previous
+                    recorder.close()
+                try:
+                    _checkpoint_write(root / 'validated.json', t.encoded({'receipt_id': receipt}))
+                except FileExistsError:
+                    if _checkpoint_read(root / 'validated.json') != {'receipt_id': receipt}:
+                        raise WikiStagingError('checkpoint_binding_changed') from None
+                self.store.set_batch_state(task.task_id, batch_no, 'validating')
+                formal = verify_formal_inputs(snapshot, task.vault_path, lock=lock)
+                if health and formal.late_raw_count:
+                    raise WikiStagingError('validation_failed')
+                self.store.set_batch_state(task.task_id, batch_no, 'publishing')
+                published = self.publish(task.vault_path, snapshot.workspace, journal,
+                    {c.relative_path: PublishExpectation(c.before_sha256, c.after_sha256) for c in validated.changes}, lock=lock)
+                if published.state != PublishState.COMMITTED:
+                    raise WikiPublishError('publish_interrupted')
+                if not self._committed_publish_proven(task, batch_no, snapshot, journal, published.paths, lock):
+                    raise WikiPublishError('readback_failed')
+                task = self._accept_typed(task, batch_no, snapshot, journal, lock, candidate, receipt)
+                snapshot = accept_validated_batch(snapshot, validated)
+            return self._finalize(self.store.get(task.task_id))
+        except (WikiTaskError, WikiStagingError, WikiRunnerError, WikiPublishError,
+                t.TypedError, OutcomeError, SourceProofError, WikiSupportError, OSError) as error:
+            phase = 'publishing' if snapshot is not None and batch_no is not None and (
+                snapshot.control / f'publish-{batch_no}').exists() else 'none'
+            code = self._publish_code(str(error)) if phase == 'publishing' else (
+                self._runner_code(str(error)) if isinstance(error, WikiRunnerError) else 'validation_failed')
+            self._safe_fail(task.task_id, batch_no, code, recovery_phase=phase)
+            return WikiWorkResult(task.task_id, code)
 
     def _trusted_kb(self, snapshot: StagingSnapshot, task: WikiTask) -> bool:
         try:
@@ -465,10 +880,18 @@ class WikiWorker:
                         task, batch.batch_no, snapshot, journal, result.paths, lock
                     ):
                         raise WikiPublishError("publish_conflict")
-                    self.store.mark_recovered_batch_readback_succeeded(task_id, batch.batch_no)
+                    if task.outcome_contract == 'r08-wiki-outcomes-v1':
+                        from .wiki_outcomes import WikiOutcomes
+                        from .wiki_staging import _checkpoint_read
+                        self._typed_source(lock)
+                        receipt = _checkpoint_read(task_root / 'execution' / f'batch-{batch.batch_no}' / 'validated.json')['receipt_id']
+                        self._accept_typed(task, batch.batch_no, snapshot, journal, lock,
+                            WikiOutcomes(snapshot.control / 'outcomes.sqlite3'), receipt, recovered=True)
+                    else:
+                        self.store.mark_recovered_batch_readback_succeeded(task_id, batch.batch_no)
                 self.store.set_recovery_state(task_id, "succeeded")
                 return WikiWorkResult(task_id, "publish_interrupted")
-            except (WikiPublishError, WikiStagingError, WikiTaskError):
+            except (WikiPublishError, WikiStagingError, WikiTaskError, ValueError, OSError):
                 self.store.set_recovery_state(task_id, "failed")
                 return WikiWorkResult(task_id, "recovery_failed")
 

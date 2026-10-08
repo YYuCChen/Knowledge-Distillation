@@ -128,6 +128,9 @@ def test_frozen_command_uses_only_internal_helper_and_bundled_manifest(tmp_path)
 
     with pytest.raises(WikiKitRuntimeError, match="kit_incompatible"):
         runtime.command("../wiki_display", vault)
+    managed = runtime.command('managed', vault, ('describe-generated',))
+    assert managed == (str(app), '--wiki-kit', 'managed', '--vault-root', str(vault), '--', 'describe-generated')
+    assert '-c' not in managed
 
 
 def test_helper_dispatch_runs_bundled_protocol_without_opening_application(
@@ -176,6 +179,28 @@ def test_frozen_bundle_resolves_internal_resource_link_and_dispatches(
         "kb", "--vault-root", str(vault), "--", "protocol-scan",
     ]) == 0
     assert json.loads(capsys.readouterr().out)["protocol_version"] == 2
+    # Actual frozen application dispatch; no AppPaths/DB/server/model startup.
+    from knowledge_distiller.v1.mac_app import main
+    before = {p.relative_to(vault): p.read_bytes() for p in vault.rglob('*') if p.is_file()}
+    (vault / 'tools/kb.py').write_text("raise AssertionError('staging kb imported')\n")
+    staged = (vault / 'tools/kb.py').read_bytes()
+    with pytest.raises(SystemExit) as stopped:
+        main(['--wiki-kit', 'managed', '--vault-root', str(vault), '--', 'describe-generated'])
+    assert stopped.value.code == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert {r[0] for r in rows} >= {'wiki/index.md', 'wiki/待确认.md', 'wiki/主题/AI.md'}
+    assert (vault / 'tools/kb.py').read_bytes() == staged
+    assert all(p.read_bytes() == data for rel, data in before.items()
+               if rel.as_posix() != 'tools/kb.py' for p in [vault / rel])
+    assert helper_main(['managed', '--vault-root', str(vault), '--', 'unapproved-operation']) == 2
+
+
+def test_source_managed_dispatch_renders_without_using_staging_code(tmp_path):
+    vault = _vault(tmp_path / 'vault')
+    (vault / 'tools/kb.py').write_text("raise AssertionError('untrusted staging code')\n")
+    result = WikiKitRuntime(KIT, python_executable=sys.executable).run('managed', vault, ('describe-generated',))
+    assert result.returncode == 0
+    assert any(row[0] == 'wiki/index.md' for row in json.loads(result.stdout))
 
 
 def test_frozen_bundle_rejects_resource_link_outside_application(

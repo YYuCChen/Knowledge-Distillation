@@ -369,6 +369,7 @@ def test_checker_is_independent_readonly_without_second_broker_or_tokens(fixture
     assert result.succeeded
     observed = json.loads((snapshot.workspace / 'observed.json').read_text())
     assert not observed['has_token'] and not observed['has_key']
+    assert 'reference_lead须核对来源有价值的人物/作品—概念关系与名称是否在候选遗漏；无关修辞不强留，来源未给书名不得补。' in observed['prompt']
     argv = observed['argv']
     effective = dict(v.split('=', 1) for i, v in enumerate(argv) if i and argv[i - 1] == '-c')
     assert effective['features.shell_tool'] == effective['features.code_mode'] == 'false'

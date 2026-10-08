@@ -88,7 +88,7 @@ class WikiKitRuntime:
 
     def command(self, tool: str, root: Path | str,
                 arguments: Iterable[str] = ()) -> tuple[str, ...]:
-        if tool not in {"kb", "session", "display"}:
+        if tool not in {"kb", "session", "display", "managed"}:
             raise WikiKitRuntimeError("kit_incompatible")
         self.verify()
         try:
@@ -102,6 +102,15 @@ class WikiKitRuntime:
             executable = self.frozen_executable or Path(sys.executable)
             return (os.fspath(executable), "--wiki-kit", tool, "--vault-root",
                     os.fspath(root), "--", *args)
+        if tool == 'managed':
+            # Source-mode bootstrap of the same application-owned dispatch.
+            # -E/-B ignores ambient PYTHONPATH and never imports staging code.
+            return (os.fspath(self.python_executable), '-E', '-B', '-c',
+                    'import sys;sys.path.insert(0,sys.argv.pop(1));'
+                    'from knowledge_distiller.v1.wiki_kit_runtime import helper_main;'
+                    'raise SystemExit(helper_main(sys.argv[1:]))',
+                    os.fspath(Path(__file__).resolve().parents[2]),
+                    tool, '--vault-root', os.fspath(root), '--', *args)
         scripts = {
             "kb": "kb.py",
             "session": "wiki_session.py",
@@ -140,13 +149,32 @@ class WikiKitRuntime:
         return KitExecution(result.returncode, result.stdout)
 
 
+def _describe_generated(kit_root: Path, root: Path):
+    """Read-only rendering using verified application kit APIs in this child."""
+    module = runpy.run_path(os.fspath(kit_root / 'tools/kb.py'))
+    vault = module['Vault'](root)
+    vault.load(); vault.load_raw(); vault.build_graph(); vault.compute_states()
+    vault.regenerate(); vault.check()
+    rows = [['wiki/index.md', '@system', vault.write_index()],
+            ['wiki/待确认.md', '@system', vault.write_pending()]]
+    for page in vault.pages:
+        for heading, lines in page.sections:
+            if heading and heading.endswith('（自动）'):
+                rows.append([page.rel, heading, '## '+heading+'\n'+'\n'.join(lines)])
+        if page.type == '主题':
+            template = module['topic_template'](page.title)
+            body = template[template.index('## 概览'):template.index('## 核心认知（自动）')]
+            rows.append([page.rel, '概览', body])
+    print(json.dumps(rows, ensure_ascii=False))
+
+
 def helper_main(argv: list[str]) -> int:
     """Run one bundled kit tool without starting the application or opening its DB."""
     if len(argv) < 4 or argv[1] != "--vault-root" or "--" not in argv[2:]:
         return 2
     tool, raw_root = argv[0], argv[2]
     marker = argv.index("--", 3)
-    if marker != 3 or tool not in {"kb", "session", "display"}:
+    if marker != 3 or tool not in {"kb", "session", "display", "managed"}:
         return 2
     try:
         root = canonical_vault(raw_root)
@@ -154,6 +182,16 @@ def helper_main(argv: list[str]) -> int:
         manifest = verify_source_kit(kit_root)
         if manifest.protocol_version != 2:
             return 2
+        if tool == 'managed':
+            if argv[marker + 1:] != ['describe-generated']:
+                return 2
+            old_path = list(sys.path)
+            sys.path.insert(0, os.fspath(kit_root / 'tools'))
+            try:
+                _describe_generated(kit_root, root)
+            finally:
+                sys.path[:] = old_path
+            return 0
         scripts = {
             "kb": "kb.py",
             "session": "wiki_session.py",
