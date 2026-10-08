@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import math
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -35,6 +36,81 @@ def _same_ingestion_binding(db, item_id, binding):
         FROM distill_items WHERE item_id=?''', (item_id,)).fetchone()
     if row is None or tuple(row) != binding:
         raise ValueError('ingestion_binding_conflict')
+
+
+def _bound_json(value):
+    """Freeze finite JSON without silently coercing keys or invalid Unicode."""
+    def check(entry):
+        if entry is None or type(entry) in (bool, int):
+            return
+        if type(entry) is str:
+            if '\x00' in entry:
+                raise ValueError('local_source_result_invalid')
+            entry.encode('utf-8', errors='strict')
+        elif type(entry) is float:
+            if not math.isfinite(entry):
+                raise ValueError('local_source_result_invalid')
+        elif type(entry) in (list, tuple):
+            for child in entry:
+                check(child)
+        elif type(entry) is dict:
+            for key, child in entry.items():
+                if type(key) is not str:
+                    raise ValueError('local_source_result_invalid')
+                check(key)
+                check(child)
+        else:
+            raise ValueError('local_source_result_invalid')
+    check(value)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+
+
+def _bound_local_parsed(source, binding, parsed, review_result):
+    from .source_parsing import ParsedSource, ParsedMedia
+    from .file_sources import parse_submitted_source
+    if type(parsed) is not ParsedSource or type(parsed.snapshot) is not str or not parsed.snapshot.strip():
+        raise ValueError('local_source_result_invalid')
+    if type(parsed.media) is not tuple or type(parsed.uncertainties) is not tuple:
+        raise ValueError('local_source_result_invalid')
+    members = []
+    media = []
+    identifiers = set()
+    for member in parsed.media:
+        if (type(member) is not ParsedMedia or type(member.member_id) is not str or not member.member_id
+                or member.member_id in identifiers or type(member.mime_type) is not str or not member.mime_type
+                or type(member.content) is not bytes or not member.content):
+            raise ValueError('local_source_result_invalid')
+        identifiers.add(member.member_id)
+        members.append({'member_id': member.member_id, 'mime_type': member.mime_type,
+                        'byte_count': len(member.content), 'sha256': hashlib.sha256(member.content).hexdigest()})
+        media.append(ParsedMedia(member.member_id, member.mime_type, member.content))
+    payload = json.loads(_bound_json({'snapshot': parsed.snapshot, 'metadata': parsed.metadata,
+        'lineage': parsed.lineage, 'uncertainties': parsed.uncertainties, 'media': members}))
+    if type(payload['metadata']) is not dict or type(payload['lineage']) is not dict:
+        raise ValueError('local_source_result_invalid')
+    review = json.loads(_bound_json(review_result))
+    if (type(review) is not dict or type(review.get('schema')) is not int or review['schema'] != 1
+            or set(review) != {'schema', 'snapshot', 'uncertainties', 'lineage'}
+            or any(_bound_json(review[key]) != _bound_json(payload[key])
+                   for key in ('snapshot', 'uncertainties', 'lineage'))):
+        raise ValueError('completed_review_required')
+    # No existing document producer records its actual conversion recipe.
+    # Do not manufacture one from defaults or accept a caller's invented trace.
+    if source.source_kind in {'pdf', 'epub'}:
+        raise ValueError('local_parse_trace_required')
+    if source.source_kind not in {'direct_text', 'markdown'}:
+        raise ValueError('local_source_result_invalid')
+    actual = parse_submitted_source(source)
+    actual_payload = {'snapshot': actual.snapshot, 'metadata': actual.metadata,
+                      'lineage': actual.lineage, 'uncertainties': actual.uncertainties, 'media': []}
+    if actual.media or _bound_json(payload) != _bound_json(actual_payload):
+        raise ValueError('local_source_parse_mismatch')
+    frozen = ParsedSource(payload['snapshot'], payload['metadata'], payload['lineage'],
+                          tuple(media), tuple(payload['uncertainties']))
+    recipe = {'reader': 'file_sources.parse_submitted_source', 'mode': source.source_kind,
+              'verification': 'store-local-pure-parse-v1',
+              'lineage_kind': actual.lineage['kind'], 'lineage_version': actual.lineage['version']}
+    return frozen, payload, recipe, review
 
 
 class Store:
@@ -274,8 +350,18 @@ class Store:
                                content, json.loads(row["input_metadata"]))
 
     def establish_submitted_fact(self, item_id: int, source, parsed, *, expected_revision=None,
-                                 review_result=None) -> int:
+                                 review_result=None) -> int | None:
         """Commit full fact and locator before relinquishing the temporary input."""
+        # Dispatch under ownership lock; the legacy implementation below stays
+        # unchanged. Missing/bad bound scopes never reach that implementation.
+        with connect(self.path) as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            row = connection.execute('''SELECT i.*,s.binding_scope FROM distill_items i
+                LEFT JOIN submitted_sources s USING(item_id) WHERE i.item_id=?''', (item_id,)).fetchone()
+            if row is not None and (row['ingestion_contract'] != 'legacy'
+                                    or row['binding_scope'] not in (None, 'legacy')):
+                return self._establish_bound_local_fact(connection, row, source, parsed,
+                    expected_revision=expected_revision, review_result=review_result)
         fact = SourceFact(parsed.snapshot, parsed.uncertainties)
         with connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -315,6 +401,92 @@ class Store:
                     WHERE i.item_id=submitted_sources.item_id AND i.ingestion_contract='legacy')""", (item_id,))
             _sync_manual_cards(connection, item_id)
             return fact_id
+
+    def _establish_bound_local_fact(self, db, owner, source, parsed, *, expected_revision, review_result):
+        item_id = owner['item_id']
+        if (type(expected_revision) is not int or expected_revision < 0
+                or owner['review_revision'] != expected_revision or owner['state'] != 'working'
+                or owner['phase'] not in {'collecting', 'reviewing'}
+                or owner['material_id'] is not None or owner['confirmation_json'] is not None
+                or owner['dismissed_at'] is not None or owner['error_code'] is not None
+                or owner['rejection_reason'] is not None):
+            raise SourceReviewConflict('source_review_revision_conflict')
+        for table in ('confirmation_decisions', 'group_decisions'):
+            if db.execute(f'SELECT 1 FROM {table} WHERE item_id=? LIMIT 1', (item_id,)).fetchone():
+                raise SourceReviewConflict('source_review_revision_conflict')
+        actual, binding = self._local_intake_binding(db, item_id)
+        from .file_sources import SubmittedSource
+        if (type(source) is not SubmittedSource or type(source.content) is not bytes or source.content != actual.content
+                or (source.source_kind, source.source_key, source.label) !=
+                   (actual.source_kind, actual.source_key, actual.label)
+                or _bound_json(source.metadata) != _bound_json(actual.metadata)):
+            raise ValueError('local_source_binding_mismatch')
+        frozen, payload, recipe, review = _bound_local_parsed(actual, binding, parsed, review_result)
+        scope = self._local_scope(binding)
+        parse_input = {'protocol': 'local-source-parse-input-v1', 'binding_scope': scope,
+                       'input': json.loads(binding.source_json)['input'], 'recipe': recipe}
+        parse_hash = hashlib.sha256(_bound_json(parse_input).encode('utf-8')).hexdigest()
+        snapshot_key = 'local-source-fact-v1:' + parse_hash
+        result = {**review, 'local_parse_binding': {'parse_input': parse_input,
+            'parse_input_sha256': parse_hash,
+            'parsed_output_sha256': hashlib.sha256(_bound_json(payload).encode('utf-8')).hexdigest()}}
+        now = _now()
+        material_id = db.execute('''INSERT INTO materials(source_kind,source_key,submitted_url,
+            canonical_url,metadata_json,created_at,snapshot_key) VALUES (?,?,?,'',?,?,?)''',
+            (actual.source_kind, actual.source_key, actual.label, _json(frozen.metadata), now, snapshot_key)).lastrowid
+        expected_media = []
+        for position, member in enumerate(frozen.media):
+            values = (material_id, member.member_id, position, member.mime_type,
+                      hashlib.sha256(member.content).hexdigest(), member.content)
+            db.execute('INSERT INTO source_media VALUES (?,?,?,?,?,?)', values)
+            expected_media.append(values)
+        result_json = _json(result)
+        db.execute('INSERT INTO source_review_results VALUES (?,?,?,?,?,?)',
+                   (item_id, expected_revision, actual.source_key, 'complete', result_json, now))
+        from .image_confirmation import pending_review
+        fact = SourceFact(frozen.snapshot, frozen.uncertainties)
+        pending = pending_review(fact, frozen.lineage)
+        confirmation = _confirmation_json(pending, db, item_id) if pending else None
+        fact_id = None if pending else _establish_source_fact(db, material_id, fact, lineage=frozen.lineage)
+        changed = db.execute('''UPDATE distill_items SET material_id=?,state=?,phase=?,confirmation_json=?,updated_at=?
+            WHERE item_id=? AND review_revision=? AND state='working' AND material_id IS NULL
+              AND confirmation_json IS NULL AND dismissed_at IS NULL''',
+            (material_id, 'waiting_user' if pending else 'working', 'reviewing', confirmation,
+             now, item_id, expected_revision)).rowcount
+        if changed != 1:
+            raise SourceReviewConflict('source_review_revision_conflict')
+        _sync_manual_cards(db, item_id)
+        material = dict(db.execute('SELECT * FROM materials WHERE material_id=?', (material_id,)).fetchone())
+        if material != dict(material_id=material_id, source_kind=actual.source_kind, source_key=actual.source_key,
+                            submitted_url=actual.label, canonical_url='', metadata_json=_json(frozen.metadata),
+                            created_at=now, snapshot_key=snapshot_key):
+            raise ValueError('local_source_readback_mismatch')
+        if [tuple(r) for r in db.execute('SELECT * FROM source_media WHERE material_id=? ORDER BY position',
+                                        (material_id,))] != expected_media:
+            raise ValueError('local_source_readback_mismatch')
+        if tuple(db.execute('SELECT * FROM source_review_results WHERE item_id=? AND revision=?',
+                            (item_id, expected_revision)).fetchone()) != (
+                item_id, expected_revision, actual.source_key, 'complete', result_json, now):
+            raise ValueError('local_source_readback_mismatch')
+        facts = db.execute('SELECT * FROM source_facts WHERE material_id=?', (material_id,)).fetchall()
+        if pending:
+            if facts:
+                raise ValueError('local_source_readback_mismatch')
+        elif len(facts) != 1 or (facts[0]['source_fact_id'], facts[0]['material_id'], facts[0]['snapshot'],
+                                facts[0]['uncertainties_json'], facts[0]['lineage_json']) != (
+                fact_id, material_id, frozen.snapshot, _json(list(frozen.uncertainties)), _json(frozen.lineage)):
+            raise ValueError('local_source_readback_mismatch')
+        final = dict(db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone())
+        expected_owner = {k:v for k,v in dict(owner).items() if k != 'binding_scope'}
+        expected_owner.update(material_id=material_id, state='waiting_user' if pending else 'working',
+                              phase='reviewing', confirmation_json=confirmation,
+                              updated_at=now, review_revision=expected_revision+1)
+        if final != expected_owner:
+            raise ValueError('local_source_readback_mismatch')
+        readback_source, readback_binding = self._local_intake_binding(db, item_id)
+        if readback_source != actual or readback_binding != binding:
+            raise ValueError('local_source_binding_mismatch')
+        return fact_id
 
     def expire_submitted_sources(self) -> None:
         with connect(self.path) as connection:
