@@ -212,7 +212,8 @@ def parse_proposal(content, binding, rows):
     return value
 
 
-def parse_check(content, binding, rows, *, proposal_sha256, changes_sha256, source_proof_sha256):
+def parse_check(content, binding, rows, *, proposal_sha256, changes_sha256, source_proof_sha256,
+                full_context=None):
     validate_binding(binding)
     value = strict_json(content)
     _object(value, ('contract', 'schema_revision', 'binding', 'proposal_sha256', 'changes_sha256', 'reviews'))
@@ -226,7 +227,11 @@ def parse_check(content, binding, rows, *, proposal_sha256, changes_sha256, sour
     reviews = value['reviews']
     if type(reviews) is not list or len(reviews) != len(rows) or not rows:
         raise TypedError('typed_coverage_invalid')
-    by_id = {raw.raw_id: (raw, data.decode('utf-8')) for raw, data in rows}
+    evidence_rows = rows if full_context is None else full_context
+    by_id = {raw.raw_id: (raw, data.decode('utf-8')) for raw, data in evidence_rows}
+    if (len(by_id) != len(evidence_rows)
+            or any(by_id.get(raw.raw_id) != (raw, data.decode('utf-8')) for raw, data in rows)):
+        raise TypedError('typed_coverage_invalid')
     for review, (raw, _data) in zip(reviews, rows):
         _object(review, ('raw_id', 'content_sha256', 'status', 'reason', 'source_check', 'dimensions'))
         if review['raw_id'] != raw.raw_id or review['content_sha256'] != raw.content_sha256:
@@ -485,7 +490,7 @@ def freeze_input(task, snapshot, batch_no, source_proof, *, runtime_root):
     and return its SHA. No production implementation is supplied here.
     """
     from dataclasses import asdict
-    from .wiki_outcomes import frozen_context
+    from .wiki_outcomes import frozen_context, full_frozen_context
     if source_proof is None:
         raise TypedError('source_proof_unavailable')
     if (type(batch_no) is not int or snapshot.task_id != task.task_id
@@ -498,7 +503,7 @@ def freeze_input(task, snapshot, batch_no, source_proof, *, runtime_root):
     rows = tuple(raw for raw in task.raw if raw.batch_no == batch_no)
     if any(type(raw.byte_count) is not int or raw.byte_count <= 0 for raw in rows):
         raise TypedError('typed_binding_invalid')
-    if sum(raw.byte_count for raw in rows) > INPUT_LIMIT:
+    if sum(raw.byte_count for raw in task.raw) > INPUT_LIMIT:
         raise TypedError('typed_input_limit')
     baseline = {item.relative_path: item for item in snapshot.files}
     if len(baseline) != len(snapshot.files):
@@ -508,9 +513,10 @@ def freeze_input(task, snapshot, batch_no, source_proof, *, runtime_root):
         if (item is None or item.role != 'raw' or type(item.byte_count) is not int
                 or item.byte_count != raw.byte_count or item.sha256 != raw.content_sha256):
             raise TypedError('typed_binding_invalid')
-    contents = {raw.raw_id: _input_bytes(snapshot.workspace, raw.relative_path, raw.byte_count) for raw in rows}
-    context = frozen_context(task, batch_no, contents)
-    proof = source_proof(task=task, snapshot=snapshot, context=context)
+    contents = {raw.raw_id: _input_bytes(snapshot.workspace, raw.relative_path, raw.byte_count) for raw in task.raw}
+    whole = full_frozen_context(task, contents)
+    context = frozen_context(task, batch_no, {r.raw_id: contents[r.raw_id] for r in rows})
+    proof = source_proof(task=task, snapshot=snapshot, context=whole)
     _hash(proof)
     _hash(task.kit_manifest_sha256)
     payload = {'task_id': task.task_id, 'attempt_id': snapshot.task_root.name,
@@ -522,7 +528,9 @@ def freeze_input(task, snapshot, batch_no, source_proof, *, runtime_root):
                'source_proof_sha256': proof,
                'baseline': [asdict(item) for item in snapshot.files],
                'raw': [{'frozen': asdict(raw), 'full_raw': content.decode('utf-8')}
-                       for raw, content in context]}
+                       for raw, content in context],
+               'context_raw': [{'frozen': asdict(raw), 'full_raw': content.decode('utf-8')}
+                               for raw, content in whole]}
     binding = {key: payload[key] for key in ('task_id', 'attempt_id', 'batch_no', 'boundary_sha256')}
     binding['input_sha256'] = digest(encoded(payload))
     validate_binding(binding)

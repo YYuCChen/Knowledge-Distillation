@@ -114,6 +114,16 @@ def frozen_context(task: WikiTask, batch_no: int, contents: dict[str, bytes]):
     return tuple(context)
 
 
+def full_frozen_context(task: WikiTask, contents: dict[str, bytes]):
+    """Exact whole-task C, including uncited and already processed batches."""
+    if type(contents) is not dict or set(contents) != {r.raw_id for r in task.raw}:
+        raise OutcomeError("raw_coverage_invalid")
+    frozen_context(task, 1, {r.raw_id: contents[r.raw_id] for r in task.raw if r.batch_no == 1})
+    return tuple(pair for batch in task.batches for pair in frozen_context(
+        task, batch.batch_no, {r.raw_id: contents[r.raw_id] for r in task.raw
+                              if r.batch_no == batch.batch_no}))
+
+
 def _specific_reason(reason):
     if not isinstance(reason, str) or not reason.strip():
         return False
@@ -249,8 +259,87 @@ class WikiOutcomes:
 
     def validate(self, task: WikiTask, batch_no: int, contents: dict[str, bytes],
                  outcomes: tuple[Outcome, ...], *, checker: NoKnowledgeChecker,
-                 support_gate: WikiSupportGate | None = None, support_client=None):
+                 support_gate: WikiSupportGate | None = None, support_client=None,
+                 full_contents: dict[str, bytes] | None = None,
+                 check_result=None, proposal: bytes | None = None):
+        """Default is the legacy private contract; explicit C requires typed checks.
+
+        This verifies candidate bindings, not canonical source completeness or
+        publication. The trusted client's source capability remains necessary.
+        No model success boolean can opt into the whole-context branch.
+        """
         context = frozen_context(task, batch_no, contents)
+        whole = context
+        checked = None
+        source_rows = None
+        if full_contents is not None:
+            from .wiki_runner import WikiSupportClient
+            from .wiki_typed import (TypedRunnerResult, InputBinding, CHECK_SCHEMA, freeze_input, parse_proposal,
+                                     parse_check, checked_documents, digest as sha,
+                                     encoded as json_bytes)
+            whole = full_frozen_context(task, full_contents)
+            if any(full_contents[r.raw_id] != c for r, c in context):
+                raise OutcomeError("raw_hash_mismatch")
+            if (not isinstance(support_gate, WikiSupportGate)
+                    or not isinstance(support_client, WikiSupportClient)
+                    or support_client.task != task
+                    or support_client.registry is not support_gate.registry
+                    or support_client.model_config_hash != support_gate.binding["config"]
+                    or not isinstance(check_result, TypedRunnerResult)
+                    or not check_result.succeeded or type(proposal) is not bytes
+                    or not isinstance(check_result.input_binding, InputBinding)
+                    or check_result.input_binding.schema_sha256 != sha(json_bytes(CHECK_SCHEMA))
+                    or check_result.final_sha256 != sha(check_result.final_bytes)):
+                raise OutcomeError("full_context_check_required")
+            try:
+                support_client.verify_input()  # real whole-tree/C readback before Gate reservation
+                binding, rows, payload = freeze_input(task, support_client.snapshot, batch_no,
+                    support_client.source_proof, runtime_root=support_client.runtime_root)
+                if any(c != full_contents[r.raw_id] for r, c in rows):
+                    raise OutcomeError("raw_hash_mismatch")
+                if payload["context_raw"] != [
+                        {"frozen": asdict(r), "full_raw": c.decode("utf-8")} for r, c in whole]:
+                    raise OutcomeError("raw_hash_mismatch")
+                parsed = parse_proposal(proposal, binding, rows)
+                documents = checked_documents(support_client.snapshot,
+                    {c.path: c.after_sha256 for c in support_gate.registry.changes})
+                checked = parse_check(check_result.final_bytes, binding, rows,
+                    proposal_sha256=sha(proposal), changes_sha256=sha(json_bytes(documents)),
+                    source_proof_sha256=payload["source_proof_sha256"], full_context=whole)
+                if any(v["status"] == "unknown" or v["source_check"]["status"] != "complete"
+                       or any(d["status"] == "unknown" for d in v["dimensions"])
+                       for v in checked["reviews"]):
+                    raise OutcomeError("outcome_classification_unknown")
+                if any(o.status == "processed_no_knowledge" for o in outcomes):
+                    from .wiki_source_proof import SourceProof, CONTRACT as SOURCE_CONTRACT
+                    verify = getattr(support_client.source_proof, "verify", None)
+                    if not callable(verify):
+                        raise OutcomeError("source_qualification_required")
+                    qualification = verify(task=task, snapshot=support_client.snapshot, context=whole)
+                    if (not isinstance(qualification, SourceProof)
+                            or qualification.digest != payload["source_proof_sha256"]):
+                        raise OutcomeError("source_qualification_required")
+                    manifest = qualification.manifest
+                    source_rows = manifest.get("sources")
+                    if (manifest.get("contract") != SOURCE_CONTRACT or manifest.get("task_id") != task.task_id
+                            or manifest.get("boundary_sha256") != task.boundary_sha256
+                            or type(source_rows) is not list or len(source_rows) != len(whole)
+                            or [(s.get("raw_id"), s.get("path"), s.get("identity"), s.get("sha256"), s.get("byte_count"))
+                                for s in source_rows] != [(r.raw_id, r.relative_path, r.identity, r.content_sha256,
+                                                          r.byte_count) for r, _c in whole]):
+                        raise OutcomeError("source_qualification_required")
+                expected = [{"raw_id": o.raw_id, "content_sha256": o.content_sha256,
+                    "ordinal": r.ordinal, "status": o.status, "reason_code": o.reason_code,
+                    "reason": o.reason, "documents": [{"path": p, "sha256": h} for p, h in o.documents]}
+                    for o, (r, _c) in zip(outcomes, rows)]
+                if parsed["outcomes"] != expected:
+                    raise OutcomeError("outcome_binding_invalid")
+            except OutcomeError:
+                raise
+            except Exception:
+                raise OutcomeError("full_context_check_invalid") from None
+        elif check_result is not None or proposal is not None:
+            raise OutcomeError("full_context_check_required")
         if len(outcomes) != len(context) or {o.raw_id for o in outcomes} != {r.raw_id for r, _ in context}:
             raise OutcomeError("outcome_coverage_invalid")
         ordered = {o.raw_id: o for o in outcomes}
@@ -269,6 +358,13 @@ class WikiOutcomes:
                         or not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{64}", sha) is None):
                     raise OutcomeError("document_binding_invalid")
             if o.status == "processed_no_knowledge":
+                if source_rows is not None:
+                    source = next(s for s in source_rows if s["raw_id"] == r.raw_id)
+                    if (source.get("gaps") != [] or type(source.get("capabilities")) is not list
+                            or not {"canonical_source_binding", "canonical_ingestion_event",
+                                    "declared_capture_verified"} <= set(source["capabilities"])
+                            or source.get("scope", {}).get("kind") not in {"retained_literal", "declared_full"}):
+                        raise OutcomeError("no_knowledge_unknown")
                 if envelope_fields(content).get("未保留附件"):
                     raise OutcomeError("no_knowledge_unknown")
                 if (not isinstance(o.reason_code, str)
@@ -276,7 +372,13 @@ class WikiOutcomes:
                         or not _specific_reason(o.reason)):
                     raise OutcomeError("no_knowledge_reason_invalid")
                 try:
-                    result = checker.review(raw=r, full_raw=content, outcome=o, context=context)
+                    if checked is None:
+                        result = checker.review(raw=r, full_raw=content, outcome=o, context=context)
+                    else:
+                        review = next(v for v in checked["reviews"] if v["raw_id"] == r.raw_id)
+                        result = NoKnowledgeReview(review["status"], review["reason"],
+                            review["source_check"]["status"] == "complete",
+                            tuple(d["dimension"] for d in review["dimensions"]))
                 except Exception as error:
                     raise OutcomeError("no_knowledge_check_failed") from error
                 if (not isinstance(result, NoKnowledgeReview) or type(result.status) is not str or result.status != "verified"
@@ -288,12 +390,14 @@ class WikiOutcomes:
                     raise OutcomeError("no_knowledge_unknown")
                 reviews.append({"raw_id": r.raw_id, **asdict(result)})
         support = None
-        if any(o.status == "processed_with_knowledge" or o.reason_code == "support_only" for o in outcomes):
+        if full_contents is not None or any(
+                o.status == "processed_with_knowledge" or o.reason_code == "support_only" for o in outcomes):
             if not isinstance(support_gate, WikiSupportGate):
                 raise OutcomeError("source_support_required")
             registry = support_gate.registry
             if {(r.stable_id, r.sha256, r.content) for r in registry.raws} != {
-                    (r.raw_id, r.content_sha256, c) for r, c in context}:
+                    (r.raw_id, r.content_sha256, c) for r, c in whole} or (
+                        full_contents is not None and len(registry.raws) != len(whole)):
                 raise OutcomeError("support_boundary_invalid")
             for o in outcomes:
                 if (o.status == "processed_with_knowledge" or o.reason_code == "support_only") and not any(
@@ -304,6 +408,11 @@ class WikiOutcomes:
             result = support_gate.review(support_client)
             if result.status != "supported_candidate_not_published" or result.diagnostics:
                 raise OutcomeError("source_support_failed")
+            if full_contents is not None:
+                try:
+                    support_client.verify_input()
+                except Exception:
+                    raise OutcomeError("full_context_check_invalid") from None
             changed = {c.path: c.after_sha256 for c in registry.changes}
             if any(changed.get(p) != sha for o in outcomes for p, sha in o.documents):
                 raise OutcomeError("support_document_mismatch")
@@ -315,6 +424,9 @@ class WikiOutcomes:
                    "raw": [asdict(r) for r, _ in context],
                    "outcomes": [asdict(ordered[r.raw_id]) for r, _ in context],
                    "reviews": reviews, "support": support}
+        if full_contents is not None:
+            payload["context_raw"] = [asdict(r) for r, _c in whole]
+            payload["check_sha256"] = check_result.final_sha256
         receipt_id = digest(encoded(payload).encode())
         self._save(receipt_id, "validated", payload)
         return receipt_id
