@@ -359,13 +359,53 @@ def _metadata_span(text, key):
 
 
 def _citation_free(text, citations):
-    for ref in citations:
-        # A displayed wikilink label is prose: preserve it exactly.
-        text = re.sub(r"\[\[" + re.escape(ref) + r"\|([^\]]*)\]\]", lambda m: m[1], text)
-        text = text.replace("[[" + ref + "]]", "")
-        text = text.replace("（" + ref + "）", "").replace("(" + ref + ")", "")
-        text = text.replace(ref, "")
-    return text.rstrip()  # adding a trailing citation may add its separator space
+    refs = set(citations)
+    spans = []
+    # Transform occurrences, never reference-name substrings in normal prose.
+    # Labels are emitted once and are not rescanned as addresses afterward.
+    for match in re.finditer(r"\[\[([^\[\]\n]+)\]\]", text):
+        parts = match[1].split('|')
+        ref = parts[0].strip()
+        replacement = match[0]
+        if ref in refs:
+            if len(parts) == 2 and parts[1]:
+                replacement = parts[1]
+            elif len(parts) == 1:
+                replacement = '' if ref.startswith('raw/') else parts[0]
+        spans.append((match.start(), match.end(), replacement))
+    for match in re.finditer(r"\[([^\[\]\n]*)\]\(", text):
+        if any(start <= match.start() < end for start, end, _ in spans):
+            continue
+        destination = parseLinkDestination(text, match.end(), len(text))
+        if destination.ok and destination.pos < len(text) and text[destination.pos] == ')':
+            end = destination.pos + 1
+            replacement = (match[1] if destination.str in refs and destination.str.startswith('raw/')
+                           else text[match.start():end])
+        else:
+            # Unsupported destinations/titles remain opaque, not partially
+            # stripped into a manufactured citation-only equivalence.
+            end = text.find('\n', match.end())
+            end = len(text) if end < 0 else end
+            replacement = text[match.start():end]
+        spans.append((match.start(), end, replacement))
+    for match in re.finditer(r"raw/[^\s\]（），,；;。|<>`\"']+", text):
+        if any(start <= match.start() < end for start, end, _ in spans):
+            continue
+        ref = match[0].rstrip(')')
+        if ref not in refs:
+            continue
+        start, end = match.start(), match.start() + len(ref)
+        if start and end < len(text) and (text[start - 1], text[end]) in {('（', '）'), ('(', ')')}:
+            start, end = start - 1, end + 1
+        spans.append((start, end, ''))
+    result, cursor = [], 0
+    for start, end, replacement in sorted(spans):
+        if start < cursor:
+            continue
+        result.extend((text[cursor:start], replacement))
+        cursor = end
+    result.append(text[cursor:])
+    return ''.join(result).rstrip()  # a trailing pure address may add its separator space
 
 
 STRUCTURAL_FIELDS = frozenset({"编号", "类型", "创建", "更新", "主题", "确认", "证据",

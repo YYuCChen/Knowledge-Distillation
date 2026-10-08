@@ -404,6 +404,59 @@ def test_repair_without_original_mapping_rejected(h):
         h.gate(fixed).review(FakeClient(), reservation=reservation)
 
 
+@pytest.mark.parametrize('old,new,allowed', [
+    ('这是素材对[[实验结果外推]]的限制。', '这是素材对实验结果外推的限制。', True),
+    ('这是素材对[[实验结果外推|外推边界]]的限制。', '这是素材对外推边界的限制。', True),
+    ('这是素材对[[实验结果外推|外推边界]]的限制。', '这是素材对[[另一概念|外推边界]]的限制。', True),
+    ('这是素材对[[实验结果外推]]的限制。', '这是素材对的限制。', False),
+    ('这是素材对[[实验结果外推|外推边界]]的限制。', '这是素材对[[实验结果外推|普遍规律]]的限制。', False),
+    ('实验结果外推与[[实验结果外推]]均有限制。', '与[[实验结果外推]]均有限制。', False),
+    ('这是素材对[[实验结果外推]]的限制。', '这是素材对实验结果外推的普遍肯定。', False),
+])
+def test_citation_only_repair_preserves_visible_wikilink_prose(h, old, new, allowed):
+    pages = []
+    for title in ('实验结果外推', '另一概念'):
+        path = f'wiki/概念/{title}.md'
+        content = (cited('作者甲只记录低温数值10。') + '\n').encode()
+        h.write(path, content)
+        pages.append(ws.FrozenPage(path, content, ws.sha256(content)))
+    initial = h.make(cited(old), pages=tuple(pages))
+    gate = h.gate(initial)
+    assert gate.review(FakeClient({0: 'unsupported'}, field='citations')).status == 'source_support_failed'
+    reservation = gate.reserve_repair()
+    fixed = h.make(cited(new), pages=tuple(pages), parent=initial)
+    if allowed:
+        assert h.gate(fixed).review(FakeClient(), reservation=reservation).status == 'supported_candidate_not_published'
+    else:
+        with pytest.raises(ws.WikiSupportError, match='repair_invalid'):
+            h.gate(fixed).review(FakeClient(), reservation=reservation)
+
+
+@pytest.mark.parametrize('spelling', ['bare', 'wikilink', 'markdown'])
+def test_citation_only_raw_address_replacement_preserves_labels(h, spelling):
+    second = RAW_PATH + '#^source-2'
+    def source(ref):
+        if spelling == 'wikilink':
+            return '[[' + ref + ']]'
+        if spelling == 'markdown':
+            return '[原文证据](' + ref + ')'
+        return '（' + ref + '）'
+    initial = h.make('作者甲记录操作条件。' + source(REF))
+    gate = h.gate(initial)
+    assert gate.review(FakeClient({0: 'unsupported'}, field='citations')).status == 'source_support_failed'
+    reservation = gate.reserve_repair()
+    fixed = h.make('作者甲记录操作条件。' + source(second), parent=initial)
+    assert h.gate(fixed).review(FakeClient(), reservation=reservation).status == 'supported_candidate_not_published'
+
+
+def test_citation_normalization_never_rescans_alias_or_changes_markdown_label():
+    alias = '证据地址 ' + REF
+    assert ws._citation_free('[[' + REF + '|' + alias + ']]', (REF,)) == alias
+    assert ws._citation_free('[原文证据](' + REF + ')', (REF,)) == '原文证据'
+    assert ws._citation_free('[改了正文](' + REF + ')', (REF,)) != '原文证据'
+    assert ws._citation_free('[[实验结果外推|含|糊]]', ('实验结果外推',)) == '[[实验结果外推|含|糊]]'
+
+
 def test_default_two_repairs_bound_to_baseline_not_current_claim(h):
     text = "- " + cited("甲。") + "\n- " + cited("乙。") + "\n- " + cited("丙。") + "\n"
     initial = h.make(text)
