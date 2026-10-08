@@ -644,19 +644,21 @@ class Store:
             return {'pending': pending, 'source_descriptor': _preparation_source(db, row, new_review),
                     'item_runtime_root': self.preparation_runtime_root / 'items' / str(item_id)}
 
-    def discover_pending_presentations(self, *, after_item_id=0, limit=8):
+    def discover_pending_presentations(self, *, after_item_id=0, limit=8, item_id=None):
         """Bounded current-pending discovery; no model, files written or history scan."""
         from .confirmation_preparation import PROTOCOL, required, input_binding, presentation_state, PreparationError
         from .confirmation_schema import view
         if type(limit) is not int or not 1 <= limit <= 64 or type(after_item_id) is not int or after_item_id < 0:
             raise ValueError('preparation_page_invalid')
+        if item_id is not None and (type(item_id) is not int or item_id <= 0):
+            raise ValueError('preparation_item_invalid')
         enqueued = []
         with connect(self.path) as db:
             db.execute('BEGIN IMMEDIATE')
-            rows = db.execute('''SELECT * FROM distill_items i WHERE item_id>? AND state='waiting_user'
+            rows = db.execute('''SELECT * FROM distill_items i WHERE item_id>? AND (? IS NULL OR item_id=?) AND state='waiting_user'
                 AND dismissed_at IS NULL AND confirmation_json IS NOT NULL
                 AND NOT EXISTS(SELECT 1 FROM source_facts sf WHERE sf.material_id=i.material_id)
-                ORDER BY item_id LIMIT ?''', (after_item_id, limit)).fetchall()
+                ORDER BY item_id LIMIT ?''', (after_item_id, item_id, item_id, limit)).fetchall()
             for row in rows:
                 pending = view(db, row)
                 source = _preparation_source(db, row)
@@ -1415,18 +1417,18 @@ class Store:
                     WITH completed AS (
                         SELECT item_id, updated_at,
                                ROW_NUMBER() OVER (PARTITION BY material_id ORDER BY updated_at, item_id) AS attempt
-                        FROM distill_items WHERE state='succeeded'
+                        FROM distill_items WHERE state IN ('succeeded','raw_saved')
                     )
                     SELECT i.*, ss.input_kind, ss.input_key, ss.input_label, ss.retryable, ss.content IS NOT NULL AS input_available, ss.retain_until, m.source_kind, m.canonical_url, m.metadata_json,
                            kr.knowledge_result_id, kr.payload_json,
-                           kr.published_path, kr.published_at, kr.published_vault, sf.lineage_json
+                           kr.published_path, kr.published_at, kr.published_vault, sf.source_fact_id, sf.lineage_json
                     FROM distill_items AS i
                     LEFT JOIN submitted_sources AS ss ON ss.item_id = i.item_id
                     LEFT JOIN materials AS m ON m.material_id = i.material_id
                     LEFT JOIN source_facts AS sf ON sf.material_id = m.material_id
                     LEFT JOIN knowledge_results AS kr
                       ON kr.source_fact_id = sf.source_fact_id
-                    WHERE (i.state!='succeeded' AND i.dismissed_at IS NULL AND NOT EXISTS(SELECT 1 FROM collection_members cm WHERE cm.item_id=i.item_id))
+                    WHERE (i.state NOT IN ('succeeded','raw_saved') AND i.dismissed_at IS NULL AND NOT EXISTS(SELECT 1 FROM collection_members cm WHERE cm.item_id=i.item_id))
                        OR i.item_id IN (SELECT item_id FROM completed WHERE attempt=1 ORDER BY updated_at DESC,item_id DESC LIMIT ?)
                     ORDER BY i.updated_at DESC, i.item_id DESC
                     """,

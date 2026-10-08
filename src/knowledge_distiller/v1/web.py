@@ -667,6 +667,27 @@ def create_app(
     def service() -> Distiller:
         return distiller() if callable(distiller) else distiller
 
+    @app.post('/collections/<int:operation>/visibility/<action>')
+    def collection_visibility(operation, action):
+        from .collection_visibility import CollectionVisibility, CollectionVisibilityError
+        if action not in {'hide', 'restore'}:
+            abort(404)
+        try:
+            visibility = CollectionVisibility(store)
+            (visibility.hide if action == 'hide' else visibility.restore)(operation)
+        except CollectionVisibilityError:
+            abort(409)
+        # Visibility never calls resume, preparation or wake.
+        return redirect(url_for('home'), code=303)
+
+    def prepare_remaining(item_id, result):
+        if result.state == 'waiting_user':
+            # One exact item, using the real producer queue and proof lifecycle.
+            store.discover_pending_presentations(item_id=item_id, limit=1)
+        row = store.item_bundle(item_id)
+        if row is not None and row['state'] == 'queued' and wake_worker is not None:
+            wake_worker()
+
     @app.get("/")
     def home():
         if wiki_workflow is not None:
@@ -843,8 +864,7 @@ def create_app(
         except ValueError as error:
             return render_template('home.html', **_home_context(store, item_id,
                 confirmation_error={'id': item_id, 'concern_id': '', 'message': str(error), 'value': value})), 409
-        if result.state == 'queued' and wake_worker is not None:
-            wake_worker()
+        prepare_remaining(item_id, result)
         return redirect(url_for('home', item=item_id))
 
     @app.post("/items/<int:item_id>/confirm")
@@ -885,8 +905,7 @@ def create_app(
                     "message": str(error), "value": value,
                 }),
             ), 400
-        if result.state == "queued" and wake_worker is not None:
-            wake_worker()
+        prepare_remaining(item_id, result)
         return redirect(url_for("home", item=item_id))
 
     @app.get("/items/<int:item_id>/confirmation-audio")
@@ -1048,6 +1067,43 @@ def _ready_presentation_context(store, item_id):
         return None
 
 
+def _saved_raw(store, row, vault):
+    """Read a durable writer receipt, never rehash files in home polling."""
+    if row['state'] not in {'succeeded', 'raw_saved'}:
+        return False
+    from .database import connect
+    with connect(store.path) as db:
+        # Writer-only immutable events and records, with current head and owner.
+        # This is historical successful persistence, not fresh filesystem health.
+        return db.execute('''SELECT 1 FROM ingestion_events e JOIN raw_records r
+            ON r.raw_id=json_extract(e.detail_json,'$.manifest.raw_id')
+            WHERE e.item_id=? AND e.kind='raw_verified' AND e.contract='raw-verified-v1'
+              AND json_extract(e.detail_json,'$.manifest.owner_item_id')=e.item_id
+              AND e.subject_kind=r.subject_kind AND e.subject_id=r.subject_id
+              AND r.content_sha256=json_extract(e.detail_json,'$.manifest.content_sha256')
+              AND r.written_at IS NOT NULL
+              AND NOT EXISTS(SELECT 1 FROM raw_records n WHERE n.supersedes=r.raw_id)
+              AND (e.subject_kind='material' AND e.subject_id=? OR e.subject_kind='capture'
+                   AND EXISTS(SELECT 1 FROM capture_state s WHERE s.item_id=e.item_id AND s.capture_id=e.subject_id))
+            LIMIT 1''', (row['item_id'], row['material_id'])).fetchone() is not None
+
+
+def _corrected_annotation_items(store, item_ids):
+    """Only an explicit user correction withdraws a prior independent card."""
+    from .database import connect
+    if not item_ids:
+        return set()
+    with connect(store.path) as db:
+        return {r['item_id'] for r in db.execute('''SELECT s.item_id FROM capture_state s
+            JOIN capture_identity_events e USING(capture_id)
+            WHERE s.item_id IN (''' + ','.join('?' for _ in item_ids) + ''')
+              AND e.event_id=(SELECT MAX(n.event_id) FROM capture_identity_events n
+                             WHERE n.capture_id=e.capture_id)
+              AND e.result='annotation' AND e.basis='用户' AND e.target_message_id IS NOT NULL
+              AND EXISTS(SELECT 1 FROM capture_identity_events old WHERE old.capture_id=e.capture_id
+                         AND old.event_id<e.event_id AND old.result IN ('my_thought','third_party'))''',tuple(item_ids))}
+
+
 def _home_context(
     store: Store,
     selected: int | None,
@@ -1067,20 +1123,65 @@ def _home_context(
     if selected_row is not None and selected_row['dismissed_at'] is None and not any(r['item_id']==selected for r in rows):
         rows.insert(0,selected_row)
     from .collections import Collections
-    from .collection_web import cards
-    collection_cards = cards(Collections(store), store=store)
+    from .collection_web import card
+    from .database import connect
+    service = Collections(store)
+    with connect(store.path) as db:
+        operation_ids = [r[0] for r in db.execute('SELECT operation_id FROM collection_operations ORDER BY created_at DESC,operation_id DESC LIMIT 30')]
+        if selected is not None:
+            operation_ids += [r[0] for r in db.execute('SELECT operation_id FROM collection_members WHERE item_id=? LIMIT 1',(selected,)) if r[0] not in operation_ids]
+    collection_cards = [card(service.detail(operation)) for operation in operation_ids]
+    from .collection_visibility import CollectionVisibility
+    visibility = CollectionVisibility(store)
+    hidden_collections = [c for c in collection_cards if visibility.visibility(c['operation_id']) == 'hidden']
+    hidden_ids = {m['item_id'] for c in hidden_collections for m in c['members']}
+    # Explicit read-through is display only, including original source links.
+    viewed = request.args.get('view_collection', type=int) if request else None
+    viewed_ids = {m['item_id'] for c in hidden_collections if c['operation_id'] == viewed for m in c['members']}
+    known = {r['item_id'] for r in rows}
+    active_collections = [c for c in collection_cards if c['state'] in {'queued','working','waiting_user'}]
+    latest_stopped = next((c for c in collection_cards if c['state']=='cancelled' and c not in hidden_collections),None)
+    for c in collection_cards:
+        # Completed historical members already use the bounded recent-items
+        # page. Only current work, one stopped task, or explicit read-through
+        # needs an expanded scope; never hydrate every historical collection.
+        if c not in active_collections and c is not latest_stopped and c['operation_id'] != viewed:
+            continue
+        for member in c['members']:
+            if member['item_id'] not in known:
+                rows.append(store.item_bundle(member['item_id']))
+                known.add(member['item_id'])
+    withdrawn = _corrected_annotation_items(store, {r['item_id'] for r in rows})
+    all_rows = rows
+    rows = [r for r in rows if r['item_id'] not in withdrawn
+            and (r['item_id'] not in hidden_ids or r['item_id'] in viewed_ids)]
+    saved = {r['item_id'] for r in all_rows if _saved_raw(store, r, vault_path)}
+    stopped_ids = {m['item_id'] for c in collection_cards if c['state']=='cancelled' for m in c['members']}
+    preparing_members = []
+    preparing_ids = set()
+    for row in rows:
+        if not row['confirmation_json'] or row['state'] not in {'queued', 'working', 'waiting_user', 'failed'}:
+            continue
+        if row['state']=='failed' and json.loads(row['confirmation_json']).get('presentation_preparation',{}).get('outcome')!='failed':
+            continue
+        context = store.presentation_context(row['item_id'])
+        from .confirmation_preparation import presentation_state
+        pending = context['pending']
+        if presentation_state(pending, context['item_runtime_root'], source_descriptor=context['source_descriptor'])['outcome'] in {'not-ready','failed'}:
+            preparing_ids.add(row['item_id'])
+            preparing_members.extend('member-'+str(row['item_id'])+'-'+group['member_uids'][0]
+                for group in pending.get('groups', []) if group['member_uids'])
     selected_collection = next((c for c in collection_cards if any(m['item_id']==selected for m in c['members'])),None)
     processing = tuple(
-        _item_view(row, vault_path, store.path.parent) for row in rows if row["state"] == "working"
+        _item_view(row, vault_path, store.path.parent) for row in rows
+        if row["state"] == "working" and row['item_id'] not in preparing_ids
     )
     waiting = tuple(
-        _item_view(row, vault_path, store.path.parent) for row in sorted((r for r in rows if r["state"] == "queued"),
+        _item_view(row, vault_path, store.path.parent) for row in sorted((r for r in rows if r["state"] == "queued" and r['item_id'] not in preparing_ids and r['item_id'] not in stopped_ids),
             key=lambda r: (r["queued_at"] or "", r["item_id"]))
     )
     # Queue identities belong to cards, not each item's most recent update.
-    scopes = [('items', 'independent')]
-    if selected_collection:
-        scopes.append(('collection', str(selected_collection['operation_id'])))
+    scopes = [('items', 'independent')] + [('collection', str(c['operation_id'])) for c in collection_cards]
     queue = [entry for kind, scope in scopes for entry in store.manual_cards(kind, scope)]
     queue.sort(key=lambda entry: entry['enqueue_seq'])
     row_by_id = {row['item_id']: row for row in rows}
@@ -1110,8 +1211,27 @@ def _home_context(
     recent = tuple(
         _item_view(row, vault_path, store.path.parent)
         for row in rows
-        if row["state"] == "succeeded" and row["payload_json"] is not None
+        if row["state"] in {'succeeded','raw_saved'} and (row["payload_json"] is not None or row['item_id'] in saved)
     )
+    recent = [dict(v, raw_saved=v['id'] in saved and not v['core_points'] and not v['other_points']
+                   and not next(r for r in rows if r['item_id']==v['id'])['payload_json']) for v in recent]
+    for c in collection_cards:
+        if c['state'] not in {'cancelled','partial','failed'} or c in hidden_collections:
+            continue
+        member_ids = {m['item_id'] for m in c['members']}
+        if any(m['state']=='working' for m in c['members']):
+            continue
+        first = next((v for v in recent if v['id'] in member_ids), None)
+        if first:
+            first['hide_operation'] = c['operation_id']
+            first['hide_total'] = c['total']
+    process_counts = dict(total=len(processing), completed=0, remaining=len(processing), position=1)
+    if processing:
+        scope = next((c for c in collection_cards if any(m['item_id']==processing[0]['id'] for m in c['members'])),None)
+        if scope:
+            completed = sum(m['item_id'] in saved for m in scope['members'])
+            process_counts = dict(total=scope['total'],completed=completed,remaining=scope['total']-completed,
+                position=next(i for i,m in enumerate(scope['members'],1) if m['item_id']==processing[0]['id']))
     selected_view = None
     if selected_row is not None:
         selected_data = dict(selected_row)
@@ -1128,10 +1248,14 @@ def _home_context(
         "waiting": waiting,
         "todo": todo,
         "recent": recent,
+        "process_counts": process_counts,
+        "preparing_members": preparing_members,
+        "hidden_collections": hidden_collections,
+        "stopped": tuple(_item_view(r,vault_path,store.path.parent) for r in rows if r['item_id'] in stopped_ids and r['state']=='queued'),
         "form_error": form_error,
         "draft": draft,
         "confirmation_error": confirmation_error,
-        "confirmation_count": sum(max(1, len(item["confirmation"]["concerns"])) for item in todo if item["state"] == "waiting_user"),
+        "confirmation_count": len(preparing_members) + sum(max(1, len(item["confirmation"]["concerns"])) for item in todo if item["state"] == "waiting_user"),
         "pending_captures": _pending_captures(store),
     }
 
@@ -1220,7 +1344,7 @@ def _item_view(row, vault_path: str | None, data_root=None) -> dict[str, object]
         "canonical_url": "" if local else row['submitted_url'] if kind == 'xiaohongshu' else row["canonical_url"] or row["submitted_url"],
         "source_type": LABELS.get(kind, "未知来源"),
         "submitted_at": _submitted_at(row["created_at"]),
-        "stages": _stage_states(row["phase"]),
+        "stages": _stage_states(row["phase"], row),
         "collected_at": _collected_at(row["published_at"]),
         "obsidian_url": publication["url"],
         "publication_saved": publication["file"] is not None,
@@ -1254,22 +1378,19 @@ def _submitted_at(value: str) -> str:
     return f"{submitted.month} 月 {submitted.day} 日  {submitted:%H:%M}"
 
 
-def _stage_states(current: str) -> tuple[dict[str, str], ...]:
-    phases = (
-        ("collecting", "采集"),
-        ("reviewing", "整理"),
-        ("distilling", "提炼"),
-        ("publishing", "收录"),
-    )
-    current_index = next(
-        (index for index, (phase, _) in enumerate(phases) if phase == current), 0
-    )
+def _stage_states(current: str, row=None) -> tuple[dict[str, str], ...]:
+    phases = ('采集', '识别', '确认', '保存')
+    current_index = 0 if current == 'collecting' else 3 if current == 'publishing' else 4 if current == 'done' else 1
+    if row is not None and current not in {'collecting', 'publishing', 'done'}:
+        if row['state'] == 'waiting_user' or row['confirmation_json'] or (
+                'source_fact_id' in row.keys() and row['source_fact_id'] is not None):
+            current_index = 2
     return tuple(
         {
             "label": label,
             "state": "green" if index < current_index else "yellow" if index == current_index else "grey",
         }
-        for index, (_, label) in enumerate(phases)
+        for index, label in enumerate(phases)
     )
 
 

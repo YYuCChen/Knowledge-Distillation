@@ -33,6 +33,17 @@ function retainsLocalWork(node) {
 }
 
 function preserveCompletedCards(current, next, submittedCard) {
+  // A missing prepared projection is not a completed human decision.
+  const preparing = new Set(JSON.parse(next.getAttribute('data-preparing-members') || '[]'));
+  for (const card of current.querySelectorAll('.todo-card-shell[data-sync-key^="member-"]')) {
+    if (!preparing.has(card.dataset.syncKey) || card.dataset.syncKey === submittedCard) continue;
+    const copy = card.cloneNode(true);
+    delete copy.dataset.staleConfirmation;
+    copy.removeAttribute('title');
+    copy.dataset.preparingConfirmation = 'true';
+    for (const button of copy.querySelectorAll('button:not([data-card-toggle])')) button.disabled = true;
+    next.querySelector('.todo-list')?.append(copy);
+  }
   for (const card of current.querySelectorAll('.todo-card-shell[data-sync-key^="member-"]')) {
     if (card.dataset.syncKey === submittedCard ||
         next.querySelector(`[data-sync-key="${CSS.escape(card.dataset.syncKey)}"]`)) continue;
@@ -127,7 +138,8 @@ function applyPage(html, submittedForm, submittedCard) {
   if (!current || !next) throw new Error('没有收到完整页面，请稍后再试。');
   const status = page.querySelector('.topbar-status');
   if (status) reconcile(document.querySelector('.topbar-status'), status);
-  if (next.innerHTML === lastServerHTML && !submittedForm) return;
+  if (next.innerHTML === lastServerHTML && !submittedForm &&
+      next.getAttribute('data-preparing-members') === current.getAttribute('data-preparing-members')) return;
   const anchors = Array.from(current.querySelectorAll('[data-sync-key^="member-"], [data-sync-key^="task-"], [data-sync-key^="group-"]'))
     .filter(node => node.getBoundingClientRect().bottom > 0);
   const anchor = anchors.filter(node => !anchors.some(child => child !== node && node.contains(child))).find(node => page.querySelector(`[data-sync-key="${CSS.escape(node.dataset.syncKey)}"]`));
@@ -251,7 +263,7 @@ document.addEventListener('submit', async event => {
   }
   if (!form.closest('#home-results')) return;
   event.preventDefault();
-  if (form.closest('[data-stale-confirmation]')) return;
+  if (form.closest('[data-stale-confirmation], [data-preparing-confirmation]')) return;
   if (updating) return;
   if ((form.matches('.manual-confirmation') || (form.matches('[data-group-confirmation]') && event.submitter?.value === 'manual')) && !form.elements.value.value.trim()) {
     const input = form.elements.value;

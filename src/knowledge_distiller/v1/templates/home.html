@@ -14,14 +14,14 @@
 
 {% block topbar %}
   <header class="topbar page-width">
-    {% set active_count = processing|length + collection_processing %}
-    {% set queued_count = waiting|length + collection_waiting %}
+    {% set active_count = processing|length %}
+    {% set queued_count = waiting|length %}
     <span class="topbar-status" role="status" aria-live="polite" {% if wiki_status.running %}data-live-status{% endif %}>
       <span class="app-state">
         <span class="activity-dot {{ 'is-active' if wiki_status.running or active_count else 'is-error' if wiki_status.state in ['failed', 'unknown'] and not queued_count else '' }}" aria-hidden="true"></span>
         {% if wiki_status.running and active_count %}正在整理 · 正在蒸馏{% elif wiki_status.running %}正在整理{% elif active_count %}正在蒸馏{% elif queued_count %}队列等待{% elif wiki_status.queued %}知识整理已排队{% elif wiki_status.state == 'unknown' %}状态暂不可用{% else %}正常{% endif %}
       </span>
-      {% if active_count or queued_count %}<span class="queue-state">{{ active_count }} 批 · {{ queued_count }} 等待</span>{% endif %}
+      {% if active_count or queued_count %}<span class="queue-state">{{ active_count }} 条处理中 · {{ queued_count }} 条等待</span>{% endif %}
     </span>
     <a href="{{ url_for('settings.page') }}">设置{% if update is defined %}<img data-update-attention src="{{ url_for('static', filename='icons/update-attention.svg') }}" alt="有新版更新说明" {% if not update.attention %}hidden{% endif %}>{% endif %}</a>
   </header>
@@ -82,9 +82,7 @@
       </div>
     </dialog>
 
-    <div id="home-results">
-    {% include "_collection_cards.html" %}
-    {% if selected_collection %}<p class="collection-return">本条属于 {{ selected_collection.title }} · <a href="{{ url_for('collections.detail', operation=selected_collection.operation_id) }}">返回集合</a></p>{% endif %}
+    <div id="home-results" data-preparing-members='{{ preparing_members|default([])|tojson }}'>
     {% if processing %}
       <section class="section" data-sync-key="processing" data-live-status>
         <h2>处理中</h2>
@@ -92,9 +90,9 @@
         <details class="status-panel processing-panel" data-persist-details="processing">
           <summary class="processing-strip">
             <span class="process-counts">
-              <span>本轮 · <b>1</b> 条</span>
-              <span>已完成 · <b>0</b> 条</span>
-              <span>剩余 · <b>1</b> 条</span>
+              <span>本轮 · <b>{{ process_counts.total }}</b> 条</span>
+              <span>已完成 · <b>{{ process_counts.completed }}</b> 条</span>
+              <span>剩余 · <b>{{ process_counts.remaining }}</b> 条</span>
             </span>
             <span class="process-boundary" aria-hidden="true"></span>
             <span class="process-state">
@@ -119,7 +117,7 @@
           </summary>
           <div class="operation-rows">
             <p class="operation-row processing-row">
-              <span>1/1</span>
+              <span>{{ process_counts.position }}/{{ process_counts.total }}</span>
               <span title="{{ active.title }}">{{ active.title }}</span>
               <span>{{ active.source_type }}</span>
             </p>
@@ -128,22 +126,23 @@
       </section>
     {% endif %}
 
-    {% if waiting %}
+    {% if waiting or stopped %}
+      {% set waiting_rows = waiting if waiting else stopped %}
       <section class="section" data-sync-key="waiting" data-live-status>
-        <h2>等待中</h2>
+        <h2>{{ '等待中' if waiting else '已停止' }}</h2>
         <details class="status-panel compact-panel" data-persist-details="waiting">
           <summary class="compact-summary">
             <span class="summary-signal">
               <img src="{{ url_for('static', filename='icons/state-yellow.svg') }}" alt="">
             </span>
-            <span class="summary-text">{{ waiting|length }} 批；{{ waiting|length }} 条等待中</span>
+            <span class="summary-text">{{ waiting_rows|length }} 条{{ '等待中' if waiting else '未继续处理' }}</span>
             <span class="panel-chevron">
               <img class="closed-chevron" src="{{ url_for('static', filename='icons/chevron-up.svg') }}" alt="">
               <img class="open-chevron" src="{{ url_for('static', filename='icons/chevron-down.svg') }}" alt="">
             </span>
           </summary>
           <div class="operation-rows">
-            {% for item in waiting %}
+            {% for item in waiting_rows %}
               <p class="operation-row waiting-row">
                 <span>1 条</span>
                 <span title="{{ item.title }}">{{ item.title }}</span>
@@ -156,7 +155,7 @@
       </section>
     {% endif %}
 
-    {% if todo or pending_captures %}
+    {% if todo or pending_captures or preparing_members %}
       <section class="section" data-sync-key="todo" data-live-status>
         <h2>待处理</h2>
         {% set failed_count = todo | selectattr('state', 'equalto', 'failed') | list | length %}
@@ -365,7 +364,7 @@
               <span class="knowledge-heading">
                 <span class="knowledge-title-group">
                   <strong>{{ item.title }}</strong>
-                  <small class="knowledge-subtitle">{{ item.subtitle }}</small>
+                  <small class="knowledge-subtitle">{{ '原始资料已保存，等待整理' if item.raw_saved|default(false) else item.subtitle }}</small>
                   {% if item.review_notice %}<small class="knowledge-subtitle">{{ item.review_notice }}</small>{% endif %}
                 </span>
                 <small class="knowledge-meta">
@@ -388,7 +387,7 @@
             </summary>
             <div class="knowledge-body">
               {% if item.source_scope %}<p class="knowledge-meta">来源范围：{{ item.source_scope }}</p>{% endif %}
-              <p class="knowledge-abstract">{{ item.summary }}</p>
+              <p class="knowledge-abstract">{{ '原始资料已保存，等待整理；尚未生成知识内容。' if item.raw_saved|default(false) else item.summary }}</p>
               {% if item.core_points %}
               <div class="knowledge-points core-points">
                 {% for point in item.core_points %}
@@ -416,6 +415,7 @@
                 </div>
               {% endif %}
               <footer class="knowledge-actions">
+                {% if item.hide_operation is defined %}<form action="{{ url_for('collection_visibility',operation=item.hide_operation,action='hide') }}" method="post"><button class="source-link" title="隐藏这项同题任务的{{ item.hide_total }}份投递；不删除原始资料，也不改变停止状态">隐藏此任务</button></form>{% endif %}
                 {% if not item.local_source %}
                 <a
                   class="source-link"
@@ -453,6 +453,7 @@
         {% endfor %}
       </section>
     {% endif %}
+      {% include '_hidden_tasks.html' %}
       {% if wiki_status.visible %}
       <section class="section organization-section" data-sync-key="organization" {% if wiki_status.running %}data-live-status{% endif %} {% if wiki_status.tone %}data-tone="{{ wiki_status.tone }}"{% endif %}>
         <span class="organization-description">
