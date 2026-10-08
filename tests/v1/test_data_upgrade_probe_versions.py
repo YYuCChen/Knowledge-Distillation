@@ -55,6 +55,14 @@ def _prepare(tmp_path, version):
             db.executescript((FIXTURES / 'wiki-schema22.sql').read_text())
         db.execute('PRAGMA foreign_keys=ON')
         db.executescript((FIXTURES / 'upgrade-probe-seed.sql').read_text())
+        db.execute("INSERT INTO confirmation_decisions VALUES(51,'old-revision','manual','继续','waiting_user')")
+        db.execute('''INSERT INTO group_decisions VALUES
+            (51,'old-request','old-group','old-revision','old-selection','old-payload',
+             '{ "state" : "waiting_user" }','{ "human" : "继续" }',?)''', (SENTINEL,))
+        db.execute('''INSERT INTO manual_cards(scope_kind,scope_id,item_id,review_round_id,group_id,
+            lifecycle,ordering_basis,ordering_reason,entered_at,mapping_json)
+            VALUES ('items','independent',51,'old-round','old-group','active','observed',
+                    'explicit synthetic human',?,'{ "human" : "继续" }')''', (SENTINEL,))
         db.execute("INSERT INTO settings VALUES('vault_path',?)", (str(vault),))
         db.execute("INSERT INTO settings VALUES('private_sentinel',?)", (SENTINEL,))
         for ordinal, kind, subject, identity in [(1, 'material', 41, '第三方'), (2, 'capture', 81, '本人附言')]:
@@ -101,7 +109,8 @@ def _read_rows(path, selected=None):
         if selected is None:
             names = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
             selected = {name: tuple(row[1] for row in db.execute(f'PRAGMA table_xinfo("{name}")')) for name in names}
-        return selected, {name: db.execute('SELECT ' + ','.join('"' + col + '"' for col in cols)
+        return selected, {name: db.execute('SELECT rowid,' + ','.join('"' + col + '"' for col in cols)
+            + ',' + ','.join('typeof("' + col + '")' for col in cols)
             + ' FROM "' + name + '" ORDER BY rowid').fetchall() for name, cols in selected.items()}
 
 
@@ -113,7 +122,7 @@ def test_real_sql_versions_preserve_all_original_columns_and_vault(tmp_path, ver
     assert _run(path, report) == 0
     result = json.loads(report.read_text())
     assert result['database']['schema_before'] == version
-    assert result['database']['schema_after'] == 24
+    assert result['database']['schema_after'] == 25
     assert result['legacy']['identity_contract'] == 'all-prior-schema-and-columns-v2'
     assert set(result['legacy']['table_counts_before']) == set(selected)
     assert result['legacy']['table_counts_after'] == {name: len(rows) for name, rows in before.items()}
@@ -123,7 +132,7 @@ def test_real_sql_versions_preserve_all_original_columns_and_vault(tmp_path, ver
     assert result['vault']['unchanged'] and report.stat().st_mode & 0o777 == 0o600
     assert SENTINEL not in report.read_text() and str(vault) not in report.read_text()
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 24
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 25
         assert db.execute('PRAGMA quick_check').fetchall() == [('ok',)]
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
         assert db.execute('SELECT ingestion_contract,source_binding_sha256,relation_binding_sha256 FROM distill_items').fetchall() == [('legacy', None, None)]
@@ -133,6 +142,10 @@ def test_real_sql_versions_preserve_all_original_columns_and_vault(tmp_path, ver
         assert db.execute('SELECT COUNT(*) FROM wiki_outcome_receipts').fetchone()[0] == 0
         assert db.execute('SELECT content FROM source_media').fetchone()[0] == BODY
         assert db.execute('SELECT legacy_material_id FROM media_lifecycle').fetchone()[0] == 40
+        assert db.execute("SELECT count(*) FROM distill_items WHERE state='raw_saved'").fetchone()[0] == 0
+    with database_module.connect(path) as ordinary:
+        with pytest.raises(sqlite3.IntegrityError, match='raw terminal proof unavailable'):
+            ordinary.execute("UPDATE distill_items SET state='raw_saved',phase='done' WHERE item_id=51")
 
 
 @pytest.mark.parametrize('version,declared', [(21, 22), (22, 23), (23, 21)])
@@ -188,25 +201,32 @@ def test_committed_observation_mutation_is_not_hidden_by_wiki_prefix(tmp_path, m
     assert _run(path, report) == 1
     assert json.loads(report.read_text())['error_code'] == 'legacy_changed'
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 24  # No restore claim.
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 25  # No restore claim.
 
 
 @pytest.mark.parametrize('change', ['extra_column', 'drop_guard', 'wrong_default', 'new_event'])
 def test_unapproved_committed_schema_or_backfill_is_rejected(tmp_path, monkeypatch, change):
     path, _, report = _prepare(tmp_path, 23)
     real = probe.initialize
+    observed = {}
     def corrupt(database):
         real(database)
-        with closing(sqlite3.connect(database)) as db:
+        with (database_module.connect(database) if change == 'wrong_default'
+              else closing(sqlite3.connect(database))) as db:
             if change == 'extra_column':
                 db.execute('ALTER TABLE distill_items ADD COLUMN unapproved TEXT')
             elif change == 'drop_guard':
                 db.execute('DROP TRIGGER source_media_ingestion_capture_binding')
             elif change == 'wrong_default':
                 guard = db.execute("SELECT sql FROM sqlite_master WHERE name='distill_items_ingestion_binding_immutable'").fetchone()[0]
+                observed['guard'] = guard
+                assert db.execute("SELECT ingestion_raw_terminal(51,0,'raw_saved','done')").fetchone()[0] == 0
                 db.execute('DROP TRIGGER distill_items_ingestion_binding_immutable')
                 db.execute("UPDATE distill_items SET source_binding_sha256=?", ('a' * 64,))
                 db.execute(guard)  # Restore DDL so only the added-column value is corrupt.
+                assert db.execute('SELECT source_binding_sha256 FROM distill_items WHERE item_id=51').fetchone()[0] == 'a' * 64
+                assert db.execute("SELECT sql FROM sqlite_master WHERE name='distill_items_ingestion_binding_immutable'").fetchone()[0] == guard
+                assert db.execute('PRAGMA user_version').fetchone()[0] == 25
             else:
                 # No fake filesystem proof: an unauthorized backfill is a new
                 # observation on legacy data, with typed guard deliberately absent.
@@ -220,9 +240,14 @@ def test_unapproved_committed_schema_or_backfill_is_rejected(tmp_path, monkeypat
     monkeypatch.setattr(probe, 'initialize', corrupt)
     assert _run(path, report) == 1
     assert json.loads(report.read_text())['error_code'] == 'legacy_changed'
+    if change == 'wrong_default':
+        with closing(sqlite3.connect(path)) as db:
+            assert db.execute('PRAGMA user_version').fetchone()[0] == 25  # Postcheck rejected, not rolled back.
+            assert db.execute('SELECT source_binding_sha256 FROM distill_items WHERE item_id=51').fetchone()[0] == 'a' * 64
+            assert db.execute("SELECT sql FROM sqlite_master WHERE name='distill_items_ingestion_binding_immutable'").fetchone()[0] == observed['guard']
 
 
-def test_postcheck_failure_retains_committed_24_not_restored_claim(tmp_path, monkeypatch):
+def test_postcheck_failure_retains_committed_25_not_restored_claim(tmp_path, monkeypatch):
     path, _, report = _prepare(tmp_path, 22)
     original = probe._snapshot
     def unhealthy(*args, **kwargs):
@@ -234,7 +259,7 @@ def test_postcheck_failure_retains_committed_24_not_restored_claim(tmp_path, mon
     assert _run(path, report) == 1
     assert json.loads(report.read_text()) == {'schema_version': 1, 'ok': False, 'error_code': 'postcheck_failed'}
     with closing(sqlite3.connect(path)) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 24
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 25
 
 
 @pytest.mark.parametrize('change', ['bytes', 'permissions', 'directory'])
@@ -305,3 +330,96 @@ def test_source_digest_distinguishes_text_blob_null_and_empty(tmp_path):
     changed = probe._snapshot(path, vault)
     assert before['legacy_table_counts'] == changed['legacy_table_counts']
     assert before['legacy_digest'] != changed['legacy_digest']
+
+
+@pytest.mark.parametrize('version', [21, 22, 23])
+def test_actual_v25_postcheck_exception_rolls_back_the_whole_version_chain(tmp_path, monkeypatch, version):
+    path, vault, report = _prepare(tmp_path, version)
+    selected, rows = _read_rows(path)
+    before = path.read_bytes()
+    vault_before = probe._digest_tree(vault)
+    with closing(sqlite3.connect(path)) as db:
+        objects = probe._objects(db)
+    actual = database_module._check_v25_preservation
+    def interrupted(db, *args):
+        actual(db, *args)
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE name='distill_items_raw_terminal_proof'").fetchone()
+        raise RuntimeError(SENTINEL)
+    monkeypatch.setattr(database_module, '_check_v25_preservation', interrupted)
+    assert _run(path, report) == 1
+    assert json.loads(report.read_text()) == {'schema_version': 1, 'ok': False, 'error_code': 'migration_failed'}
+    assert path.read_bytes() == before
+    assert _read_rows(path, selected)[1] == rows
+    assert probe._digest_tree(vault) == vault_before
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == version
+        assert probe._objects(db) == objects
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+@pytest.mark.parametrize('change', ['missing', 'proof_udf', 'reopen'])
+def test_committed_v25_terminal_guard_damage_is_rejected(tmp_path, monkeypatch, change):
+    path, _, report = _prepare(tmp_path, 23)
+    actual = probe.initialize
+    def corrupt(database):
+        actual(database)
+        name = 'distill_items_raw_terminal_no_reopen' if change == 'reopen' else 'distill_items_raw_terminal_proof'
+        with closing(sqlite3.connect(database)) as db:
+            sql = db.execute('SELECT sql FROM sqlite_master WHERE name=?', (name,)).fetchone()[0]
+            db.execute('DROP TRIGGER ' + name)
+            if change != 'missing':
+                sql = sql.replace('ingestion_raw_terminal(', 'incorrect_raw_terminal(') if change == 'proof_udf' else sql.replace(' OR NEW.phase IS NOT OLD.phase', '')
+                db.execute(sql)
+            db.commit()
+    monkeypatch.setattr(probe, 'initialize', corrupt)
+    assert _run(path, report) == 1
+    assert json.loads(report.read_text())['error_code'] == 'legacy_changed'
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 25  # Committed, no recovery claim.
+
+
+@pytest.mark.parametrize('change', ['state', 'paired_check', 'table_name'])
+def test_v25_parent_catalog_projection_must_match_exact_approved_transform(tmp_path, monkeypatch, change):
+    # Corrupt the catalog read boundary, not writable_schema or an invented target DB.
+    # Actual initialization still commits 25; this verifies the probe's independent comparison.
+    path, _, report = _prepare(tmp_path, 21)
+    actual = probe._objects
+    def damaged_catalog(db):
+        result = actual(db)
+        if db.execute('PRAGMA user_version').fetchone()[0] == 25:
+            kind, parent, sql = result['distill_items']
+            old, new = {
+                'state': (",'raw_saved'", ''),
+                'paired_check': ("AND ingestion_contract='raw-verified-v1'", 'AND 1'),
+                'table_name': ('CREATE TABLE "distill_items"', 'CREATE TABLE distill_items'),
+            }[change]
+            assert sql.count(old) == 1
+            result['distill_items'] = (kind, parent, sql.replace(old, new, 1))
+        return result
+    monkeypatch.setattr(probe, '_objects', damaged_catalog)
+    assert _run(path, report) == 1
+    assert json.loads(report.read_text())['error_code'] == 'legacy_changed'
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 25
+
+
+def test_target_version_drift_is_rejected_before_initialize(tmp_path, monkeypatch):
+    path, _, report = _prepare(tmp_path, 21)
+    before = path.read_bytes()
+    monkeypatch.setattr(probe, 'SCHEMA_VERSION', 26)
+    monkeypatch.setattr(probe, 'initialize', lambda *_: pytest.fail('must not migrate'))
+    assert _run(path, report) == 1
+    assert json.loads(report.read_text())['error_code'] == 'unsupported_schema'
+    assert path.read_bytes() == before
+
+
+def test_old_fk_definition_drift_is_independently_rejected(tmp_path):
+    path, _, _ = _prepare(tmp_path, 23)
+    with closing(sqlite3.connect(path)) as db:
+        prior = probe._freeze(db, 23)
+    database_module.initialize(path)
+    # Keep all actual schema/rows/indices correct; a stale FK source descriptor must fail.
+    prior['foreign_keys']['submitted_sources'] = ()
+    with closing(sqlite3.connect(path)) as db:
+        with pytest.raises(probe.UpgradeProbeError, match='legacy_changed'):
+            probe._check_after(db, prior)

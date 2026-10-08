@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import stat
 import struct
@@ -21,9 +22,14 @@ DATABASE_NAME = "knowledge.sqlite3"
 VAULT_RELPATH = "synthetic-vault"
 _SHA256_LENGTH = 64
 
-# Frozen schema24 DDL from the approved A2 snapshot; no runtime target database.
+# Frozen schema24 additions plus approved schema25 guards; no runtime target database.
 IDENTITY_CONTRACT = 'all-prior-schema-and-columns-v2'
 _PRIOR_SCHEMAS = (21, 22, 23)
+_APPROVED_TARGET_SCHEMA = 25
+_PARENT_STATE_PATTERN = r"state IN \(\s*'queued',\s*'working',\s*'waiting_user',\s*'succeeded',\s*'failed'\s*\)"
+_PARENT_STATE_V25 = "state IN ('queued','working','waiting_user','succeeded','failed','raw_saved')"
+_PARENT_CHECK_V25 = ", CHECK(state!='raw_saved' OR (phase='done' AND ingestion_contract='raw-verified-v1')))"
+_PARENT_FINAL_NAME = 'CREATE TABLE "distill_items"'
 _APPROVED_DDL = {
     "wiki_tasks": ("table", "wiki_tasks", "CREATE TABLE wiki_tasks (\n        task_id TEXT PRIMARY KEY CHECK (\n            length(task_id) = 32\n            AND task_id NOT GLOB '*[^0-9a-f]*'\n        ),\n        vault_path TEXT NOT NULL CHECK (TRIM(vault_path) != ''),\n        vault_key TEXT NOT NULL CHECK (length(vault_key) = 64),\n        request_kind TEXT NOT NULL CHECK (request_kind IN ('one_batch', 'all')),\n        trigger_source TEXT NOT NULL CHECK (\n            trigger_source IN ('local_web', 'claudian', 'cli')\n        ),\n        backend TEXT NOT NULL CHECK (backend IN ('codex_cli')),\n        model TEXT NOT NULL CHECK (\n            length(model) BETWEEN 1 AND 80\n            AND model NOT GLOB '*[^A-Za-z0-9._-]*'\n        ),\n        effort TEXT NOT NULL CHECK (\n            effort IN ('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')\n        ),\n        kit_version TEXT NOT NULL CHECK (\n            length(kit_version) BETWEEN 1 AND 40\n            AND kit_version NOT GLOB '*[^A-Za-z0-9._-]*'\n        ),\n        kit_manifest_sha256 TEXT NOT NULL CHECK (length(kit_manifest_sha256) = 64),\n        boundary_sha256 TEXT NOT NULL CHECK (length(boundary_sha256) = 64),\n        state TEXT NOT NULL CHECK (\n            state IN (\n                'queued', 'preparing', 'running', 'validating', 'publishing',\n                'succeeded', 'failed'\n            )\n        ),\n        raw_count INTEGER NOT NULL CHECK (raw_count >= 0),\n        batch_count INTEGER NOT NULL CHECK (batch_count >= 0),\n        completed_batch_count INTEGER NOT NULL DEFAULT 0 CHECK (\n            completed_batch_count >= 0 AND completed_batch_count <= batch_count\n        ),\n        error_code TEXT CHECK (error_code IS NULL OR error_code IN ('vault_busy', 'config_required', 'kit_missing', 'kit_drift', 'kit_incompatible', 'protocol_error', 'raw_path_invalid', 'raw_symlink', 'raw_changed', 'runner_unavailable', 'runner_timeout', 'model_unavailable', 'network_error', 'agent_failed', 'validation_failed', 'publish_conflict', 'publish_interrupted', 'readback_failed', 'interrupted', 'recovery_failed', 'internal_error')),\n        recovery_state TEXT NOT NULL DEFAULT 'not_needed' CHECK (\n            recovery_state IN ('not_needed', 'required', 'running', 'succeeded', 'failed')\n        ),\n        recovery_phase TEXT NOT NULL DEFAULT 'none' CHECK (\n            recovery_phase IN ('none', 'staging', 'publishing', 'readback')\n        ),\n        created_at TEXT NOT NULL CHECK (TRIM(created_at) != ''),\n        updated_at TEXT NOT NULL CHECK (TRIM(updated_at) != ''),\n        CHECK ((state = 'failed') = (error_code IS NOT NULL)),\n        CHECK ((recovery_state = 'not_needed') = (recovery_phase = 'none')),\n        UNIQUE(vault_key, boundary_sha256, kit_manifest_sha256, backend, model, effort)\n    )"),
     "wiki_one_unresolved_task_per_vault": ("index", "wiki_tasks", "CREATE UNIQUE INDEX wiki_one_unresolved_task_per_vault\n        ON wiki_tasks(vault_key)\n        WHERE state IN ('queued', 'preparing', 'running', 'validating', 'publishing')"),
@@ -67,6 +73,9 @@ _APPROVED_DDL = {
     "source_media_ingestion_capture_binding": ("trigger", "capture_state", "CREATE TRIGGER source_media_ingestion_capture_binding\n        BEFORE UPDATE OF item_id,audio_path ON capture_state\n        WHEN (EXISTS(SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id\n        AND i.ingestion_contract!='legacy') OR EXISTS(SELECT 1 FROM ingestion_events e\n        WHERE e.subject_kind='capture' AND e.subject_id=OLD.capture_id AND e.contract='raw-verified-v1')) AND (NEW.item_id IS NOT OLD.item_id\n            OR (OLD.audio_path IS NOT NULL AND NEW.audio_path IS NOT OLD.audio_path))\n        BEGIN SELECT RAISE(ABORT,'ingestion capture binding is immutable'); END"),
     "source_media_ingestion_capture_release": ("trigger", "capture_state", "CREATE TRIGGER source_media_ingestion_capture_release\n        BEFORE UPDATE OF audio_released_at ON capture_state\n        WHEN (EXISTS(SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id\n        AND i.ingestion_contract!='legacy') OR EXISTS(SELECT 1 FROM ingestion_events e\n        WHERE e.subject_kind='capture' AND e.subject_id=OLD.capture_id AND e.contract='raw-verified-v1')) AND NEW.audio_released_at IS NOT OLD.audio_released_at\n          AND ingestion_release('capture',OLD.capture_id,OLD.audio_path,NEW.audio_released_at)!=1\n        BEGIN SELECT RAISE(ABORT,'ingestion audio is retained'); END"),
     "source_media_ingestion_capture_no_delete": ("trigger", "capture_state", "CREATE TRIGGER source_media_ingestion_capture_no_delete\n        BEFORE DELETE ON capture_state WHEN (EXISTS(SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id\n        AND i.ingestion_contract!='legacy') OR EXISTS(SELECT 1 FROM ingestion_events e\n        WHERE e.subject_kind='capture' AND e.subject_id=OLD.capture_id AND e.contract='raw-verified-v1'))\n        BEGIN SELECT RAISE(ABORT,'ingestion capture owner is durable'); END"),
+    "distill_items_raw_terminal_no_insert": ("trigger", "distill_items", "CREATE TRIGGER distill_items_raw_terminal_no_insert\n        BEFORE INSERT ON distill_items WHEN NEW.state='raw_saved'\n        BEGIN SELECT RAISE(ABORT,'raw terminal writer required'); END"),
+    "distill_items_raw_terminal_proof": ("trigger", "distill_items", "CREATE TRIGGER distill_items_raw_terminal_proof\n        BEFORE UPDATE ON distill_items WHEN NEW.state='raw_saved' AND OLD.state!='raw_saved'\n        AND (OLD.state!='working' OR OLD.phase NOT IN ('collecting','reviewing')\n            OR NEW.phase!='done' OR NEW.ingestion_contract!='raw-verified-v1'\n            OR NEW.confirmation_json IS NOT NULL OR NEW.dismissed_at IS NOT NULL\n            OR NEW.material_id IS NULL OR NEW.source_binding_sha256 IS NULL\n            OR NEW.relation_binding_sha256 IS NULL\n            OR ingestion_raw_terminal(OLD.item_id,OLD.review_revision,NEW.state,NEW.phase)!=1)\n        BEGIN SELECT RAISE(ABORT,'raw terminal proof unavailable'); END"),
+    "distill_items_raw_terminal_no_reopen": ("trigger", "distill_items", "CREATE TRIGGER distill_items_raw_terminal_no_reopen\n        BEFORE UPDATE OF state,phase ON distill_items WHEN OLD.state='raw_saved'\n        AND (NEW.state IS NOT OLD.state OR NEW.phase IS NOT OLD.phase)\n        BEGIN SELECT RAISE(ABORT,'raw terminal is durable'); END"),
 }
 
 _INGESTION_COLUMNS = (
@@ -293,7 +302,19 @@ def _freeze(connection, version):
                 for row in columns[table] for definition in definitions):
             raise UpgradeProbeError('precheck_failed')
     return {'version': version, 'objects': objects, 'columns': columns,
-            'indices': _indices(connection, columns)}
+            'indices': _indices(connection, columns),
+            'foreign_keys': {name: tuple(tuple(row) for row in connection.execute(
+                f"PRAGMA foreign_key_list({_quote_identifier(name)})")) for name in columns}}
+
+
+def _parent_v25_sql(sql):
+    if not sql.startswith('CREATE TABLE distill_items (') or not sql.rstrip().endswith(')'):
+        raise UpgradeProbeError('legacy_changed')
+    sql, count = re.subn(_PARENT_STATE_PATTERN, _PARENT_STATE_V25, sql)
+    if count != 1:
+        raise UpgradeProbeError('legacy_changed')
+    sql = sql.rstrip()[:-1] + _PARENT_CHECK_V25
+    return sql.replace('CREATE TABLE distill_items', _PARENT_FINAL_NAME, 1)
 
 
 def _without_additions(sql, table):
@@ -306,6 +327,8 @@ def _without_additions(sql, table):
 
 
 def _check_after(connection, prior):
+    if connection.execute('PRAGMA user_version').fetchone()[0] != _APPROVED_TARGET_SCHEMA:
+        raise UpgradeProbeError('legacy_changed')
     actual = _objects(connection)
     expected = {**prior['objects'], **_APPROVED_DDL}
     for name, (table, _) in _AUTO_INDEX_COLUMNS.items():
@@ -316,12 +339,18 @@ def _check_after(connection, prior):
         kind, parent, sql = actual[name]
         if kind == 'table' and name in _ADDITIONS:
             sql = _without_additions(sql, name)
+        if name == 'distill_items':
+            wanted = (wanted[0], wanted[1], _parent_v25_sql(wanted[2]))
         if (kind, parent, sql) != wanted:
             raise UpgradeProbeError('legacy_changed')
     for table, old in prior['columns'].items():
         current = _columns(connection, table)
         additions = _ADDITIONS.get(table, ())
         if current[:len(old)] != old or len(current) != len(old) + len(additions):
+            raise UpgradeProbeError('legacy_changed')
+        fks = tuple(tuple(row) for row in connection.execute(
+            f"PRAGMA foreign_key_list({_quote_identifier(table)})"))
+        if fks != prior['foreign_keys'][table]:
             raise UpgradeProbeError('legacy_changed')
     for table, definitions in _ADDITIONS.items():
         current = _columns(connection, table)
@@ -466,6 +495,8 @@ def run(data_root: Path | str, report: Path | str, *, formal_root: Path | str) -
     except Exception:
         return 1
     try:
+        if SCHEMA_VERSION != _APPROVED_TARGET_SCHEMA:
+            raise UpgradeProbeError('unsupported_schema')
         root = _reject_symlinks(Path(data_root))
         _mode(root, 0o700, directory=True)
         if _related(root, formal):

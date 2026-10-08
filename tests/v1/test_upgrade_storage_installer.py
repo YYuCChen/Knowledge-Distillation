@@ -57,7 +57,7 @@ def _snapshot(path, selected=None):
         columns = selected if selected is not None else {
             name: tuple(db.execute(f'PRAGMA table_xinfo({_quote(name)})'))
             for name, value in objects.items() if value[0] == 'table'}
-        rows, indices = {}, {}
+        rows, indices, typed_rows, foreign_keys = {}, {}, {}, {}
         for name, metadata in columns.items():
             primary = [row[1] for row in sorted(metadata, key=lambda row: row[5]) if row[5]]
             order = ','.join(_quote(key) for key in primary) if primary else 'rowid'
@@ -65,11 +65,17 @@ def _snapshot(path, selected=None):
             if not primary:
                 projection = 'rowid,' + projection
             rows[name] = tuple(db.execute(f'SELECT {projection} FROM {_quote(name)} ORDER BY {order}'))
+            values = ','.join(_quote(row[1]) for row in metadata)
+            types = ','.join(f'typeof({_quote(row[1])})' for row in metadata)
+            typed_rows[name] = tuple(db.execute(
+                f'SELECT rowid,{values},{types} FROM {_quote(name)} ORDER BY rowid'))
+            foreign_keys[name] = tuple(db.execute(f'PRAGMA foreign_key_list({_quote(name)})'))
             for index in db.execute(f'PRAGMA index_list({_quote(name)})'):
                 indices[index[1]] = (index[2], index[3], index[4], tuple(
                     db.execute(f'PRAGMA index_xinfo({_quote(index[1])})')))
         return {'version': db.execute('PRAGMA user_version').fetchone()[0],
-                'objects': objects, 'columns': columns, 'rows': rows, 'indices': indices}
+                'objects': objects, 'columns': columns, 'rows': rows, 'indices': indices,
+                'typed_rows': typed_rows, 'foreign_keys': foreign_keys}
 
 
 def _vault_tree(vault):
@@ -94,6 +100,14 @@ def _sql_fixture(root, version):
             db.executescript((FIXTURES / 'wiki-schema22.sql').read_text(encoding='utf-8'))
         db.execute('PRAGMA foreign_keys=ON')
         db.executescript((FIXTURES / 'upgrade-probe-seed.sql').read_text(encoding='utf-8'))
+        db.execute("INSERT INTO confirmation_decisions VALUES(51,'old-revision','manual','继续','waiting_user')")
+        db.execute('''INSERT INTO group_decisions VALUES
+            (51,'old-request','old-group','old-revision','old-selection','old-payload',
+             '{ "state" : "waiting_user" }','{ "human" : "继续" }',?)''', (TEXT,))
+        db.execute('''INSERT INTO manual_cards(scope_kind,scope_id,item_id,review_round_id,group_id,
+            lifecycle,ordering_basis,ordering_reason,entered_at,mapping_json)
+            VALUES ('items','independent',51,'old-round','old-group','active','observed',
+                    'explicit synthetic human',?,'{ "human" : "继续" }')''', (TEXT,))
         db.execute('INSERT INTO settings VALUES(?,?)', ('vault_path', str(vault)))
         db.execute('INSERT INTO settings VALUES(?,?)', ('synthetic-byte-sentinel', TEXT))
         for ordinal, kind, subject, identity in ((1, 'material', 41, '第三方'),
@@ -135,11 +149,14 @@ def _sql_fixture(root, version):
 
 def _assert_upgraded(state):
     current = _snapshot(state.database, state.before['columns'])
-    assert current['version'] == 24
+    assert current['version'] == 25
     assert current['rows'] == state.before['rows']
+    assert current['typed_rows'] == state.before['typed_rows']
+    assert current['foreign_keys'] == state.before['foreign_keys']
     assert _vault_tree(state.vault) == state.vault_before
     # Reuse the accepted fixed DDL/default/index contract (independently checked
-    # against 42 primary AST expressions), alongside the independent row oracle.
+    # against 45 primary AST expressions and the parent transform), alongside
+    # the independent typed-row/FK oracle.
     # This neither runs the probe nor constructs a target DB as its own oracle.
     with _readonly(state.database) as db:
         approved_probe._check_after(db, state.prior)
@@ -289,7 +306,7 @@ def _case(tmp_path, monkeypatch, version):
             raise
         _assert_upgraded(state)
         state.committed_bytes = database.read_bytes()
-        state.events.append('store-committed-24')
+        state.events.append('store-committed-25')
         state.candidate_alive = True
         (data / '.desktop-instance.json').write_text(json.dumps({'pid': CANDIDATE_PID, 'port': FAKE_PORT}))
         return Process()
@@ -383,7 +400,7 @@ def test_real_store_and_backup_are_accepted_without_changing_originals(tmp_path,
     assert not (state.updates / 'synthetic.zip').exists()
     assert 'old-readonly-reopen' not in state.events
     assert 'terminate-candidate' not in state.events
-    assert state.events.index('verified-real-backup') < state.events.index('store-committed-24')
+    assert state.events.index('verified-real-backup') < state.events.index('store-committed-25')
 
 
 @pytest.mark.parametrize('version', VERSIONS)
@@ -399,7 +416,7 @@ def test_real_migration_transaction_failure_restores_backup_and_old_schema(tmp_p
     _assert_old_readable(state)
     _assert_result(state, 1)
     assert 'verified-migration-rollback' in state.events
-    assert 'store-committed-24' not in state.events
+    assert 'store-committed-25' not in state.events
     assert state.events[-1] == 'old-readonly-reopen'
     assert not (state.updates / 'startup-handshake').exists()
     assert not state.previous.exists()
@@ -418,7 +435,7 @@ def test_committed_store_then_startup_failure_restores_prior_database(tmp_path, 
     assert not state.previous.exists()
     assert state.backup.read_bytes() == state.backup_bytes
     events = state.events
-    assert events.index('store-committed-24') < events.index('synthetic-startup-failure')
+    assert events.index('store-committed-25') < events.index('synthetic-startup-failure')
     assert events.index('terminate-candidate') < events.index('wait-candidate') < events.index('copy-backup-to-stage')
     assert events.index('copy-backup-to-stage') < events.index('restore-stage-synced') < events.index('database-backup-published')
     assert events.index('database-backup-published') < events.index('database-parent-synced') < events.index('old-bundle-restored')
@@ -443,7 +460,7 @@ def test_restore_copy_failure_is_not_reported_as_old_database_recovered(tmp_path
     with pytest.raises(PermissionError, match='synthetic-restore-copy-refused'):
         installer.run(state.plan)
     _assert_result(state, 1)
-    _assert_upgraded(state)  # DB is still 24; this is NOT a restored old schema.
+    _assert_upgraded(state)  # DB is still 25; this is NOT a restored old schema.
     assert state.database.read_bytes() == state.committed_bytes
     assert (state.target / 'version').read_text() == 'new'
     assert (state.previous / 'version').read_text() == 'old'
@@ -520,10 +537,37 @@ def test_accepted_cleanup_failure_preserves_new_schema_and_new_work(tmp_path, mo
     assert 'old-readonly-reopen' not in state.events and 'terminate-candidate' not in state.events
     assert 'accepted-new-work' in state.events
     with _readonly(state.database) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 24
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 25
         assert db.execute('SELECT value FROM settings WHERE key=?', ('synthetic-after-accept',)).fetchone() == (TEXT,)
         approved_probe._check_after(db, state.prior)
     current = _snapshot(state.database, state.before['columns'])['rows']
     assert set(current['settings']) == set(state.before['rows']['settings']) | {('synthetic-after-accept', TEXT)}
     assert {key: value for key, value in current.items() if key != 'settings'} == {
         key: value for key, value in state.before['rows'].items() if key != 'settings'}
+    final = _snapshot(state.database, state.before['columns'])
+    assert final['foreign_keys'] == state.before['foreign_keys']
+    assert {k: v for k, v in final['typed_rows'].items() if k != 'settings'} == {
+        k: v for k, v in state.before['typed_rows'].items() if k != 'settings'}
+
+
+@pytest.mark.parametrize('version', VERSIONS)
+def test_actual_v25_postcheck_failure_restores_backup_before_old_bundle(tmp_path, monkeypatch, version):
+    state = _case(tmp_path, monkeypatch, version)
+    actual = database_module._check_v25_preservation
+    def interrupted(db, *args):
+        actual(db, *args)
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE name='distill_items_raw_terminal_proof'").fetchone()
+        raise RuntimeError('synthetic-migration-abort')
+    monkeypatch.setattr(database_module, '_check_v25_preservation', interrupted)
+    assert installer.run(state.plan) == 1
+    _assert_old_readable(state)
+    _assert_result(state, 1)
+    assert 'verified-migration-rollback' in state.events
+    assert 'store-committed-25' not in state.events
+    assert not (state.updates / 'startup-handshake').exists()
+    assert state.backup.read_bytes() == state.backup_bytes
+    assert not state.previous.exists()
+    assert state.events.index('restore-stage-synced') < state.events.index('database-backup-published')
+    assert state.events.index('database-backup-published') < state.events.index('database-parent-synced')
+    assert state.events.index('database-parent-synced') < state.events.index('old-bundle-restored')
+    assert state.events[-1] == 'old-readonly-reopen'
