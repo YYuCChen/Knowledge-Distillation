@@ -13,6 +13,7 @@ from .database import connect, initialize, INGESTION_CONTRACT
 from .confirmation_schema import sync as _sync_manual_cards
 from .domain import CapturedMaterial, Knowledge, SourceFact, knowledge_to_dict
 from .source_files import FILE_KINDS, copy_path, read_copy, retain_copy, open_copy, SourceCopyError
+from .source_files import read_bound_copy, retain_bound_copy
 
 
 class SourceReviewConflict(ValueError):
@@ -69,7 +70,8 @@ class Store:
         with connect(self.path) as connection:
             rows = connection.execute("""SELECT ss.*,i.ingestion_contract FROM submitted_sources ss
                 JOIN distill_items i USING(item_id)
-                WHERE input_kind IN ('markdown','pdf','epub') AND content IS NOT NULL""").fetchall()
+                WHERE input_kind IN ('markdown','pdf','epub') AND content IS NOT NULL
+                  AND i.ingestion_contract='legacy' AND ss.binding_scope='legacy'""").fetchall()
         for row in rows:
             if row['ingestion_contract'] == 'legacy' and row['retain_until'] is not None and row['retain_until'] <= _now():
                 continue
@@ -97,7 +99,7 @@ class Store:
                 _same_ingestion_binding(connection, prior, binding)
                 return prior
             existing = connection.execute(
-                "SELECT item_id, input_label FROM submitted_sources WHERE input_kind = ? AND input_key = ?",
+                "SELECT item_id, input_label FROM submitted_sources WHERE input_kind = ? AND input_key = ? AND binding_scope='legacy'",
                 (source.source_kind, source.source_key),
             ).fetchone()
             if existing is not None:
@@ -124,6 +126,138 @@ class Store:
                  _json(source.metadata), source.content),
             )
             bind_item(connection, receipt_key, item_id)
+            return item_id
+
+    @staticmethod
+    def _local_scope(binding):
+        from .intake_binding import ENVELOPE_CONTRACT
+        value = _json([binding.source_binding_sha256, binding.relation_binding_sha256])
+        return ENVELOPE_CONTRACT + ':' + hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+    def _local_source(self, db, item_id, *, envelope_json):
+        from .file_sources import SubmittedSource
+        from .intake_binding import IntakeBindingError, validate_local_binding
+        row = db.execute('SELECT * FROM submitted_sources WHERE item_id=?', (item_id,)).fetchone()
+        owner = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+        if (row is None or owner is None or row['binding_scope'] == 'legacy'
+                or owner['ingestion_contract'] != INGESTION_CONTRACT
+                or row['input_kind'] not in {'markdown', 'pdf', 'epub', 'direct_text'}
+                or type(row['content']) is not bytes):
+            raise IntakeBindingError('intake_binding_mismatch')
+        try:
+            metadata = json.loads(row['input_metadata'])
+            if _json(metadata) != row['input_metadata']:
+                raise ValueError('noncanonical metadata')
+        except (ValueError, TypeError, UnicodeError):
+            raise IntakeBindingError() from None
+        content = row['content']
+        stored = SubmittedSource(row['input_kind'], row['input_key'], row['input_label'], content, metadata)
+        binding = validate_local_binding(stored, envelope_json)
+        expected_bytes = json.loads(binding.source_json)['input']['content_byte_count']
+        if row['input_kind'] in FILE_KINDS:
+            content = read_bound_copy(self.path.parent, row['input_kind'], row['input_key'], row['input_label'],
+                                      expected_bytes=expected_bytes)
+            if content != row['content']:
+                raise IntakeBindingError('intake_binding_mismatch')
+        return SubmittedSource(row['input_kind'], row['input_key'], row['input_label'], content, metadata), row, owner
+
+    def _local_intake_binding(self, db, item_id):
+        """Same-connection helper: no legacy envelope reconstruction or raw proof."""
+        from .intake_binding import validate_local_binding, IntakeBindingError
+        events = db.execute("""SELECT * FROM ingestion_events WHERE item_id=?
+            AND kind='raw_pending' AND json_extract(detail_json,'$.code')='intake_frozen'""", (item_id,)).fetchall()
+        if len(events) != 1:
+            raise IntakeBindingError('intake_binding_mismatch')
+        event = events[0]
+        try:
+            detail = json.loads(event['detail_json'])
+            envelope = detail['manifest']['intake_envelope_json']
+        except (ValueError, TypeError, KeyError):
+            raise IntakeBindingError() from None
+        source, row, owner = self._local_source(db, item_id, envelope_json=envelope)
+        binding = validate_local_binding(source, envelope)
+        if (envelope != binding.envelope_json or row['binding_scope'] != self._local_scope(binding)
+                or owner['submitted_url'] != source.label
+                or owner['source_binding_sha256'] != binding.source_binding_sha256
+                or owner['relation_binding_sha256'] != binding.relation_binding_sha256):
+            raise IntakeBindingError('intake_binding_mismatch')
+        expected = self._local_event(item_id, binding)
+        actual = tuple(event[k] for k in ('event_key','contract','subject_kind','subject_id',
+                                         'item_id','binding_sha256','detail_json'))
+        if actual != expected:
+            raise IntakeBindingError('intake_binding_mismatch')
+        return source, binding
+
+    @staticmethod
+    def _local_event(item_id, binding):
+        detail = _json({'code': 'intake_frozen', 'manifest': {'intake_envelope_json': binding.envelope_json},
+                       'source_binding_sha256': binding.source_binding_sha256,
+                       'relation_binding_sha256': binding.relation_binding_sha256})
+        digest = hashlib.sha256(detail.encode('utf-8')).hexdigest()
+        key = hashlib.sha256(_json([INGESTION_CONTRACT, item_id, 'raw_pending', digest]).encode('utf-8')).hexdigest()
+        return key, INGESTION_CONTRACT, 'item', item_id, item_id, digest, detail
+
+    def local_intake_binding(self, item_id):
+        """Return (real SubmittedSource, validated LocalIntakeBinding), read-only."""
+        if type(item_id) is not int or item_id <= 0:
+            from .intake_binding import IntakeBindingError
+            raise IntakeBindingError()
+        with connect(self.path) as db:
+            db.execute('BEGIN')
+            return self._local_intake_binding(db, item_id)
+
+    def submit_local_bound_source(self, source, *, envelope_json):
+        from .intake_binding import validate_local_binding, IntakeBindingError
+        from .file_sources import SubmittedSource
+        # Validate first, then freeze the caller's mutable metadata through the
+        # validated descriptor; never retain the caller's Mapping by reference.
+        binding = validate_local_binding(source, envelope_json)
+        value = json.loads(binding.source_json)['input']
+        frozen = SubmittedSource(value['input_kind'], value['input_key'], value['input_label'],
+                                 source.content, value['metadata'])
+        binding = validate_local_binding(frozen, binding.envelope_json)
+        scope = self._local_scope(binding)
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            existing = db.execute('''SELECT item_id FROM submitted_sources
+                WHERE input_kind=? AND input_key=? AND binding_scope=?''',
+                (frozen.source_kind, frozen.source_key, scope)).fetchone()
+            if existing:
+                actual, saved = self._local_intake_binding(db, existing['item_id'])
+                if saved != binding or actual != frozen:
+                    raise IntakeBindingError('intake_binding_mismatch')
+                return existing['item_id']
+            if frozen.source_kind in FILE_KINDS:
+                retain_bound_copy(self.path.parent, frozen.source_kind, frozen.source_key, frozen.label, frozen.content)
+            now = _now()
+            item_id = db.execute('''INSERT INTO distill_items(submitted_url,state,phase,queued_at,
+                created_at,updated_at,ingestion_contract,source_binding_sha256,relation_binding_sha256)
+                VALUES (?,'queued','collecting',?,?,?,?,?,?)''',
+                (frozen.label, now, now, now, INGESTION_CONTRACT,
+                 binding.source_binding_sha256, binding.relation_binding_sha256)).lastrowid
+            values = (item_id, scope, frozen.source_kind, frozen.source_key, frozen.label,
+                      _json(frozen.metadata), frozen.content)
+            db.create_function('local_intake_insert', 7, lambda *args: int(args == values and db.in_transaction))
+            try:
+                db.execute('''INSERT INTO submitted_sources(item_id,binding_scope,input_kind,input_key,
+                    input_label,input_metadata,content) VALUES (?,?,?,?,?,?,?)''', values)
+            finally:
+                db.create_function('local_intake_insert', 7, lambda *_: 0)
+            actual, row, owner = self._local_source(db, item_id, envelope_json=binding.envelope_json)
+            verified = validate_local_binding(actual, binding.envelope_json)
+            if verified != binding or row['binding_scope'] != scope or (
+                    owner['source_binding_sha256'], owner['relation_binding_sha256']) != (
+                    binding.source_binding_sha256, binding.relation_binding_sha256):
+                raise IntakeBindingError('intake_binding_mismatch')
+            event = self._local_event(item_id, binding)
+            db.create_function('local_intake_event', 7, lambda *args: int(args == event and db.in_transaction))
+            try:
+                db.execute('''INSERT INTO ingestion_events(event_key,contract,subject_kind,subject_id,
+                    item_id,binding_sha256,detail_json,kind,created_at) VALUES (?,?,?,?,?,?,?,'raw_pending',?)''',
+                    (*event, now))
+            finally:
+                db.create_function('local_intake_event', 7, lambda *_: 0)
+            self._local_intake_binding(db, item_id)
             return item_id
 
     def submitted_source(self, item_id: int):

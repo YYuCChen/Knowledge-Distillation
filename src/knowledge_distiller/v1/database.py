@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 INGESTION_CONTRACT = 'raw-verified-v1'
 # These are process bindings, not filesystem verification certificates.
 INGESTION_COLUMNS = (
@@ -181,6 +181,8 @@ def connect(path: Path, *, timeout: float = 5) -> Iterator[sqlite3.Connection]:
     connection.create_function('ingestion_proof', 3, lambda *_: 0)
     connection.create_function('ingestion_release', 4, lambda *_: 0)
     connection.create_function('ingestion_raw_terminal', 4, lambda *_: 0)
+    connection.create_function('local_intake_insert', 7, lambda *_: 0)
+    connection.create_function('local_intake_event', 7, lambda *_: 0)
     try:
         yield connection
         connection.commit()
@@ -195,7 +197,7 @@ def initialize(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with connect(path) as connection:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version < 25:
+        if version < 26:
             # A parent-table rebuild preserves all ids. Disable enforcement only
             # for this migration connection; check every FK before atomic commit.
             connection.execute("PRAGMA foreign_keys = OFF")
@@ -227,7 +229,7 @@ def initialize(path: Path) -> None:
             connection.execute(SUBMITTED_SCHEMA)
             connection.execute("ALTER TABLE source_facts ADD COLUMN lineage_json TEXT NOT NULL DEFAULT '{}'")
             connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, SCHEMA_VERSION):
+        elif version not in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, SCHEMA_VERSION):
             raise RuntimeError(f"unsupported database version: {version}")
 
         if version < 6:
@@ -449,11 +451,15 @@ def initialize(path: Path) -> None:
                 connection.execute('BEGIN IMMEDIATE')
             migrate_v25(connection)
             connection.execute('PRAGMA user_version = 25')
+        if version < 26:
+            if not connection.in_transaction:
+                connection.execute('BEGIN IMMEDIATE')
+            migrate_v26(connection)
+            connection.execute('PRAGMA user_version = 26')
             connection.commit()
             connection.execute('PRAGMA foreign_keys = ON')
             if connection.execute('PRAGMA foreign_keys').fetchone()[0] != 1:
-                # Commit already happened: do not claim a post-commit failure restored 24.
-                raise RuntimeError('raw terminal migration committed; FK re-enable failed')
+                raise RuntimeError('local intake migration committed; FK re-enable failed')
 
 
 RAW_OWNER_COLUMNS = (
@@ -599,6 +605,38 @@ def migrate_v25(db):
     _check_v25_preservation(db, before, catalog, parent)
 
 
+OBSERVATION_V24_SQL = """CREATE TRIGGER IF NOT EXISTS ingestion_events_observation_typed
+        BEFORE INSERT ON ingestion_events WHEN NEW.kind IN ('source_ready','raw_pending')
+          AND COALESCE(NOT (
+            NEW.subject_kind='item' AND NEW.subject_id=NEW.item_id
+            AND EXISTS (SELECT 1 FROM distill_items i WHERE i.item_id=NEW.item_id
+                        AND i.ingestion_contract=NEW.contract
+                        AND i.source_binding_sha256=json_extract(NEW.detail_json,'$.source_binding_sha256')
+                        AND i.relation_binding_sha256=json_extract(NEW.detail_json,'$.relation_binding_sha256'))
+            AND (SELECT count(*) FROM json_each(NEW.detail_json))=4
+            AND (SELECT count(DISTINCT key) FROM json_each(NEW.detail_json))=4
+            AND NOT EXISTS (SELECT 1 FROM json_each(NEW.detail_json)
+                            WHERE key NOT IN ('code','manifest','source_binding_sha256','relation_binding_sha256'))
+            AND json_type(NEW.detail_json,'$.manifest')='object'
+            AND (SELECT count(*) FROM json_each(NEW.detail_json,'$.manifest'))=2
+            AND (SELECT count(DISTINCT key) FROM json_each(NEW.detail_json,'$.manifest'))=2
+            AND NOT EXISTS (SELECT 1 FROM json_each(NEW.detail_json,'$.manifest')
+                            WHERE key NOT IN ('source_fact_id','snapshot_sha256'))
+            AND ((NEW.kind='source_ready' AND json_extract(NEW.detail_json,'$.code')='source_fact_ready')
+                 OR (NEW.kind='raw_pending' AND json_extract(NEW.detail_json,'$.code')
+                     IN ('context_pending','readback_pending','writer_pending')))
+            AND ((json_type(NEW.detail_json,'$.manifest.source_fact_id')='null'
+                  AND json_type(NEW.detail_json,'$.manifest.snapshot_sha256')='null'
+                  AND NEW.kind='raw_pending')
+                 OR (json_type(NEW.detail_json,'$.manifest.source_fact_id')='integer'
+                     AND json_extract(NEW.detail_json,'$.manifest.source_fact_id')>0
+                     AND json_type(NEW.detail_json,'$.manifest.snapshot_sha256')='text'
+                     AND length(json_extract(NEW.detail_json,'$.manifest.snapshot_sha256'))=64
+                     AND json_extract(NEW.detail_json,'$.manifest.snapshot_sha256') NOT GLOB '*[^0-9a-f]*'))
+          ),1)
+        BEGIN SELECT RAISE(ABORT,'ingestion observation invalid'); END"""
+
+
 def migrate_v24(connection: sqlite3.Connection) -> None:
     """Add inert process storage; do not backfill proof or touch original bytes."""
     for table in ('distill_items', 'collection_operations'):
@@ -642,36 +680,7 @@ def migrate_v24(connection: sqlite3.Connection) -> None:
         created_at TEXT NOT NULL CHECK(trim(created_at)!='')
     )""")
     connection.execute('CREATE INDEX IF NOT EXISTS ingestion_events_subject ON ingestion_events(subject_kind,subject_id,event_id)')
-    connection.execute("""CREATE TRIGGER IF NOT EXISTS ingestion_events_observation_typed
-        BEFORE INSERT ON ingestion_events WHEN NEW.kind IN ('source_ready','raw_pending')
-          AND COALESCE(NOT (
-            NEW.subject_kind='item' AND NEW.subject_id=NEW.item_id
-            AND EXISTS (SELECT 1 FROM distill_items i WHERE i.item_id=NEW.item_id
-                        AND i.ingestion_contract=NEW.contract
-                        AND i.source_binding_sha256=json_extract(NEW.detail_json,'$.source_binding_sha256')
-                        AND i.relation_binding_sha256=json_extract(NEW.detail_json,'$.relation_binding_sha256'))
-            AND (SELECT count(*) FROM json_each(NEW.detail_json))=4
-            AND (SELECT count(DISTINCT key) FROM json_each(NEW.detail_json))=4
-            AND NOT EXISTS (SELECT 1 FROM json_each(NEW.detail_json)
-                            WHERE key NOT IN ('code','manifest','source_binding_sha256','relation_binding_sha256'))
-            AND json_type(NEW.detail_json,'$.manifest')='object'
-            AND (SELECT count(*) FROM json_each(NEW.detail_json,'$.manifest'))=2
-            AND (SELECT count(DISTINCT key) FROM json_each(NEW.detail_json,'$.manifest'))=2
-            AND NOT EXISTS (SELECT 1 FROM json_each(NEW.detail_json,'$.manifest')
-                            WHERE key NOT IN ('source_fact_id','snapshot_sha256'))
-            AND ((NEW.kind='source_ready' AND json_extract(NEW.detail_json,'$.code')='source_fact_ready')
-                 OR (NEW.kind='raw_pending' AND json_extract(NEW.detail_json,'$.code')
-                     IN ('context_pending','readback_pending','writer_pending')))
-            AND ((json_type(NEW.detail_json,'$.manifest.source_fact_id')='null'
-                  AND json_type(NEW.detail_json,'$.manifest.snapshot_sha256')='null'
-                  AND NEW.kind='raw_pending')
-                 OR (json_type(NEW.detail_json,'$.manifest.source_fact_id')='integer'
-                     AND json_extract(NEW.detail_json,'$.manifest.source_fact_id')>0
-                     AND json_type(NEW.detail_json,'$.manifest.snapshot_sha256')='text'
-                     AND length(json_extract(NEW.detail_json,'$.manifest.snapshot_sha256'))=64
-                     AND json_extract(NEW.detail_json,'$.manifest.snapshot_sha256') NOT GLOB '*[^0-9a-f]*'))
-          ),1)
-        BEGIN SELECT RAISE(ABORT,'ingestion observation invalid'); END""")
+    connection.execute(OBSERVATION_V24_SQL)
     for action in ('UPDATE', 'DELETE'):
         connection.execute(f"""CREATE TRIGGER IF NOT EXISTS ingestion_events_no_{action.lower()}
             BEFORE {action} ON ingestion_events
@@ -692,3 +701,135 @@ def migrate_v24(connection: sqlite3.Connection) -> None:
     migrate_outcome_storage(connection)
     from .media_lifecycle import protect_ingestion
     protect_ingestion(connection)
+
+
+# Historical SUBMITTED_SCHEMA remains the input for earlier migrations.
+SUBMITTED_SCHEMA_V26 = SUBMITTED_SCHEMA.replace("'epub'", "'epub', 'image'").replace(
+    '    UNIQUE(input_kind, input_key)',
+    "    binding_scope TEXT NOT NULL DEFAULT 'legacy' CHECK(typeof(binding_scope)='text'),\n"
+    '    UNIQUE(input_kind, input_key, binding_scope)')
+LOCAL_EVENT_INDEX = """CREATE UNIQUE INDEX ingestion_events_local_owner ON ingestion_events(item_id)
+    WHERE kind='raw_pending' AND json_extract(detail_json,'$.code')='intake_frozen'"""
+_LOCAL_OBSERVATION = """NEW.kind='raw_pending' AND NEW.subject_kind='item'
+            AND NEW.subject_id=NEW.item_id AND json_extract(NEW.detail_json,'$.code')='intake_frozen'
+            AND (SELECT count(*) FROM json_each(NEW.detail_json))=4
+            AND (SELECT count(DISTINCT key) FROM json_each(NEW.detail_json))=4
+            AND NOT EXISTS(SELECT 1 FROM json_each(NEW.detail_json)
+                WHERE key NOT IN ('code','manifest','source_binding_sha256','relation_binding_sha256'))
+            AND json_type(NEW.detail_json,'$.manifest')='object'
+            AND (SELECT count(*) FROM json_each(NEW.detail_json,'$.manifest'))=1
+            AND json_type(NEW.detail_json,'$.manifest.intake_envelope_json')='text'
+            AND local_intake_event(NEW.event_key,NEW.contract,NEW.subject_kind,NEW.subject_id,
+                NEW.item_id,NEW.binding_sha256,NEW.detail_json)=1"""
+OBSERVATION_V26_SQL = OBSERVATION_V24_SQL.replace(
+    'CREATE TRIGGER IF NOT EXISTS', 'CREATE TRIGGER', 1).replace(
+    'AND COALESCE(NOT (', 'AND COALESCE(NOT ((', 1).replace(
+    '          ),1)', '          ) OR (' + _LOCAL_OBSERVATION + ')),1)', 1)
+
+
+def _stored_ddl(statement):
+    return statement.strip().rstrip(';')
+
+
+def migrate_v26(db):
+    """One input-table rebuild; immutable old evidence is never rebound."""
+    from .media_lifecycle import OLD_INPUT_GUARDS, LOCAL_INPUT_GUARDS
+    if not db.in_transaction or db.execute('PRAGMA foreign_keys').fetchone()[0] != 0:
+        raise RuntimeError('local intake migration connection required')
+    catalog = {tuple(r[:2]): tuple(r[2:]) for r in db.execute(
+        'SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name')}
+    old_sql = catalog.get(('table', 'submitted_sources'), (None, None))[1]
+    historical = _stored_ddl(SUBMITTED_SCHEMA.replace("'epub'", "'epub', 'image'"))
+    if old_sql not in (historical, historical.replace('CREATE TABLE submitted_sources',
+                                                     'CREATE TABLE "submitted_sources"', 1)):
+        raise RuntimeError('local intake migration unsupported input DDL')
+    before = _migration_inventory(db)
+    columns = before['submitted_sources'][0]
+    names = tuple(c[1] for c in columns)
+    if names != ('item_id', 'input_kind', 'input_key', 'input_label', 'input_metadata',
+                 'content', 'retain_until', 'retryable') or any(c[6] for c in columns):
+        raise RuntimeError('local intake migration unsupported input columns')
+    if before['submitted_sources'][3] != ((0, 0, 'distill_items', 'item_id', 'item_id',
+                                         'NO ACTION', 'NO ACTION', 'NONE'),):
+        raise RuntimeError('local intake migration unsupported input FK')
+    if before['submitted_sources'][4] != ((0, 'sqlite_autoindex_submitted_sources_1', 1, 'u', 0),):
+        raise RuntimeError('local intake migration unsupported input indexes')
+    if any(fk[2] == 'submitted_sources' for value in before.values() for fk in value[3]):
+        raise RuntimeError('local intake migration unsupported incoming FK')
+    expected_guards = {s.split()[5]: _stored_ddl(s).replace('CREATE TRIGGER IF NOT EXISTS',
+                                                          'CREATE TRIGGER', 1)
+                       for s in OLD_INPUT_GUARDS}
+    dependent = {}
+    for (kind, name), (table, sql) in catalog.items():
+        if kind in ('trigger', 'view', 'index') and (table == 'submitted_sources' or
+                (sql and re.search(r'\bsubmitted_sources\b', sql, re.IGNORECASE))):
+            if kind == 'index' and sql is None and name == 'sqlite_autoindex_submitted_sources_1':
+                continue
+            if kind != 'trigger' or name not in expected_guards or sql != expected_guards[name]:
+                raise RuntimeError('local intake migration unsupported dependent object')
+            dependent[name] = sql
+    if set(dependent) != set(expected_guards):
+        raise RuntimeError('local intake migration missing input guards')
+    if catalog.get(('trigger', 'ingestion_events_observation_typed'), (None, None))[1] != (
+            _stored_ddl(OBSERVATION_V24_SQL).replace('CREATE TRIGGER IF NOT EXISTS', 'CREATE TRIGGER', 1)):
+        raise RuntimeError('local intake migration unsupported observation guard')
+    additions = {('trigger', s.split()[2]) for s in LOCAL_INPUT_GUARDS} | {
+        ('index', 'ingestion_events_local_owner')}
+    if any(key in catalog for key in additions) or ('table', 'submitted_sources_v26') in catalog:
+        raise RuntimeError('local intake migration reserved name collision')
+    if db.execute("""SELECT 1 FROM submitted_sources WHERE typeof(item_id)!='integer'
+        OR typeof(input_kind)!='text' OR typeof(input_key)!='text' OR typeof(input_label)!='text'
+        OR typeof(input_metadata)!='text' OR typeof(content) NOT IN ('blob','null')
+        OR typeof(retain_until) NOT IN ('text','null') OR typeof(retryable)!='integer'
+        OR retryable NOT IN (0,1) LIMIT 1""").fetchone():
+        raise RuntimeError('local intake migration invalid input types')
+    quoted_names = ','.join(_quoted(n) for n in names)
+    old_rows = [tuple(r) for r in db.execute(f'SELECT {quoted_names} FROM submitted_sources ORDER BY item_id')]
+    db.execute(SUBMITTED_SCHEMA_V26.replace('CREATE TABLE submitted_sources',
+                                            'CREATE TABLE submitted_sources_v26', 1))
+    db.execute(f'INSERT INTO submitted_sources_v26({quoted_names}) SELECT {quoted_names} FROM submitted_sources')
+    for name in dependent:
+        db.execute(f'DROP TRIGGER {_quoted(name)}')
+    db.execute('DROP TABLE submitted_sources')
+    db.execute('ALTER TABLE submitted_sources_v26 RENAME TO submitted_sources')
+    for sql in dependent.values():
+        db.execute(sql)
+    for sql in LOCAL_INPUT_GUARDS:
+        db.execute(sql)
+    db.execute('DROP TRIGGER ingestion_events_observation_typed')
+    db.execute(OBSERVATION_V26_SQL)
+    db.execute(LOCAL_EVENT_INDEX)
+    after = _migration_inventory(db)
+    for table, prior in before.items():
+        if table == 'submitted_sources':
+            continue
+        current_inventory = after[table]
+        if table == 'ingestion_events':
+            prior_indexes = {r[1:] for r in prior[4]}
+            current_indexes = {r[1:] for r in current_inventory[4]}
+            if (current_inventory[:4] != prior[:4] or current_indexes != prior_indexes | {
+                    ('ingestion_events_local_owner', 1, 'c', 1)}):
+                raise RuntimeError('local intake migration changed old events')
+        elif current_inventory != prior:
+            raise RuntimeError('local intake migration changed another domain')
+    if old_rows != [tuple(r) for r in db.execute(f'SELECT {quoted_names} FROM submitted_sources ORDER BY item_id')]:
+        raise RuntimeError('local intake migration changed old inputs')
+    if db.execute("SELECT 1 FROM submitted_sources WHERE binding_scope!='legacy' LIMIT 1").fetchone():
+        raise RuntimeError('local intake migration rebound old inputs')
+    current = {tuple(r[:2]): tuple(r[2:]) for r in db.execute(
+        'SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name')}
+    for key, value in catalog.items():
+        if key not in {('table', 'submitted_sources'), ('trigger', 'ingestion_events_observation_typed')} and current.get(key) != value:
+            raise RuntimeError('local intake migration changed old DDL')
+    expected_table = _stored_ddl(SUBMITTED_SCHEMA_V26).replace(
+        'CREATE TABLE submitted_sources', 'CREATE TABLE "submitted_sources"', 1)
+    if current[('table', 'submitted_sources')][1] != expected_table or set(current)-set(catalog) != additions:
+        raise RuntimeError('local intake migration unexpected DDL')
+    for statement in (*LOCAL_INPUT_GUARDS, OBSERVATION_V26_SQL):
+        name = statement.split()[2]
+        if current[('trigger', name)][1] != _stored_ddl(statement):
+            raise RuntimeError('local intake migration unexpected guard')
+    if current[('index', 'ingestion_events_local_owner')][1] != _stored_ddl(LOCAL_EVENT_INDEX):
+        raise RuntimeError('local intake migration unexpected unique index')
+    if db.execute('PRAGMA foreign_key_check').fetchone() is not None or db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+        raise RuntimeError('local intake migration integrity failed')

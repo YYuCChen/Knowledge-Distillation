@@ -68,6 +68,48 @@ def _legacy_owners(db):
         WHERE owner.material_id=m.material_id AND owner.ingestion_contract!='legacy')"""
 
 
+OLD_INPUT_GUARDS = (
+    """CREATE TRIGGER IF NOT EXISTS submitted_sources_ingestion_no_release
+        BEFORE UPDATE OF content,input_metadata ON submitted_sources
+        WHEN EXISTS (SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id
+                     AND i.ingestion_contract!='legacy')
+          AND (NEW.content IS NOT OLD.content OR NEW.input_metadata IS NOT OLD.input_metadata)
+        BEGIN SELECT RAISE(ABORT,'ingestion input is retained'); END""",
+    """CREATE TRIGGER IF NOT EXISTS submitted_sources_ingestion_no_delete
+        BEFORE DELETE ON submitted_sources
+        WHEN EXISTS (SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id
+                     AND i.ingestion_contract!='legacy')
+        BEGIN SELECT RAISE(ABORT,'ingestion input is retained'); END""",
+    """CREATE TRIGGER IF NOT EXISTS submitted_sources_ingestion_owner_immutable
+        BEFORE UPDATE OF item_id ON submitted_sources
+        WHEN NEW.item_id IS NOT OLD.item_id AND EXISTS (
+            SELECT 1 FROM distill_items i WHERE i.item_id IN (OLD.item_id,NEW.item_id)
+            AND i.ingestion_contract!='legacy')
+        BEGIN SELECT RAISE(ABORT,'ingestion input owner is immutable'); END""",
+)
+
+
+LOCAL_INPUT_GUARDS = (
+    '''CREATE TRIGGER submitted_sources_local_insert BEFORE INSERT ON submitted_sources
+        WHEN NEW.binding_scope!='legacy' AND (
+          typeof(NEW.binding_scope)!='text' OR
+          local_intake_insert(NEW.item_id,NEW.binding_scope,NEW.input_kind,NEW.input_key,
+                             NEW.input_label,NEW.input_metadata,NEW.content)!=1)
+        BEGIN SELECT RAISE(ABORT,'local intake input unverified'); END''',
+    '''CREATE TRIGGER submitted_sources_local_tuple BEFORE UPDATE ON submitted_sources
+        WHEN (OLD.binding_scope!='legacy' OR NEW.binding_scope!='legacy') AND (
+          NEW.item_id IS NOT OLD.item_id OR NEW.binding_scope IS NOT OLD.binding_scope
+          OR NEW.input_kind IS NOT OLD.input_kind OR NEW.input_key IS NOT OLD.input_key
+          OR NEW.input_label IS NOT OLD.input_label OR NEW.input_metadata IS NOT OLD.input_metadata
+          OR NEW.content IS NOT OLD.content OR NEW.retain_until IS NOT OLD.retain_until
+          OR NEW.retryable IS NOT OLD.retryable)
+        BEGIN SELECT RAISE(ABORT,'local intake input is immutable'); END''',
+    '''CREATE TRIGGER submitted_sources_local_no_delete BEFORE DELETE ON submitted_sources
+        WHEN OLD.binding_scope!='legacy'
+        BEGIN SELECT RAISE(ABORT,'local intake input is retained'); END''',
+)
+
+
 def protect_ingestion(db):
     """Normal connections retain bytes; locked ingestion can clear exact members.
 
@@ -82,23 +124,8 @@ def protect_ingestion(db):
                          AND i.ingestion_contract!='legacy')
               {'AND ingestion_release(OLD.material_id,OLD.member_id,OLD.sha256,NEW.content)!=1' if action == 'UPDATE' else ''}
             BEGIN SELECT RAISE(ABORT,'ingestion media is retained'); END""")
-    db.execute("""CREATE TRIGGER IF NOT EXISTS submitted_sources_ingestion_no_release
-        BEFORE UPDATE OF content,input_metadata ON submitted_sources
-        WHEN EXISTS (SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id
-                     AND i.ingestion_contract!='legacy')
-          AND (NEW.content IS NOT OLD.content OR NEW.input_metadata IS NOT OLD.input_metadata)
-        BEGIN SELECT RAISE(ABORT,'ingestion input is retained'); END""")
-    db.execute("""CREATE TRIGGER IF NOT EXISTS submitted_sources_ingestion_no_delete
-        BEFORE DELETE ON submitted_sources
-        WHEN EXISTS (SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id
-                     AND i.ingestion_contract!='legacy')
-        BEGIN SELECT RAISE(ABORT,'ingestion input is retained'); END""")
-    db.execute("""CREATE TRIGGER IF NOT EXISTS submitted_sources_ingestion_owner_immutable
-        BEFORE UPDATE OF item_id ON submitted_sources
-        WHEN NEW.item_id IS NOT OLD.item_id AND EXISTS (
-            SELECT 1 FROM distill_items i WHERE i.item_id IN (OLD.item_id,NEW.item_id)
-            AND i.ingestion_contract!='legacy')
-        BEGIN SELECT RAISE(ABORT,'ingestion input owner is immutable'); END""")
+    for statement in OLD_INPUT_GUARDS:
+        db.execute(statement)
     protected_capture = """EXISTS(SELECT 1 FROM distill_items i WHERE i.item_id=OLD.item_id
         AND i.ingestion_contract!='legacy') OR EXISTS(SELECT 1 FROM ingestion_events e
         WHERE e.subject_kind='capture' AND e.subject_id=OLD.capture_id AND e.contract='raw-verified-v1')"""
