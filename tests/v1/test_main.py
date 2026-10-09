@@ -46,14 +46,6 @@ def test_data_directory_lock_blocks_second_worker(tmp_path, monkeypatch):
 def test_worker_stops_and_lock_releases_when_server_fails(tmp_path, monkeypatch):
     stopped = []
 
-    class Workers:
-        attempts = 0
-
-        def stop(self):
-            self.attempts += 1
-            stopped.append("workers")
-            return self.attempts >= 2
-
     def factory(paths):
         assert paths.data_root == tmp_path.resolve()
 
@@ -63,7 +55,8 @@ def test_worker_stops_and_lock_releases_when_server_fails(tmp_path, monkeypatch)
             raise RuntimeError("server failure")
 
         return SimpleNamespace(run=fail, config={
-            "KNOWLEDGE_DISTILLER_WORKERS": Workers(),
+            "KNOWLEDGE_DISTILLER_CLOSE_FEISHU": lambda: stopped.append("feishu"),
+            "KNOWLEDGE_DISTILLER_WORKER": SimpleNamespace(stop=lambda: stopped.append(True)),
             "KNOWLEDGE_DISTILLER_CLOSE_BROWSERS": lambda: stopped.append("browsers"),
         })
 
@@ -73,6 +66,6 @@ def test_worker_stops_and_lock_releases_when_server_fails(tmp_path, monkeypatch)
         port = probe.getsockname()[1]
     with pytest.raises(RuntimeError, match="server failure"):
         cli.main(["--port", str(port), "--data-dir", str(tmp_path)])
-    assert stopped == ["workers", "workers", "browsers"]
+    assert stopped == ["feishu", True, "browsers"]
     with acquire(tmp_path / '.instance.lock'):
         pass

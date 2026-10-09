@@ -1,16 +1,11 @@
 """Resource/command contracts; these tests never build or sign a native app."""
 import hashlib
-import importlib.metadata
 import json
-import platform
 import plistlib
 from pathlib import Path
 import runpy
-import shutil
 import struct
 import subprocess
-import sys
-import tempfile
 
 import pytest
 
@@ -129,68 +124,3 @@ def test_dual_dispatch_installer_uses_app_request_versions():
         assert command[command.index('--version')+1] == request['version']
         assert command[command.index('--product-version')+1] == request['product_version']
         assert 'installer/build-manifest.json' in request['artifacts']
-
-
-def test_mac_build_manifest_detects_vault_kit_change(tmp_path, monkeypatch):
-    project = tmp_path/'source'
-    for relative in (
-        'scripts/build_mac.py',
-        'src/knowledge_distiller/v1/adapters/python_policy.py',
-        'src/knowledge_distiller/v1/adapters/python-runtime.json',
-        'src/knowledge_distiller/v1/adapters/docling-models-manifest.json',
-    ):
-        target = project/relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT/relative, target)
-    (project/'packaging').mkdir()
-    (project/'pyproject.toml').write_text('[project]\nname="synthetic"\n')
-    kit = project/'vault-kit/tools/kb.py'
-    kit.parent.mkdir(parents=True)
-    kit.write_bytes(b'before')
-    (project/'vault-kit/__pycache__').mkdir()
-    (project/'vault-kit/__pycache__/ignored.txt').write_bytes(b'cache')
-    (project/'vault-kit/tools/ignored.pyc').write_bytes(b'cache')
-    before = hashlib.sha256(kit.read_bytes()).hexdigest()
-    output = tmp_path/'output'
-    work = tmp_path/'work'; work.mkdir()
-
-    original_run_path = runpy.run_path
-    def fake_run_path(path):
-        if str(path).endswith('packaging/mac_signing.py'):
-            return {
-                'version_info': lambda product, build: None,
-                'update_policy': lambda signing, update, *, manual: {'KDManualUpdateOnly': manual},
-                'sign_bundle': lambda app, signing: {'mode': 'synthetic', 'components': []},
-            }
-        return original_run_path(path)
-    def execute(command, **kwargs):
-        if 'PyInstaller' in command:
-            kit.write_bytes(b'after')
-            contents = output/'知识蒸馏器.app/Contents'
-            contents.mkdir(parents=True)
-            (contents/'Info.plist').write_bytes(plistlib.dumps({}))
-            (contents/'Frameworks').mkdir()
-            (contents/'Frameworks/libpython3.11.dylib').write_bytes(b'synthetic')
-            (output/'KnowledgeDistiller').mkdir()
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(runpy, 'run_path', fake_run_path)
-    monkeypatch.setattr(sys, 'platform', 'darwin')
-    monkeypatch.setattr(platform, 'machine', lambda: 'arm64')
-    monkeypatch.setattr(platform, 'mac_ver', lambda: ('15.0', ('', '', ''), ''))
-    monkeypatch.setattr(importlib.metadata, 'version', lambda name: 'synthetic')
-    monkeypatch.setattr(subprocess, 'run', execute)
-    monkeypatch.setattr(subprocess, 'check_output',
-        lambda command, **kwargs: 'a'*40 if 'rev-parse' in command else '')
-    monkeypatch.setattr(shutil, 'which', lambda name: '/synthetic/'+name)
-    monkeypatch.setattr(tempfile, 'mkdtemp', lambda **kwargs: str(work))
-    monkeypatch.setattr(sys, 'argv', [str(project/'scripts/build_mac.py'),
-        '--output', str(output), '--version', '2026.10.01.1', '--product-version', '3.0'])
-    original_run_path(str(project/'scripts/build_mac.py'))
-
-    manifest = json.loads((output/'build-manifest.json').read_text())
-    assert manifest['status'] == 'built'
-    assert manifest['source_sha256']['vault-kit/tools/kb.py'] == before
-    assert not any('__pycache__' in path or path.endswith('.pyc')
-                   for path in manifest['source_sha256'])
-    assert manifest['changed_during_build'] == ['vault-kit/tools/kb.py']

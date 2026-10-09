@@ -1,29 +1,23 @@
 """One-time export of existing V1 source facts into raw/外部/ (raw-interface §7).
 
-Planning reads a supported legacy database without changing it. Replay holds
-an SQLite writer transaction over source checks and no-clobber file placement,
-then records the result in the raw ledger; it never initializes or migrates a
-schema. Already-placed files survive a later database rollback. Existing files
-are only confirmed by exact readback, never replaced. IDs follow
-``materials.created_at``; an envelope alone cannot qualify a source.
+It reads the application database read-only and never changes its schema, so
+an installed V1.3 keeps opening it. It never touches V1 notes or any existing
+vault file and only creates files. Ids follow ``materials.created_at``; running
+it again adds nothing, and a copy of the same data yields the same bytes.
 
     python -m knowledge_distiller.v1.raw_migration --data-dir DIR --vault VAULT [--dry-run]
 """
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 from datetime import UTC, datetime
 import fcntl
-import hashlib
 import json
 from pathlib import Path
 import sqlite3
 import sys
 
 from . import raw
-from .database import connect
-from .ingestion import read_regular
 
 
 MIGRATED_VERSION = '未记录（V1 数据库）'
@@ -45,127 +39,39 @@ def existing_subjects(vault: Path) -> dict[int, str]:
     return found
 
 
-@contextmanager
 def _read_only(database: Path):
     connection = sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)
     connection.row_factory = sqlite3.Row
-    try:
-        connection.execute('PRAGMA query_only=ON')
-        connection.execute('BEGIN')
-        yield connection
-    finally:
-        connection.close()
-
-
-def _head(db, material_id):
-    heads = db.execute("""SELECT * FROM raw_records r WHERE subject_kind='material' AND subject_id=?
-        AND NOT EXISTS(SELECT 1 FROM raw_records n WHERE n.supersedes=r.raw_id)""", (material_id,)).fetchall()
-    if len(heads) > 1:
-        raise raw.RawError('raw_migration_heads_ambiguous')
-    return heads[0] if heads else None
-
-
-def _render(db, material_id, raw_id):
-    record = raw.material_row(db, material_id)
-    if record is None:
-        raise raw.RawError('raw_material_has_no_source_fact')
-    return raw.render_material(record, raw.media(db, material_id), raw_id,
-                               app_version=MIGRATED_VERSION, migrated=True)
-
-
-def _media_bytes(db, material_id, document):
-    return {(material_id, a.member_id): raw._attachment_bytes(None,
-        {'subject_kind': 'material', 'subject_id': material_id}, a.__dict__, db=db)
-        for a in document.attachments}
-
-
-def _readback(vault, raw_id, document, media_bytes, material_id):
-    if read_regular(vault, document.relative_path) != document.content.encode('utf-8'):
-        raise raw.RawError('raw_migration_readback_mismatch')
-    for a in document.attachments:
-        if read_regular(vault, f'附件/raw/{raw_id}/{a.filename}') != media_bytes[(material_id, a.member_id)]:
-            raise raw.RawError('raw_migration_readback_mismatch')
-
-
-def _existing(db, vault, material_id, raw_id, document, row):
-    if (row['raw_id'] != raw_id or row['subject_kind'] != 'material' or row['subject_id'] != material_id
-            or row['identity'] != '第三方' or row['origin'] != 'migration' or row['supersedes'] is not None
-            or row['relative_path'] != document.relative_path or row['content'] != document.content
-            or row['content_sha256'] != hashlib.sha256(document.content.encode('utf-8')).hexdigest()
-            or json.loads(row['attachments_json']) != [a.__dict__ for a in document.attachments]
-            or not row['written_at'] or row['written_vault'] != str(vault.resolve())):
-        raise raw.RawError('raw_migration_record_conflict')
-    if raw._duplicate_id(vault, raw_id, document.relative_path):
-        raise raw.RawError('raw_id_collision')
-    _readback(vault, raw_id, document, _media_bytes(db, material_id, document), material_id)
-
-
-def _replay_one(database, vault, material_id, raw_id, document):
-    """Fresh qualification and full-render CAS, not a frozen whole-graph proof.
-
-    Returning exits the connection context first, so commit failure cannot be
-    reported as success. Files already placed are not database rollback data.
-    """
-    with connect(database) as db:
-        db.execute('BEGIN IMMEDIATE')
-        raw._source_inventory(db)
-        if type(raw_id) is not str or raw.ID_RE.fullmatch(raw_id) is None or type(document) is not raw.RawDocument:
-            raise raw.RawError('raw_migration_plan_invalid')
-        raw._legacy_source_gate(db, 'material', material_id,
-            referenced_raw_ids=raw._document_reference_ids(document.content, None))
-        head = _head(db, material_id)
-        row = db.execute('SELECT * FROM raw_records WHERE raw_id=?', (raw_id,)).fetchone()
-        if (head is not None and head['raw_id'] != raw_id) or (row is not None and
-                (row['subject_kind'], row['subject_id']) != ('material', material_id)):
-            raise raw.RawError('raw_id_collision')
-        if raw._duplicate_id(vault, raw_id, document.relative_path):
-            raise raw.RawError('raw_id_collision')
-        if _render(db, material_id, raw_id) != document:
-            raise raw.RawError('raw_migration_source_changed')
-        if row is not None:
-            if head is None:
-                raise raw.RawError('raw_migration_record_conflict')
-            _existing(db, vault, material_id, raw_id, document, row)
-            return 'already'
-        media_bytes = _media_bytes(db, material_id, document)
-        outcome = _write(vault, raw_id, document, media_bytes, material_id)
-        if outcome in {'placed', 'already'}:
-            _readback(vault, raw_id, document, media_bytes, material_id)
-            raw.insert(db, raw_id, 'material', material_id, '第三方', document, origin='migration',
-                       written_at=datetime.now(UTC).isoformat(), written_vault=str(vault.resolve()))
-        return outcome
+    return connection
 
 
 def plan(database: Path, vault: Path):
     """Deterministic list of (material_id, raw_id, document) still to create."""
+    present = existing_subjects(vault)
     planned, counters = [], {}
     with _read_only(database) as db:
-        raw._source_inventory(db)
         version = int(db.execute('PRAGMA user_version').fetchone()[0])
-        counters = {row['day']: row['last'] for row in db.execute('SELECT day, last FROM raw_counters')}
+        ledger = {}
+        if version >= 20:
+            ledger = {row['subject_id']: row['raw_id'] for row in db.execute(
+                "SELECT subject_id, raw_id FROM raw_records WHERE subject_kind='material'")}
+            counters = {row['day']: row['last'] for row in db.execute('SELECT day, last FROM raw_counters')}
         rows = db.execute('''SELECT m.material_id FROM materials m JOIN source_facts sf USING(material_id)
                              ORDER BY m.created_at, m.material_id''').fetchall()
         failures = []
         for row in rows:
             material_id = row['material_id']
+            if material_id in present or material_id in ledger:
+                continue
+            record = raw.material_row(db, material_id)
+            day = raw._local(record['created_at']).strftime('%Y%m%d')
+            number = max(counters.get(day, 0), raw.vault_ids(vault, day)) + 1
+            raw_id = f'R-{day}-{number:04d}'
             try:
-                raw._legacy_source_gate(db, 'material', material_id)
-                head = _head(db, material_id)
-                if head is not None:
-                    document = _render(db, material_id, head['raw_id'])
-                    _existing(db, vault, material_id, head['raw_id'], document, head)
-                    continue
-                record = raw.material_row(db, material_id)
-                day = raw._local(record['created_at']).strftime('%Y%m%d')
-                number = max(counters.get(day, 0), raw.vault_ids(vault, day)) + 1
-                if number > 9999:
-                    raise raw.RawError('raw_id_exhausted')
-                raw_id = f'R-{day}-{number:04d}'
-                document = _render(db, material_id, raw_id)
-            except raw.LegacySourceVeto as error:
-                if error.args != ('local_source_qualification_pending',):
-                    raise
-                failures.append({'material_id': material_id, 'error': 'local_source_qualification_pending'})
+                document = raw.render_material(record, raw.media(db, material_id), raw_id,
+                                               app_version=MIGRATED_VERSION, migrated=True)
+            except (ValueError, KeyError, TypeError) as error:
+                failures.append({'material_id': material_id, 'error': type(error).__name__})
                 continue
             counters[day] = number
             planned.append((material_id, raw_id, document))
@@ -193,15 +99,27 @@ def run(data_dir: Path, vault: Path, *, dry_run: bool = False) -> dict:
             report['results'] = [{'material_id': m, 'raw_id': r, 'path': d.relative_path,
                                   'attachments': len(d.attachments)} for m, r, d in planned]
             return report
-        for material_id, raw_id, document in planned:
-            try:
-                outcome = _replay_one(database, vault, material_id, raw_id, document)
-            except raw.LegacySourceVeto as error:
-                if error.args != ('local_source_qualification_pending',):
-                    raise
-                outcome = 'local_source_qualification_pending'
-            report['results'].append({'material_id': material_id, 'raw_id': raw_id,
-                                      'path': document.relative_path, 'outcome': outcome})
+        with _read_only(database) as db:
+            media_bytes = {}
+            for material_id, raw_id, document in planned:
+                for attachment in document.attachments:
+                    row = db.execute('SELECT content FROM source_media WHERE material_id=? AND member_id=?',
+                                     (material_id, attachment.member_id)).fetchone()
+                    media_bytes[(material_id, attachment.member_id)] = bytes(row['content']) if row else b''
+        writer = sqlite3.connect(database) if version >= 20 else None
+        try:
+            for material_id, raw_id, document in planned:
+                outcome = _write(vault, raw_id, document, media_bytes, material_id)
+                report['results'].append({'material_id': material_id, 'raw_id': raw_id,
+                                          'path': document.relative_path, 'outcome': outcome})
+                if writer is not None and outcome in {'placed', 'already'}:
+                    writer.row_factory = sqlite3.Row
+                    with writer:
+                        raw.insert(writer, raw_id, 'material', material_id, '第三方', document, origin='migration',
+                                   written_at=datetime.now(UTC).isoformat(), written_vault=str(vault))
+        finally:
+            if writer is not None:
+                writer.close()
         return report
     finally:
         lock.close()

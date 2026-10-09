@@ -48,10 +48,6 @@
     "HISTORICAL-REGRESSION": {
       "specification": "docs/engineering/testing.md",
       "status": "regression"
-    },
-    "V3-UNIFIED-WIKI": {
-      "specification": "docs/roadmap/v3-plan.md",
-      "status": "regression"
     }
   }
 }

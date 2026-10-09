@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 import threading
 import time
 from collections.abc import Callable
 
 from .pipeline import Distiller
-from . import raw
 from .store import Store
 
 
@@ -37,7 +35,6 @@ class SingleWorker:
         self._thread: threading.Thread | None = None
         self._activity = threading.Lock()
         self._update_reserved = False
-        self._raw_deferred = {}
 
     def reserve_for_update(self) -> bool:
         """Close the claim race before permitting the desktop to quit for update."""
@@ -55,6 +52,7 @@ class SingleWorker:
         from .database import connect
         with connect(self.store.path) as db:
             return bool(db.execute("SELECT 1 FROM distill_items WHERE state IN ('queued','working') LIMIT 1").fetchone()
+                or db.execute("SELECT 1 FROM organization_events WHERE status='running' LIMIT 1").fetchone()
                 or db.execute("SELECT 1 FROM collection_operations WHERE state IN ('queued','working') LIMIT 1").fetchone())
 
     def update_ready(self):
@@ -65,35 +63,28 @@ class SingleWorker:
             self._update_reserved = False
         self.wake()
 
-    def start(self) -> bool | None:
-        with self._activity:
-            if self._update_reserved:
-                return False
-            if self._thread is not None and self._thread.is_alive():
-                return
-            self.store.requeue_interrupted()
-            self._stopping.clear()
-            self._wake.clear()
-            self._thread = threading.Thread(
-                target=self._loop,
-                name="knowledge-distiller-worker",
-                daemon=True,
-            )
-            self._thread.start()
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self.store.requeue_interrupted()
+        self._stopping.clear()
+        self._wake.clear()
+        self._thread = threading.Thread(
+            target=self._loop,
+            name="knowledge-distiller-worker",
+            daemon=True,
+        )
+        self._thread.start()
 
     def wake(self) -> None:
         self._wake.set()
 
-    def stop(self, timeout: float = 2.0) -> bool:
+    def stop(self, timeout: float = 2.0) -> None:
         self._stopping.set()
         self._wake.set()
         thread = self._thread
         if thread is not None:
             thread.join(timeout)
-            if thread.is_alive():
-                return False
-            self._thread = None
-        return True
 
     def run_organization(self) -> bool:
         if self.organization is None:
@@ -114,61 +105,16 @@ class SingleWorker:
         return True
 
     def run_one(self) -> int | None:
-        with self._activity:
-            if self._update_reserved or self._stopping.is_set():
-                return None
-            return self._run_one()
-
-    def _run_one(self) -> int | None:
-        """Claim and finish while the caller holds the update activity lock."""
-        if self._stopping.is_set():
-            return None
-        now = time.monotonic()
-        self._raw_deferred = {item: until for item, until in self._raw_deferred.items() if until > now}
-        work = self.store.claim_next_work(item_guard=raw._legacy_item_gate,
-                                          deferred_items=self._raw_deferred)
+        work = self.store.claim_next_work()
         if work is None:
             return None
         kind, item_id = work
-        if kind == 'presentation':
-            from .confirmation_preparation import FAILURE_CODES, PreparationError
-            from .llm import LLMRequestError
-            from .store import SourceReviewConflict
-            ownership = None
-            try:
-                ownership = self.store.presentation_ownership(item_id)
-                service = self.distiller() if callable(self.distiller) else self.distiller
-                result = service.prepare_pending_presentation(item_id)
-                if not isinstance(result, dict) or result.get('ownership') != ownership:
-                    if self.store.presentation_ownership(item_id) != ownership:
-                        raise SourceReviewConflict('presentation_ownership_conflict')
-                    raise PreparationError('review_incomplete')
-                self.store.finish_pending_presentation(item_id, ownership, result)
-            except SourceReviewConflict:
-                # A superseding user/source decision owns the new state.
-                logger.info('Presentation %s result superseded', item_id)
-            except Exception as error:
-                code = (error.code if isinstance(error, PreparationError)
-                        and error.code in FAILURE_CODES else 'processing_unexpected_failure')
-                if isinstance(error, LLMRequestError):
-                    code = str(error) if str(error) in {'llm_request_failed', 'llm_request_timeout', 'review_incomplete'} else 'llm_request_failed'
-                if ownership is not None:
-                    try:
-                        self.store.finish_pending_presentation(item_id, ownership, {
-                            'ownership': ownership, 'status': 'failed', 'code': code,
-                            'pending': None, 'evidence': None})
-                    except (SourceReviewConflict, PreparationError, ValueError, sqlite3.Error):
-                        pass
-                logger.error('Presentation %s failed (%s)', item_id, type(error).__name__)
-            return item_id
         if kind == 'collection':
             from .collections import Collections
             from .database import connect
             try:
                 service = self.distiller() if callable(self.distiller) else self.distiller
-                deferred = Collections(self.store).run(item_id, service, deferred_items=self._raw_deferred)
-                if deferred is not None:
-                    self._raw_deferred[deferred] = time.monotonic() + max(1.0, self.idle_seconds)
+                Collections(self.store).run(item_id, service)
             except Exception as error:
                 with connect(self.store.path) as db:
                     db.execute("UPDATE collection_operations SET state='failed',error_code='collection_processing_failed' WHERE operation_id=?", (item_id,))
@@ -177,16 +123,7 @@ class SingleWorker:
         try:
             service = self.distiller() if callable(self.distiller) else self.distiller
             service.run(item_id)
-        except raw.LegacySourceVeto as error:
-            if error.args != ('local_source_qualification_pending',):
-                raise
-            # A real owner change after claim does not undo that durable claim.
-            logger.info('Item %s legacy qualification deferred', item_id)
         except Exception as error:
-            if isinstance(error, BlockingIOError) and error.args == ('vault_busy',):
-                if self.store.defer_raw_item(item_id):
-                    self._raw_deferred[item_id] = time.monotonic() + max(1.0, self.idle_seconds)
-                return item_id
             # Isolate one failed item, not a failed database or queue claim.
             # Do not log provider exception text, which may contain private data.
             row = self.store.item_bundle(item_id)
@@ -204,15 +141,11 @@ class SingleWorker:
             with self._activity:
                 if not self._update_reserved:
                     if self.maintenance is not None and time.monotonic() >= self._next_maintenance:
-                        try:
-                            self.maintenance()
-                        except Exception as error:
-                            logger.error('Maintenance deferred (%s)', type(error).__name__)
-                        finally:
-                            self._next_maintenance = time.monotonic() + 60
+                        self.maintenance()
+                        self._next_maintenance = time.monotonic() + 60
                     if self.run_organization():
                         continue
-                    if self._run_one() is not None:
+                    if self.run_one() is not None:
                         continue
             self._wake.wait(self.idle_seconds)
             self._wake.clear()

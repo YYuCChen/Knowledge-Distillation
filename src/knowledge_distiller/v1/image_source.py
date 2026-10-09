@@ -1,6 +1,6 @@
 """Freeze OCR text together with its immutable image coordinates."""
 from .domain import SourceFact
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from pathlib import Path
 import hashlib
 import json
@@ -8,15 +8,9 @@ import platform
 import sys
 
 
-def _recognize(member, runner, checkpoint_dir, *, controlled=False):
-    def recognize():
-        if controlled:
-            from .vision_ocr import VisionOcrRunner
-            if type(runner) is VisionOcrRunner:
-                return runner.recognize_member(member['content'], member['mime_type'], member['member_id'])
-        return runner.recognize_bytes(member['content'], member['mime_type'])
+def _recognize(member, runner, checkpoint_dir):
     if checkpoint_dir is None:
-        return recognize()
+        return runner.recognize_bytes(member['content'], member['mime_type'])
     from .ocr import OcrError, OcrLine, OcrResult, OCR_VERSION, PADDLE_VERSION, PADDLEX_VERSION
     from .vision_ocr import VISION_REVISION
     from .local_records import write_record
@@ -32,7 +26,7 @@ def _recognize(member, runner, checkpoint_dir, *, controlled=False):
         path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as cause:
         raise OcrError('ocr_checkpoint_unavailable') from cause
-    if not controlled and not path.is_symlink() and path.is_file():
+    if not path.is_symlink() and path.is_file():
         try:
             record = json.loads(path.read_text(encoding='utf-8'))
             payload = record['result']
@@ -42,13 +36,11 @@ def _recognize(member, runner, checkpoint_dir, *, controlled=False):
                     tuple(tuple(p) for p in line['polygon']), line['confidence'],
                     tuple(line['alternatives']), tuple(tuple(p) for p in line['original_polygon']))
                     for line in payload['lines'])
-                payload.pop('receipt', None)  # JSON never reconstructs an opaque authority.
                 return OcrResult(**payload)
         except (OSError, ValueError, KeyError, TypeError):
             pass  # An unreadable checkpoint cannot become accepted OCR evidence.
-    result = recognize()
-    payload = asdict(replace(result, receipt=None))
-    payload.pop('receipt', None)
+    result = runner.recognize_bytes(member['content'], member['mime_type'])
+    payload = asdict(result)
     try:
         write_record(path, {'key': key, 'result': payload, 'sha256': hashlib.sha256(
             json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()})
@@ -59,10 +51,7 @@ def _recognize(member, runner, checkpoint_dir, *, controlled=False):
     return result
 
 
-def image_source_fact(native_text, members, runner, *, inline_images=False, checkpoint_dir=None,
-                      execution_results=None):
-    if execution_results is not None and type(execution_results) is not list:
-        raise TypeError('execution_results_must_be_list')
+def image_source_fact(native_text, members, runner, *, inline_images=False, checkpoint_dir=None):
     snapshot = '' if inline_images else native_text
     cursor = 0
     images = []
@@ -72,11 +61,7 @@ def image_source_fact(native_text, members, runner, *, inline_images=False, chec
             continue
         from .ocr import OcrError
         try:
-            if execution_results is not None:
-                if (type(member['content']) is not bytes
-                        or member['sha256'] != hashlib.sha256(member['content']).hexdigest()):
-                    raise OcrError('ocr_invalid_image', stage='member_binding')
-            result = _recognize(member, runner, checkpoint_dir, controlled=execution_results is not None)
+            result = _recognize(member, runner, checkpoint_dir)
         except OcrError as error:
             error.member_id = member['member_id']
             error.completed_members = [image['member_id'] for image in images]
@@ -94,14 +79,6 @@ def image_source_fact(native_text, members, runner, *, inline_images=False, chec
                  'engine': result.engine, 'runtime_version': result.runtime_version,
                  'detection_model': result.detection_model,
                  'recognition_model': result.recognition_model, 'lines': []}
-        if execution_results is not None:
-            if result.receipt is not None:
-                from .vision_ocr import validate_image_receipt
-                audit = validate_image_receipt(result, member['content'], member['mime_type'], member['member_id'])
-                image['execution_audit'] = audit
-                image['framework_version'] = result.framework_version
-                image['framework'] = audit['environment']['framework']
-            execution_results.append((member['member_id'], result))
         if inline_images:
             image['source_start'] = len(snapshot) - len(marker)
             image['source_end'] = len(snapshot)

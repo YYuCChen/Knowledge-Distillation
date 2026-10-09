@@ -48,29 +48,6 @@ for distribution in ('douyin-downloader', 'yt-dlp', 'docling', 'docling-slim', '
                      'onnxruntime', 'torch', 'transformers', 'imagesize', 'pyclipper', 'lark-oapi', 'websockets',
                      'pypdfium2', 'python-bidi', 'shapely'):
     datas += copy_metadata(distribution, recursive=True)
-# R05: precise runtime data, dynamic languages, metadata and local source notices.
-r05 = runpy.run_path(str(project / 'src/knowledge_distiller/v1/r05_runtime_probe.py'))
-datas += r05['validated_notice_datas'](project / 'packaging/r05-notices')
-hiddenimports += ['knowledge_distiller.v1.web_article',
-                  'knowledge_distiller.v1.r05_runtime_probe', 'trafilatura', 'httpx', 'httpcore']
-r05_languages = collect_submodules('dateparser.data.date_translation_data')
-if len(r05_languages) != 206:
-    raise RuntimeError('R05 dateparser language inventory changed')
-hiddenimports += r05_languages
-for package, patterns, count in (
-    ('trafilatura', ['settings.cfg'], 1),
-    ('justext', ['stoplists/*.txt'], 100),
-    ('tld', ['res/effective_tld_names*.dat.txt'], 2),
-):
-    r05_data = collect_data_files(package, includes=patterns)
-    if len(r05_data) != count:
-        raise RuntimeError('R05 data inventory changed: ' + package)
-    datas += r05_data
-# Babel data and pickle imports are provided by the official PyInstaller hook.
-for distribution in ('trafilatura', 'httpx', 'httpcore', 'courlan', 'htmldate',
-                     'jusText', 'babel', 'dateparser', 'lxml-html-clean', 'tld',
-                     'tzlocal', 'charset-normalizer', 'urllib3'):
-    datas += copy_metadata(distribution)
 datas = list(dict.fromkeys(datas))
 binaries = list(dict.fromkeys(binaries))
 a = Analysis([str(project / 'packaging/windows_entry.py')], pathex=[str(project / 'src')],

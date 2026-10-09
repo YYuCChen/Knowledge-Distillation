@@ -241,35 +241,3 @@ document.querySelectorAll('[data-platform-health]').forEach(async row => {
     show('configured');
   }
 });
-
-(() => {
-  const form = document.getElementById('decision-form');
-  if (!form) return;
-  const provider = form.elements.provider;
-  const key = form.elements.api_key;
-  const status = document.getElementById('decision-check-status');
-  const enable = document.getElementById('decision-enable');
-  const invalidate = () => {
-    enable.disabled = true;
-    form.elements.candidate_id.value = '';
-    form.elements.candidate_revision.value = String(Number(form.elements.candidate_revision.value) + 1);
-    status.textContent = '配置已修改，请重新检查。';
-  };
-  form.addEventListener('input', invalidate);
-  provider.addEventListener('change', () => {
-    const cloud = provider.value === 'jev';
-    form.elements.endpoint.value = cloud ? 'https://api.typesafe.ai/v1/systemone' : 'http://127.0.0.1:18765/v1/systemone';
-    form.elements.endpoint.readOnly = cloud;
-    form.elements.model.value = cloud ? 'jev-latest' : 'clef-demo';
-    key.value = '';
-    // The saved binding is projected separately because a page may start local.
-    const hasCloud = form.dataset.cloudKeySaved === 'true';
-    key.required = cloud && !hasCloud;
-    key.placeholder = cloud ? (hasCloud ? '不会回显已保存的密钥；留空沿用' : '填写 API Key') : '本地服务无需认证时留空';
-    document.getElementById('decision-auth-status').textContent = cloud
-      ? (hasCloud ? 'API Key 已保存；留空沿用，填写新密钥后须检查并明确启用。' : 'API Key 未保存；请填写后检查。')
-      : '本地 API Key 可留空；不会清除云端密钥。';
-    invalidate();
-  });
-  form.addEventListener('change', event => { if (event.target !== provider) invalidate(); });
-})();

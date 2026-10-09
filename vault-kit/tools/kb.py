@@ -26,20 +26,9 @@ import argparse
 import datetime as dt
 import hashlib
 import json
-import os
 import re
-import stat
 import sys
 from pathlib import Path
-
-from wiki_display import (
-    DisplayError,
-    add_or_refresh_display,
-    business_content_hash,
-    display_free_text,
-    legacy_content_hash,
-    render_system_document,
-)
 
 # ───────────────────────── 规则常量（与规则文件保持一致） ─────────────────────────
 
@@ -215,83 +204,26 @@ def raw_file(ref):
     return path, block.lstrip("^") or None
 
 
-class EnvelopeReadError(RuntimeError):
-    pass
-
-
-def read_regular_bytes(path):
-    try:
-        if path.is_symlink() or not stat.S_ISREG(path.lstat().st_mode):
-            raise EnvelopeReadError("raw_path_invalid")
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            opened = os.fstat(descriptor)
-            if not stat.S_ISREG(opened.st_mode):
-                raise EnvelopeReadError("raw_path_invalid")
-            chunks = []
-            while True:
-                chunk = os.read(descriptor, 1024 * 1024)
-                if not chunk:
-                    return b"".join(chunks)
-                chunks.append(chunk)
-        finally:
-            os.close(descriptor)
-    except EnvelopeReadError:
-        raise
-    except OSError as error:
-        raise EnvelopeReadError("raw_read_failed") from error
-
-
-def _flow_mapping(value):
-    """解析 raw 写入器生成的简单 ``{键: 值}``，不接受任意 YAML。"""
-    if not (value.startswith("{") and value.endswith("}")):
-        return None
-    result = {}
-    for item in value[1:-1].split(","):
-        key, sep, raw_value = item.partition(":")
-        if not sep or not key.strip():
-            return None
-        result[key.strip()] = parse_fm_value(raw_value)
-    return result
-
-
 def read_envelope(path):
-    """raw 素材信封；支持应用写入的单行字段与邻接列表。"""
+    """raw 素材信封中的单行字段（编号、身份、标题、取代等）。"""
     try:
-        text = read_regular_bytes(path).decode("utf-8")
-    except EnvelopeReadError:
-        raise
-    except (OSError, UnicodeError) as error:
-        raise EnvelopeReadError("raw_read_failed") from error
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return {}, set()
     fm, body = split_frontmatter(text)
-    if fm is None:
-        raise EnvelopeReadError("raw_envelope_invalid")
     meta = {}
-    current_list = None
-    for line in fm:
-        if current_list and re.match(r"^\s+-\s+", line):
-            parsed = _flow_mapping(re.sub(r"^\s+-\s+", "", line).strip())
-            if parsed is None:
-                raise EnvelopeReadError("raw_envelope_invalid")
-            meta[current_list].append(parsed)
-            continue
-        current_list = None
+    for line in fm or []:
         m = re.match(r"^([^\s:#-][^:]*):\s*(.*)$", line)
         if not m:
             continue
         value = m.group(2).strip()
-        key = m.group(1).strip()
-        if not value:
-            meta[key] = []
-            current_list = key
-            continue
         if value.startswith('"'):
             # 应用把自由文本写成 JSON 形式的双引号字符串（合法 YAML）。
             try:
                 value = json.loads(value)
             except ValueError:
                 value = value.strip('"')
-        meta[key] = value
+        meta[m.group(1).strip()] = value
     return meta, set(BLOCK_RE.findall(body))
 
 
@@ -333,26 +265,16 @@ class Page:
         return self.get("确认") == "已确认"
 
     def content_hash(self):
-        """业务内容哈希：忽略程序、自动内容及经证明的产品展示块。"""
-        try:
-            return business_content_hash(self.render(), self.rel)
-        except DisplayError:
-            # A modified or malformed product marker is not trusted as display
-            # metadata.  Count it conservatively until ensure_display reports
-            # the fixed conflict code instead of ignoring user bytes.
-            return legacy_content_hash(self.render())
-
-    def legacy_content_hash(self):
-        """V3 阶段 3 哈希；仅用于逐页证明首次算法切换。"""
-        return legacy_content_hash(self.render())
-
-    def replace_text(self, text):
-        """用内存中的新文本刷新解析结构，不触碰磁盘。"""
-        fm, self.body = split_frontmatter(text)
-        self.has_fm = fm is not None
-        self.fm_lines = list(fm) if fm is not None else []
-        self.meta = parse_frontmatter(self.fm_lines)
-        self.sections = split_sections(self.body)
+        """用于判断内容是否真正改变：忽略程序字段与自动小节。"""
+        fm = [l for l in self.fm_lines
+              if l.split(":", 1)[0].strip() not in ("编号", "类型", "创建", "更新")]
+        parts = ["\n".join(fm)]
+        for head, lines in self.sections:
+            if head and head.endswith(AUTO_SUFFIX):
+                parts.append(head)
+            else:
+                parts.append((head or "") + "\n" + "\n".join(lines))
+        return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()
 
     def render(self):
         out = []
@@ -416,20 +338,10 @@ class Vault:
         """读取 raw/ 中每份素材的信封与段落编号；取代关系以最新文件为准。"""
         if not self.raw.is_dir():
             return
-        if self.raw.is_symlink():
-            self.issue("错误", "素材路径不安全", "raw 根目录不能是符号链接")
-            return
         by_id = {}
         for f in sorted(self.raw.rglob("*.md")):
             rel = f.relative_to(self.root).as_posix()
-            if any(part.is_symlink() for part in (f, *f.parents) if part != self.root.parent):
-                self.issue("错误", "素材路径不安全", f"{rel} 包含符号链接")
-                continue
-            try:
-                meta, blocks = read_envelope(f)
-            except EnvelopeReadError as error:
-                self.issue("错误", "素材读取失败", f"{rel}：{error}")
-                continue
+            meta, blocks = read_envelope(f)
             self.raws[rel] = (meta, blocks)
             if meta.get("编号"):
                 by_id.setdefault(meta["编号"], []).append(rel)
@@ -485,7 +397,6 @@ class Vault:
             if m:
                 used.setdefault(m.group(1), set()).add(int(m.group(2)))
         hashes = state.setdefault("hashes", {})
-        hash_versions = state.setdefault("hash_versions", {})
         for pg in self.pages:
             before = list(pg.fm_lines)
             if not pg.get("编号"):
@@ -497,36 +408,18 @@ class Vault:
             if not parse_date(pg.get("创建")):
                 set_fm_field(pg.fm_lines, "创建", TODAY)
             h = pg.content_hash()
-            previous_version = hash_versions.get(pg.rel, 1)
-            compare_hash = h if previous_version == 2 else pg.legacy_content_hash()
             old = hashes.get(pg.rel)
             if not parse_date(pg.get("更新")):
                 set_fm_field(pg.fm_lines, "更新", TODAY)
-            elif old is not None and old != compare_hash and pg.get("更新") != TODAY:
+            elif old is not None and old != h and pg.get("更新") != TODAY:
                 set_fm_field(pg.fm_lines, "更新", TODAY)
                 self.changes["更新时间"] += 1
             hashes[pg.rel] = h
-            hash_versions[pg.rel] = 2
             if pg.fm_lines != before:
                 pg.has_fm = True
                 pg.meta = parse_frontmatter(pg.fm_lines)
                 pg.dirty = True
                 self.changes["补填字段"] += 1
-
-    def ensure_display(self):
-        """补齐或刷新本产品展示块；修改的展示不算业务更新时间。"""
-        for pg in self.pages:
-            before = pg.render()
-            try:
-                after, changed = add_or_refresh_display(before, pg.rel)
-            except DisplayError as error:
-                self.issue("错误", "展示元数据冲突", f"[[{pg.title}]]：{error}")
-                continue
-            if changed:
-                pg.replace_text(after)
-                pg.dirty = True
-                self.changes.setdefault("补齐展示", 0)
-                self.changes["补齐展示"] += 1
 
     # ── 解析关系与事件 ──
     def build_graph(self):
@@ -720,13 +613,7 @@ class Vault:
 
             # 长度
             if pg.type != "主题":
-                try:
-                    _, business_body = split_frontmatter(display_free_text(pg.render(), pg.rel))
-                    business_sections = split_sections(business_body)
-                except DisplayError:
-                    business_sections = pg.sections
-                body_lines = [l for h, ls in business_sections
-                              if not (h and h.endswith(AUTO_SUFFIX)) for l in ls]
+                body_lines = [l for h, ls in pg.sections if not (h and h.endswith(AUTO_SUFFIX)) for l in ls]
                 n = visible_length(body_lines)
                 if n > PAGE_CHAR_LIMIT:
                     self.issue("提醒", "页面过长", f"[[{pg.title}]] 约 {n} 字，超过 {PAGE_CHAR_LIMIT} 字，建议拆页")
@@ -788,8 +675,6 @@ class Vault:
             if d.is_dir():
                 for f in sorted(d.rglob("*.md")):
                     rel = f.relative_to(self.root).as_posix()
-                    if rel not in self.raws:
-                        continue
                     if self.current_raw(rel) != rel:
                         continue
                     if rel not in referenced and rel not in log_text:
@@ -809,7 +694,7 @@ class Vault:
 
     # ── 系统页 ──
     def write_index(self):
-        lines = [AUTO_MARK, f"更新于 {TODAY}，由 tools/kb.py 生成。", ""]
+        lines = ["# 索引", "", AUTO_MARK, f"更新于 {TODAY}，由 tools/kb.py 生成。", ""]
         for t in TYPE_ORDER:
             group = [p for p in self.pages if p.type == t]
             if t == "主题":
@@ -820,8 +705,7 @@ class Vault:
             for p in group:
                 lines.append(self.index_line(p))
             lines.append("")
-        return render_system_document(
-            "wiki/index.md", "知识库索引", "\n".join(lines), detail=f"更新于 {TODAY}")
+        return "\n".join(lines)
 
     def index_line(self, p):
         s = self.state.get(p.title, {})
@@ -843,7 +727,7 @@ class Vault:
             return f"- [[{p.title}]] —— 问题：{p.get('触发的问题')}"
         return f"- [[{p.title}]]"
 
-    def candidate_items(self):
+    def write_pending(self):
         items = []
         for p in self.pages:
             if p.get("确认") == "候选":
@@ -875,11 +759,7 @@ class Vault:
                 label = "触发源关联" if e["关系"] == "触发" else "反例"
                 items.append(("", f"{label} · {e['从']} → {e['到']}", [f"位置：{e['所在']}"]))
         items.sort(key=lambda x: x[0])
-        return items
-
-    def write_pending(self):
-        items = self.candidate_items()
-        lines = [AUTO_MARK,
+        lines = ["# 待确认清单", "", AUTO_MARK,
                  f"更新于 {TODAY}，由 tools/kb.py 根据页面中的候选内容生成。", ""]
         if not items:
             lines.append("暂无待确认事项。")
@@ -887,9 +767,7 @@ class Vault:
             lines.append(f"[{i}] {head}")
             lines += [f"    {d}" for d in detail]
             lines += ["    → 对 / 不对 / 改成……", ""]
-        return render_system_document(
-            "wiki/待确认.md", "待确认清单", "\n".join(lines),
-            detail=f"{len(items)} 项 · 回复“对 / 不对 / 改成……”")
+        return "\n".join(lines)
 
     def write_report(self):
         order = {"错误": 0, "提醒": 1, "信息": 2}
@@ -933,7 +811,11 @@ class Vault:
 
 # ───────────────────────── 命令 ─────────────────────────
 
-TOPIC_BODY = """## 概览
+TOPIC_TEMPLATE = """---
+类型: 主题
+---
+
+## 概览
 （由 AI 每周根据本主题下已确认的认知和方法重写）
 
 ## 核心认知（自动）
@@ -943,28 +825,15 @@ TOPIC_BODY = """## 概览
 """
 
 
-def topic_template(title):
-    base = f"---\n类型: 主题\n---\n\n# {title}\n\n{TOPIC_BODY}"
-    return add_or_refresh_display(base, f"wiki/主题/{title}.md")[0]
-
-
 def cmd_init(root):
-    require_write_session(root)
     for d in ["raw/外部", "raw/自述", "raw/数据", "skills", ".graph"] + [f"wiki/{f}" for f in FOLDERS]:
         (root / d).mkdir(parents=True, exist_ok=True)
     for t in TOPICS:
         p = root / "wiki" / "主题" / f"{t}.md"
         if not p.exists():
-            p.write_text(topic_template(t), encoding="utf-8")
-    system_pages = [
-        ("log.md", render_system_document("wiki/log.md", "变更日志", "", detail="保留知识活动记录")),
-        ("体检报告.md", render_system_document("wiki/体检报告.md", "体检报告",
-                                             "尚未运行每周检查。\n", detail="用于人工复核")),
-        ("index.md", render_system_document("wiki/index.md", "知识库索引", "", detail="更新由脚本维护")),
-        ("待确认.md", render_system_document("wiki/待确认.md", "待确认清单", "",
-                                           detail="0 项 · 回复“对 / 不对 / 改成……”")),
-    ]
-    for name, content in system_pages:
+            p.write_text(TOPIC_TEMPLATE, encoding="utf-8")
+    for name, content in [("log.md", "# 变更日志\n"), ("体检报告.md", "# 体检报告\n\n尚未运行每周检查。\n"),
+                          ("index.md", "# 索引\n"), ("待确认.md", "# 待确认清单\n")]:
         p = root / "wiki" / name
         if not p.exists():
             p.write_text(content, encoding="utf-8")
@@ -981,7 +850,6 @@ def cmd_run(root, dry):
     v.load()
     v.load_raw()
     v.fill_program_fields(state)
-    v.ensure_display()
     v.build_graph()
     v.compute_states()
     v.regenerate()
@@ -992,8 +860,6 @@ def cmd_run(root, dry):
         print(report)
         return
 
-    require_write_session(root)
-
     written = 0
     for pg in v.pages:
         if pg.dirty:
@@ -1003,7 +869,6 @@ def cmd_run(root, dry):
                 written += 1
     # 自动小节改动不应让"更新"字段变化：写回后重新记录哈希
     state["hashes"] = {pg.rel: pg.content_hash() for pg in v.pages}
-    state["hash_versions"] = {pg.rel: 2 for pg in v.pages}
     (v.wiki / "index.md").write_text(v.write_index(), encoding="utf-8")
     (v.wiki / "待确认.md").write_text(v.write_pending(), encoding="utf-8")
     v.gdir.mkdir(exist_ok=True)
@@ -1045,124 +910,18 @@ def cmd_raw_id(root, date_text):
     print(f"新建文件：raw/自述/{d:%Y}/{d:%m}/{rid}.md（只新建，不修改已有文件）", file=sys.stderr)
 
 
-def require_write_session(root):
-    try:
-        from wiki_session import session_is_locked
-    except ImportError:
-        sys.exit("wiki_session_missing")
-    if not session_is_locked(root):
-        sys.exit("vault_lock_required")
-
-
-def cmd_protocol_scan(root):
-    """只读导出任务协议；不以 dry-run 的退出码代替结构化问题计数。"""
-    v = Vault(root)
-    if not v.wiki.is_dir():
-        sys.exit("wiki_missing")
-    state_file = v.gdir / "state.json"
-    try:
-        state = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        state = {}
-        v.issue("错误", "状态文件读取失败", "state.json 无法读取")
-    v.load()
-    v.load_raw()
-    v.fill_program_fields(state)
-    v.build_graph()
-    v.compute_states()
-    v.regenerate()
-    v.check()
-    counts = {level: sum(1 for issue in v.issues if issue[0] == level)
-              for level in ("错误", "提醒", "信息")}
-    pending = []
-    for kind in ("自述", "外部"):
-        for rel in v.pending[kind]:
-            meta = v.raws.get(rel, ({}, set()))[0]
-            try:
-                raw_bytes = read_regular_bytes(root / rel)
-            except EnvelopeReadError:
-                counts["错误"] += 1
-                continue
-            adjacency = meta.get("邻接", [])
-            adjacent_ids = []
-            if isinstance(adjacency, list):
-                adjacent_ids = [item.get("编号") for item in adjacency
-                                if isinstance(item, dict) and isinstance(item.get("编号"), str)]
-            pending.append({
-                "relative_path": rel,
-                "raw_id": meta.get("编号", ""),
-                "identity": meta.get("身份", ""),
-                "collected_at": meta.get("收录于", ""),
-                "addendum_target": meta.get("附言对象", ""),
-                "adjacent_raw_ids": adjacent_ids,
-                "byte_count": len(raw_bytes),
-                "content_sha256": hashlib.sha256(raw_bytes).hexdigest(),
-            })
-    candidate_count = len(v.candidate_items())
-    log_text = (v.wiki / "log.md").read_text(encoding="utf-8") if (v.wiki / "log.md").exists() else ""
-    action_rows = re.findall(r"^## \[([^\]]+)\] (ingest|confirm|lint) \|", log_text, re.M)
-    actions = []
-    invalid_action_date = False
-    today = dt.date.fromisoformat(TODAY)
-    for date_text, action in action_rows:
-        parsed_date = parse_date(date_text)
-        if parsed_date is None or parsed_date > today:
-            invalid_action_date = True
-        actions.append((date_text, action, parsed_date))
-    if invalid_action_date:
-        counts["错误"] += 1
-    last_lint = max((index for index, row in enumerate(actions) if row[1] == "lint"), default=-1)
-    changed_after_lint = any(row[1] in {"ingest", "confirm"}
-                             for row in actions[last_lint + 1:])
-    eligible = not pending and candidate_count == 0
-    last_lint_date = actions[last_lint][0] if last_lint >= 0 else ""
-    if invalid_action_date:
-        due, due_reason = False, "unknown"
-    elif not eligible:
-        due, due_reason = False, "not_eligible"
-    elif last_lint < 0:
-        due, due_reason = True, "first"
-    elif not changed_after_lint:
-        due, due_reason = False, "current"
-    elif (today - actions[last_lint][2]).days >= 7:
-        due, due_reason = True, "changed_due"
-    else:
-        due, due_reason = False, "changed_waiting"
-    payload = {
-        "protocol_version": 2,
-        "issue_counts": counts,
-        "pending": pending,
-        "candidate_count": candidate_count,
-        "health": {
-            "eligible": eligible,
-            "due": due,
-            "due_reason": due_reason,
-            "last_lint_date": last_lint_date,
-            "lint_count": sum(1 for row in actions if row[1] == "lint"),
-        },
-    }
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-
-
 def main():
     ap = argparse.ArgumentParser(description="个人知识库检查与关系图谱脚本")
-    ap.add_argument("command", nargs="?", default="run",
-                    choices=["run", "init", "raw-id", "protocol-scan"])
+    ap.add_argument("command", nargs="?", default="run", choices=["run", "init", "raw-id"])
     ap.add_argument("--root", default=None, help="知识库根目录，默认为脚本所在目录的上一级")
     ap.add_argument("--dry-run", action="store_true", help="只检查，不修改文件")
     ap.add_argument("--date", default=None, help="raw-id：取号日期，年-月-日，默认今天")
     args = ap.parse_args()
-    try:
-        from wiki_session import canonical_root
-        root = canonical_root(args.root or Path(__file__).parent.parent)
-    except (ImportError, RuntimeError) as error:
-        sys.exit(str(error) if str(error) else "vault_path_invalid")
+    root = Path(args.root).resolve() if args.root else Path(__file__).resolve().parent.parent
     if args.command == "init":
         cmd_init(root)
     elif args.command == "raw-id":
         cmd_raw_id(root, args.date)
-    elif args.command == "protocol-scan":
-        cmd_protocol_scan(root)
     else:
         cmd_run(root, args.dry_run)
 

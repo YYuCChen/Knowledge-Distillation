@@ -17,9 +17,6 @@ def check(destination, audio=None, *, ocr_image=None, pdf=None, epub=None, compo
         report['python'] = check_current()
         if getattr(sys, 'frozen', False):
             report['python_inventory'] = bundle_inventory(Path(sys._MEIPASS))
-        stage = 'r05_runtime'
-        from .r05_runtime_probe import check_r05
-        report['checks']['r05_runtime'] = check_r05()
         stage = 'binaries'
         for tool in ('node','ffmpeg','ffprobe'):
             result=subprocess.run([tool,'--version' if tool=='node' else '-version'],capture_output=True,text=True,check=True,timeout=15)
