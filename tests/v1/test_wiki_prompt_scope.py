@@ -23,7 +23,8 @@ def test_initial_generation_and_health_prompts_bound_management_narration(fixtur
     # Stop at the transport boundary; never discover or spawn a CLI.
     monkeypatch.setattr(runner, '_run_typed', capture_prompt)
     runner.recording = SimpleNamespace(host_context=lambda: dict(activity_date='2026-10-09',
-        issue_counts={'错误': 0, '提醒': 2, '信息': 3}, candidate_count=0))
+        issue_counts={'错误': 0, '提醒': 2, '信息': 3}, candidate_count=0,
+        activity='ingest', batch_no=1, raw_ids=[r.raw_id for r in task.raw]))
     assert runner.run_outcomes(snapshot, runtime, task=task, batch_no=1,
         model='fake', effort='medium', source_proof=proof) is result
 
@@ -37,7 +38,8 @@ def test_initial_generation_and_health_prompts_bound_management_narration(fixtur
     monkeypatch.setattr(wiki_lock, 'VaultWriteLock', Lock)
     runner.recording = Recording()
     runner.recording.host_context = lambda: dict(activity_date='2026-10-09',
-        issue_counts={'错误': 0, '提醒': 2, '信息': 3}, candidate_count=0)
+        issue_counts={'错误': 0, '提醒': 2, '信息': 3}, candidate_count=0,
+        activity='lint', batch_no=1, raw_ids=[r.raw_id for r in task.raw])
     monkeypatch.setattr(wiki_staging, 'validate_staging', lambda *_args, **_kwargs:
         SimpleNamespace(task_id=task.task_id, batch_no=1, staging_vault=snapshot.workspace,
                         pending_after=(), candidate_count=0, health_eligible=True, health_due=True))
@@ -65,6 +67,10 @@ def test_initial_generation_and_health_prompts_bound_management_narration(fixtur
         assert '不声称程序已跳过或已全面审查' in prompt
         assert '"activity_date":"2026-10-09"' in prompt
         assert '"提醒":2' in prompt
+        assert '"batch_no":1' in prompt and '"raw_ids":' in prompt
+        assert '不是额外独立事件、accepted或正式发布' in prompt
+    assert '"activity":"ingest"' in prompts[0]
+    assert '"activity":"lint"' in prompts[1]
 
 
 def test_support_prompt_current_semantics_does_not_require_a_prior_audit():

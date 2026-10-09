@@ -46,7 +46,9 @@ Gate 内层 JSON 顶层只 `checks`。每个程序 claim_id 恰好一次；每�
 
 除已程序核验的 provenance metadata 外，program/mixed 仅允许在 `wiki/log.md`、`wiki/体检报告.md` 和主题页 `概览` 的管理位置使用；位置合格不意味着文字自动有据。纯管理事实逐项核 program_facts，知识论断必须 raw，混合块必须 mixed 并同时核 raw 引文／语义。日志和体检报告不得递归成为知识来源；program 不得替知识消除引用错配。
 
-generation／health 初始提示传入宿主 `host_context` 的活动日期与当次计数，结构日期必须合法 YYYY-MM-DD；support 按绑定事实核验。当前页面存在及可检查 meta 描述走 program；当前候选知识关系可按实际全文与有效 raw 依据链独立判断，不要求先有 semantic-audit 事件，但仍须 raw/mixed 与准确 raw anchor。该判断不是历史执行证明，未给全库全文不能声称全库无矛盾或全面审查。
+generation／health 初始提示传入宿主 `host_context` 的活动日期与当次计数，结构日期必须合法 YYYY-MM-DD；support 按绑定事实核验。成功阶段另带固定协议映射 `activity`：generation（含修复）为 ingest，health 为 lint，检查阶段为 check；`batch_no/raw_ids` 来自宿主核验的 reservation 与 task 本批分配。consumer 校验映射、正整数且一致的批号、去重且属于冻结 raw 的范围，不另要求一个同义的 ingest 事件。这些是候选活动，不能等同正式 accepted、发布、完整阅读或独立 skip。
+
+当前页面存在及可检查 meta 描述走 program；当前候选知识关系可按实际全文与有效 raw 依据链独立判断，不要求先有 semantic-audit 事件，但仍须 raw/mixed 与准确 raw anchor。该判断不是历史执行证明，未给全库全文不能声称全库无矛盾或全面审查。
 
 异常只固定代码，不带路径、raw、响应正文或客户端异常。模型理由只存在私有 `GateResult`、反馈及私有记录中；调用方不得把它们不加筛选写产品日志。unsupported 和 uncertain 都阻止支持结论。
 

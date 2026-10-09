@@ -868,6 +868,9 @@ class CodexWikiRunner:
         from .wiki_typed import encoded
         prompt = ('\n结构活动日期必须使用合法YYYY-MM-DD，不能追加“待核验”。'
                   '仅在收到host_context时使用其当前管理计数和活动日期；缺记录不可推测。'
+                  'host_context的activity、batch_no和raw_ids限定本批候选活动：'
+                  'generation及其修复为ingest（候选整理），health为lint（体检），其他check为check；'
+                  '它们是应用协议名，不是额外独立事件、accepted或正式发布，也不证明skip或阅读动作。'
                   '来源页标题/作者按所绑定raw信封逐字取值；缺作者或发布日期用应用规定“未知”，不得自行同义改写；原始文件绑定该raw。'
                   '仅写必要日志；按该raw完整正文给出真实无知识原因，保留准确raw anchor；'
                   '不能凭长度/体裁一刀切，不能用例子替代实际理由。'

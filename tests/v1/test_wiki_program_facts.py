@@ -37,10 +37,10 @@ def test_current_observation_schema_is_strict(h, damage):
                           program_facts=content, program_facts_readback=lambda: content)
 
 
-def managed(h, text, *, path='wiki/log.md', parent=None):
+def managed(h, text, *, path='wiki/log.md', parent=None, phases=()):
     ordinary = h.make(text, path=path)
     facts = dict(pages=[], pending={'外部': [], '自述': []},
-                 query_record={'exists': False, 'sha256': None}, completed_phases=[])
+                 query_record={'exists': False, 'sha256': None}, completed_phases=list(phases))
     if PurePosixPath(path).parent.name in {'来源', '主题'}:
         meta, _ = ws._frontmatter(text)
         facts['pages'].append(dict(path=path, sha256=ws.sha256(text.encode()),
@@ -53,6 +53,39 @@ def managed(h, text, *, path='wiki/log.md', parent=None):
     return ws.build_registry(h.stage, ordinary.changes, ordinary.raws,
         program_facts=readback(), program_facts_readback=readback,
         parent_registry=parent, claim_mapping=mapping)
+
+
+@pytest.mark.parametrize('phase,activity', [('generation', 'ingest'), ('health', 'lint'),
+    ('check', 'check'), ('final-check', 'check'), ('repair-check', 'check')])
+def test_host_activity_metadata_keeps_existing_gate_and_hash_binding(h, phase, activity):
+    record = dict(phase=phase, attempt=1, final_sha256='0'*64, activity=activity,
+                  batch_no=1, raw_ids=[h.raw.stable_id])
+    registry = managed(h, '当前本批候选活动。\n', phases=(record,))
+    client = Batch()
+    result = h.gate(registry).review(client)
+    assert result.status == 'supported_candidate_not_published'
+    assert client.calls[0]['program_facts']['facts']['completed_phases'] == [record]
+    assert client.calls[0]['program_facts']['candidate_hash'] == registry.candidate_hash
+    assert '不是accepted或正式发布' in ws.SYSTEM
+    assert '不应另要求独立ingest事件证明' in ws.SYSTEM
+
+
+@pytest.mark.parametrize('damage', ['accepted_activity', 'wrong_activity', 'zero_batch',
+    'bool_batch', 'duplicate_raw', 'unknown_raw', 'different_batch', 'partial_fields'])
+def test_activity_metadata_rejects_only_consumer_verifiable_errors(h, damage):
+    first = dict(phase='generation', attempt=1, final_sha256='0'*64, activity='ingest',
+                 batch_no=1, raw_ids=[h.raw.stable_id])
+    second = dict(first, phase='health', activity='lint')
+    if damage == 'accepted_activity': first['activity'] = 'accepted'
+    if damage == 'wrong_activity': first['activity'] = 'lint'
+    if damage == 'zero_batch': first['batch_no'] = 0
+    if damage == 'bool_batch': first['batch_no'] = True
+    if damage == 'duplicate_raw': first['raw_ids'] *= 2
+    if damage == 'unknown_raw': first['raw_ids'] = ['R-not-frozen']
+    if damage == 'different_batch': second['batch_no'] = 2
+    if damage == 'partial_fields': del first['raw_ids']
+    with pytest.raises(ws.WikiSupportError, match='input_invalid|binding_mismatch'):
+        managed(h, '当前本批候选活动。\n', phases=(first, second))
 
 
 class Batch:

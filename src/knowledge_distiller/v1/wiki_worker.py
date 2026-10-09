@@ -379,9 +379,14 @@ class WikiWorker:
         prompt_context = []
         def host_context():
             from .wiki_staging import _phase_started_at
+            from .wiki_support import PHASE_ACTIVITIES
+            canonical_phase = ('generation' if generation else 'repair-check'
+                               if re.fullmatch(r'repair-[12]-check', phase) else phase)
             scan = scan_workflow_protocol(snapshot.workspace, runtime=self.store.runtime)
             context = dict(activity_date=_phase_started_at()[:10],
-                           issue_counts=dict(scan.issue_counts), candidate_count=scan.candidate_count)
+                           issue_counts=dict(scan.issue_counts), candidate_count=scan.candidate_count,
+                           activity=PHASE_ACTIVITIES[canonical_phase], batch_no=batch_no,
+                           raw_ids=list(self._batch_raw_ids(task, batch_no)))
             prompt_context[:] = [context]
             return context
         def before_spawn(**actual):
@@ -627,11 +632,24 @@ class WikiWorker:
             check_result=checked, proposal=proposal)
         return candidate, receipt
 
+    @staticmethod
+    def _batch_raw_ids(task, batch_no):
+        batches = [b for b in task.batches if b.batch_no == batch_no]
+        rows = [r for r in task.raw if r.batch_no == batch_no]
+        if (type(batch_no) is not int or batch_no < 1 or len(batches) != 1 or not rows
+                or type(batches[0].item_count) is not int or batches[0].item_count != len(rows)
+                or any(type(r.raw_id) is not str for r in rows)
+                or len({r.raw_id for r in rows}) != len(rows)):
+            raise WikiStagingError('checkpoint_binding_changed')
+        return tuple(r.raw_id for r in rows)
+
     def _program_facts(self, task, snapshot, batch_no):
         """Read-only program state plus verified successful local checkpoints."""
         from . import wiki_typed as t
         from .wiki_staging import _checkpoint_read, _verify_generation_terminal
+        from .wiki_support import PHASE_ACTIVITIES
         verify_staging_protected(snapshot)
+        raw_ids = self._batch_raw_ids(task, batch_no)
         run = self.store.runtime.run('managed', snapshot.workspace, ('describe-state',))
         if run.returncode:
             raise WikiStagingError('validation_failed')
@@ -658,7 +676,8 @@ class WikiWorker:
                 final_sha = saved['final_sha256']
                 if saved['plan_sha256'] != task.plan_sha256:
                     raise WikiStagingError('checkpoint_binding_changed')
-            if record['task_id'] != task.task_id or record['plan_sha256'] != task.plan_sha256:
+            if (record['task_id'] != task.task_id or record['plan_sha256'] != task.plan_sha256
+                    or type(record.get('batch_no')) is not int or record['batch_no'] != batch_no):
                 raise WikiStagingError('checkpoint_binding_changed')
             call = Path(record['recording_call'])
             terminal = _checkpoint_read(call / 'terminal.json')
@@ -666,7 +685,8 @@ class WikiWorker:
             final = Path(record['argv'][record['argv'].index('-o') + 1])
             if t.digest(t.read_final(final.parent, final.name)) != final_sha:
                 raise WikiStagingError('checkpoint_binding_changed')
-            item = dict(phase=phase, attempt=attempt, final_sha256=final_sha)
+            item = dict(phase=phase, attempt=attempt, final_sha256=final_sha,
+                        activity=PHASE_ACTIVITIES[phase], batch_no=batch_no, raw_ids=list(raw_ids))
             if 'started_at' in record:
                 item['started_at'] = record['started_at']
             phases.append(item)

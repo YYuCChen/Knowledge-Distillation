@@ -150,6 +150,38 @@ def worker(world, **options):
     return WikiWorker(tasks, runtime, runner, source_store=store, **options)
 
 
+def test_program_facts_validates_reservation_batch_and_real_task_raw_assignment(world, monkeypatch):
+    from dataclasses import replace
+    from knowledge_distiller.v1 import wiki_staging as staging
+    root, store, vault, runtime, tasks, task, runner = world
+    w = worker(world)
+    original = w._program_facts
+    checkpoint_read = staging._checkpoint_read
+    def facts(current_task, snapshot, batch_no):
+        value = original(current_task, snapshot, batch_no)
+        phases = json.loads(value)['completed_phases']
+        assert phases and all(p['batch_no'] == batch_no and p['raw_ids'] == [r.raw_id for r in task.raw]
+                              for p in phases)
+        assert {p['activity'] for p in phases} >= {'ingest', 'lint', 'check'}
+        with pytest.raises(staging.WikiStagingError, match='checkpoint_binding_changed'):
+            original(current_task, snapshot, 2)  # this real task has only batch 1
+        changed = replace(current_task, raw=tuple(replace(r, batch_no=2) for r in current_task.raw))
+        with pytest.raises(staging.WikiStagingError, match='checkpoint_binding_changed'):
+            original(changed, snapshot, batch_no)
+        def wrong_reservation(path):
+            record = checkpoint_read(path)
+            if path.name == 'reservation.json':
+                record['batch_no'] = 2
+            return record
+        with monkeypatch.context() as patch:
+            patch.setattr(staging, '_checkpoint_read', wrong_reservation)
+            with pytest.raises(staging.WikiStagingError, match='checkpoint_binding_changed'):
+                original(current_task, snapshot, batch_no)
+        return value
+    monkeypatch.setattr(w, '_program_facts', facts)
+    assert w.run_one().error_code is None
+
+
 @pytest.mark.parametrize('legacy', [False, True])
 def test_phase_dates_and_scan_observation_are_bound_and_not_recomputed(world, monkeypatch, legacy):
     from knowledge_distiller.v1 import wiki_staging as staging
@@ -630,6 +662,12 @@ def test_actual_knowledge_claim_ranges_publish_and_feedback_repair(world):
     phases={(p['phase'],p['attempt']) for p in facts['facts']['completed_phases']}
     assert ('generation',1) in phases and ('check',1) in phases
     if (root/'mode').read_text()=='repair': assert ('repair-check',1) in phases
+    for p in facts['facts']['completed_phases']:
+        assert p['activity'] == ('ingest' if p['phase'] == 'generation' else 'lint' if p['phase'] == 'health' else 'check')
+        assert p['batch_no'] == 1 and p['raw_ids'] == [r.raw_id for r in task.raw]
+    if (root/'mode').read_text()=='repair':
+        assert any(p['phase'] == 'generation' and p['attempt'] == 2 and p['activity'] == 'ingest'
+                   for p in facts['facts']['completed_phases'])
     claims=[c for c in registry['claims'] if c['path']=='wiki/概念/条件测试.md']
     assert claims and all(c['evidence'] for c in claims)
     assert any(e.get('start_line') and e.get('end_line') and '低温' in e['excerpt'] for c in claims for e in c['evidence'])
