@@ -27,6 +27,41 @@ def _wait_file(path, process, timeout=20):
     raise AssertionError('owned process did not publish state')
 
 
+def _post_saved_address(request, parent, data, target, trace_path, *, timeout=3):
+    from urllib.parse import parse_qs, urlsplit
+    config = data / 'local-address.json'
+    original = config.read_bytes() if config.is_file() else None
+    deadline = time.monotonic() + timeout
+    attempts = []
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f'Address save deadline exceeded: {attempts}'
+        with urllib.request.urlopen(request, timeout=remaining) as response:
+            status, final_url, body = response.status, response.geturl(), response.read()
+        saved = config.read_bytes() if config.is_file() else None
+        try:
+            values = json.loads(saved) if saved is not None else {}
+            address = {key: values.get(key) for key in ('name', 'port')}
+        except (ValueError, AttributeError):
+            address = {'invalid': True}
+        attempts.append({'status': status, 'final_url': final_url,
+                         'config_exists': saved is not None, 'address': address})
+        trace_path.write_text(json.dumps(attempts, indent=2), encoding='utf-8')
+        assert status == 200, attempts
+        if target.encode() in body:
+            return
+        final, origin = urlsplit(final_url), urlsplit(request.full_url)
+        busy = (final.scheme == origin.scheme and final.netloc == origin.netloc
+                and final.path == '/settings'
+                and parse_qs(final.query).get('message') == ['local_address_busy'])
+        assert busy and saved == original and parent.poll() is None, attempts
+        # Only startup maintenance contention may be retried; all other
+        # responses keep the original target-body assertion failure.
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, f'Address save deadline exceeded: {attempts}'
+        time.sleep(min(.05, remaining))
+
+
 @windows_only
 def test_real_app_single_instance_four_pages_and_lock_release(tmp_path):
     data = tmp_path / '中文 用户数据'
@@ -175,9 +210,10 @@ def test_settings_restart_survives_old_job_and_uses_saved_address(tmp_path):
             initial = json.loads(_wait_file(state_path, parent))
             form = urllib.parse.urlencode({'name': 'restart-test', 'port': chosen}).encode()
             request = urllib.request.Request(f"http://127.0.0.1:{initial['port']}/settings/local-address", data=form)
-            with urllib.request.urlopen(request, timeout=10) as response:
-                assert response.status == 200
-                assert f'restart-test.localhost:{chosen}'.encode() in response.read()
+            _post_saved_address(request, parent, data, f'restart-test.localhost:{chosen}',
+                                tmp_path / 'restart-address-responses.json')
+            assert json.loads((data / 'local-address.json').read_text(encoding='utf-8')) == {
+                'name': 'restart-test', 'port': chosen}
             assert parent.wait(timeout=25) == 0
             deadline = time.monotonic() + 25
             while time.monotonic() < deadline:

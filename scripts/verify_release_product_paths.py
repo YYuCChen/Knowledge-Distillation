@@ -112,7 +112,7 @@ def components(args, root):
     baseline_info = plistlib.loads((args.v2 / 'Contents/Info.plist').read_bytes())
     assert baseline_info['CFBundleVersion'] == '2026.09.30.4'
     assert baseline_info['CFBundleShortVersionString'] == '2.0'
-    public = json.loads((args.app / 'Contents/Resources/knowledge_distiller/v1/adapters/update_config.json').read_text())['public_key']
+    public = plistlib.loads((args.app / 'Contents/Info.plist').read_bytes())['SUPublicEDKey']
     envelope = args.release.read_bytes()
     results = []
     for reject in (False, True):
