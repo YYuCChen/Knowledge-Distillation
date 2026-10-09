@@ -5,15 +5,16 @@ from .vault_access import publication_status, open_saved_location
 import json
 import re
 import sqlite3
+from io import BytesIO
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote, urlsplit
 
-from flask import Flask, abort, redirect, render_template, request, send_file, url_for
+from flask import Flask, abort, g, redirect, render_template, request, send_file, url_for
 from .file_sources import prepare_direct_text, prepare_file
 
-from .confirmation_display import english_assistance, local_choices
+from .confirmation_display import english_assistance, english_candidate_display, local_choices
 from .chrome import ChromeSessionError
 from .bilibili import BilibiliSourceError
 from .pipeline import Distiller
@@ -23,6 +24,130 @@ from .store import Store
 
 
 from .intake import URL_RE, LABELS, links_in, platform_for_url, needs_content_choice
+
+
+_PHASE4_MESSAGES = {
+    "wiki_kit_installed": "知识库工具已安装。",
+    "wiki_kit_repaired": "知识库工具已修复。",
+    "wiki_kit_recovered": "知识库工具安装恢复已完成，请重新核对状态。",
+    "wiki_style_installed": "知识库页面样式已安装，尚未启用。",
+    "wiki_style_updated": "知识库页面样式已更新，当前启用状态保持不变。",
+    "wiki_style_enabled": "知识库页面样式设置已保存。重新打开这个 Obsidian 库后生效。",
+    "wiki_style_disabled": "知识库页面样式的关闭设置已保存。重新打开这个 Obsidian 库后生效；正文和链接保持不变。",
+    "wiki_style_recovered": "知识库页面样式恢复已完成，请重新核对状态。",
+    "wiki_settings_vault_required": "请先选择可用的 Obsidian 库位置。",
+    "wiki_settings_action_invalid": "这个知识库设置动作不可用，请刷新后重试。",
+    "wiki_settings_update_reserved": "应用正在准备更新，暂时不能更改知识库设置。",
+    "wiki_settings_operation_busy": "任务或组件操作正在进行，暂时不能更改知识库设置。",
+    "wiki_settings_vault_busy": "知识库正在被其他整理会话使用，请完成后重试。",
+    "wiki_kit_conflict": "检测到工具文件修改，现有内容已保留。",
+    "wiki_style_conflict": "检测到现有样式或设置修改，现有内容已保留。",
+    "wiki_kit_action_failed": "知识库工具操作未完成，现有内容已保留。",
+    "wiki_style_action_failed": "知识库页面样式操作未完成，现有内容已保留。",
+}
+_PHASE4_SUCCESS_MESSAGES = {
+    "wiki_kit_installed", "wiki_kit_repaired", "wiki_kit_recovered",
+    "wiki_style_installed", "wiki_style_updated", "wiki_style_enabled",
+    "wiki_style_disabled", "wiki_style_recovered",
+}
+
+
+def _phase4_status_record(status) -> dict:
+    """Copy the small public status contract without exposing service internals."""
+    from dataclasses import asdict, is_dataclass
+
+    if is_dataclass(status):
+        return asdict(status)
+    if isinstance(status, dict):
+        return dict(status)
+    return {
+        name: getattr(status, name, None)
+        for name in ("state", "kit_version", "action", "error_code")
+    }
+
+
+def _wiki_kit_settings_view(status=None, *, vault_configured: bool = True) -> dict:
+    if not vault_configured:
+        return {
+            "state": "unavailable",
+            "dot": "unconfigured",
+            "text": "请先选择 Obsidian 库",
+            "action": None,
+            "action_label": None,
+            "stopped_label": "等待库位置",
+        }
+    record = _phase4_status_record(status) if status is not None else {}
+    state = record.get("state")
+    if state == "missing":
+        return {"state": state, "dot": "unconfigured", "text": "尚未安装",
+                "action": "install", "action_label": "安装工具", "stopped_label": None}
+    if state == "update_available":
+        return {"state": state, "dot": "problem", "text": "需要修复",
+                "action": "repair", "action_label": "修复工具", "stopped_label": None}
+    if state == "ready":
+        version = record.get("kit_version")
+        text = f"已安装 · 版本 {version}" if isinstance(version, str) and version else "已安装"
+        return {"state": state, "dot": "configured", "text": text,
+                "action": None, "action_label": None, "stopped_label": "无需操作"}
+    if state == "recovery_required":
+        return {"state": state, "dot": "problem", "text": "安装未完成，需要恢复",
+                "action": "recover", "action_label": "恢复工具", "stopped_label": None}
+    if state == "conflict":
+        return {"state": state, "dot": "problem", "text": "检测到修改，未覆盖",
+                "action": None, "action_label": None, "stopped_label": "已停止"}
+    return {"state": "unavailable", "dot": "problem", "text": "暂时无法读取状态",
+            "action": None, "action_label": None, "stopped_label": "已停止"}
+
+
+def _wiki_style_settings_view(status=None, *, vault_configured: bool = True) -> dict:
+    if not vault_configured:
+        return {
+            "state": "unavailable",
+            "dot": "unconfigured",
+            "text": "请先选择 Obsidian 库",
+            "action": None,
+            "action_label": None,
+            "stopped_label": "等待库位置",
+        }
+    record = _phase4_status_record(status) if status is not None else {}
+    state = record.get("state")
+    rows = {
+        "missing": ("unconfigured", "尚未安装", "install", "安装样式", None),
+        "installed": ("unconfigured", "已安装，未启用", "enable", "启用样式", None),
+        "enabled": ("configured", "已启用", "disable", "关闭此样式", None),
+        "update_available": ("problem", "有新版样式", "update", "更新样式", None),
+        "conflict": ("problem", "检测到现有样式，未覆盖", None, None, "已停止"),
+        "recovery_required": ("problem", "安装未完成，需要恢复", "recover", "恢复样式", None),
+        "asset_unavailable": ("unconfigured", "请先安装知识库工具", None, None, "等待工具"),
+    }
+    if state not in rows:
+        return {"state": "unavailable", "dot": "problem", "text": "暂时无法读取状态",
+                "action": None, "action_label": None, "stopped_label": "已停止"}
+    dot, text, action, action_label, stopped_label = rows[state]
+    return {"state": state, "dot": dot, "text": text, "action": action,
+            "action_label": action_label, "stopped_label": stopped_label}
+
+
+def _phase4_error_message(kind: str, error: Exception) -> str:
+    code = getattr(error, "code", None)
+    if code == "update_reserved":
+        return "wiki_settings_update_reserved"
+    if code == "operation_busy":
+        return "wiki_settings_operation_busy"
+    if code == "vault_busy":
+        return "wiki_settings_vault_busy"
+    conflicts = {
+        "install_conflict", "install_symlink", "install_target_invalid",
+        "kit_unmanaged_target", "kit_drift", "kit_receipt_invalid",
+        "kit_symlink",
+        "recovery_conflict", "style_unmanaged_target", "style_drift",
+        "style_receipt_invalid", "appearance_invalid",
+    }
+    if code in conflicts:
+        return f"{kind}_conflict"
+    return f"{kind}_action_failed"
+
+
 ERROR_TEXT = {
     "bilibili_scope_changed": "B 站范围或分段内容已变化，请重新核对范围。已有结果保留。",
     "bilibili_range_too_large": "这个 B 站范围超过本次可完整核对的 200 条上限，请选择更小范围或分段链接。未提交部分范围。",
@@ -207,17 +332,177 @@ ERROR_TEXT = {
 }
 
 
+_WIKI_RESULT_PATHS = frozenset({"wiki/index.md", "wiki/待确认.md"})
+_WIKI_ACTIONS = frozenset({
+    "submit", "retry", "settings", "open_index", "open_pending", "refresh",
+})
+
+
+def _wiki_count(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _wiki_status_view(snapshot: object, vault_path: str | None) -> dict[str, object]:
+    """Turn the durable workflow snapshot into the approved seven UI states.
+
+    Missing or malformed evidence stays unknown.  This layer never infers a
+    percentage, queue position, task result or Vault URL.
+    """
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    state = snapshot.get("state") if isinstance(snapshot.get("state"), str) else "unknown"
+    error_code = snapshot.get("error_code") if isinstance(snapshot.get("error_code"), str) else None
+    task_id = snapshot.get("task_id")
+    if not isinstance(task_id, str) or re.fullmatch(r"[0-9a-f]{32}", task_id) is None:
+        task_id = None
+    raw_count = _wiki_count(snapshot.get("raw_count"))
+    batch_count = _wiki_count(snapshot.get("batch_count"))
+    completed = _wiki_count(snapshot.get("completed_batch_count"))
+    candidate_count = _wiki_count(snapshot.get("candidate_count"))
+    actions = {
+        action for action in snapshot.get("actions", ())
+        if isinstance(action, str) and action in _WIKI_ACTIONS
+    } if isinstance(snapshot.get("actions", ()), (list, tuple, set, frozenset)) else set()
+    result_paths = {
+        value for value in snapshot.get("result_relpaths", ())
+        if isinstance(value, str) and value in _WIKI_RESULT_PATHS
+    } if isinstance(snapshot.get("result_relpaths", ()), (list, tuple, set, frozenset)) else set()
+
+    view: dict[str, object] = {
+        "state": state,
+        "visible": state != "idle",
+        "running": state in {"preparing", "running", "validating", "publishing"},
+        "queued": state == "queued",
+        "tone": None,
+        "title": "整理状态暂不可用",
+        "detail": "正在重新读取知识库状态",
+        "action": None,
+        "button_label": None,
+        "task_id": task_id,
+        "index_url": None,
+        "pending_url": None,
+        "show_index": False,
+        "show_pending": False,
+    }
+
+    if error_code == "vault_busy":
+        view.update(
+            state="conflict", tone="attention",
+            title="知识库正在由另一个整理任务维护",
+            detail="当前任务结束后可以再次开始；本次没有创建重复任务",
+            button_label="暂时不可开始",
+        )
+    elif "settings" in actions:
+        settings_detail = {
+            "config_required": "请先在设置中连接 Codex；连接后回到这里开始",
+            "runner_unavailable": "请先在设置中检查 Codex；可用后回到这里开始",
+            "model_unavailable": "请先在设置中选择可用的 Codex 模型；完成后回到这里开始",
+            "kit_missing": "知识库工具尚未安装；请先在设置中检查知识库",
+            "kit_drift": "知识库工具需要修复；请先在设置中检查知识库",
+            "kit_incompatible": "知识库工具需要更新；请先在设置中检查知识库",
+        }.get(error_code, "请先在设置中检查知识整理配置；完成后回到这里开始")
+        view.update(
+            state="settings", tone="attention", title="还不能开始整理",
+            detail=settings_detail,
+            action="settings", button_label="打开设置",
+        )
+    elif state == "ready":
+        title = f"{raw_count} 份素材待整理" if raw_count is not None else "素材待整理"
+        view.update(
+            title=title, detail="会整理本次开始前已经收到的全部素材",
+            action="submit" if "submit" in actions else None,
+            button_label="开始整理" if "submit" in actions else None,
+        )
+    elif state == "queued":
+        detail = f"本次 {raw_count} 份素材 · 等待开始" if raw_count is not None else "等待开始"
+        view.update(tone="attention", title="知识整理已排队", detail=detail,
+                    button_label="已在等待")
+    elif state in {"preparing", "running", "validating", "publishing"}:
+        title = "正在整理"
+        if completed is not None and batch_count is not None:
+            title += f" · 已完成 {completed} / {batch_count} 批"
+        detail = f"本次 {raw_count} 份素材；完成后可以继续在 Obsidian 阅读" if raw_count is not None else "完成后可以继续在 Obsidian 阅读"
+        view.update(title=title, detail=detail, button_label="正在整理")
+    elif state == "succeeded":
+        title = f"知识整理完成 · {batch_count} 批" if batch_count is not None else "知识整理完成"
+        detail = "已保存到知识库"
+        if candidate_count is not None and candidate_count > 0:
+            detail += f"；还有 {candidate_count} 条待确认"
+        view.update(state="succeeded", tone="complete", title=title, detail=detail)
+        view["show_index"] = "open_index" in actions and "wiki/index.md" in result_paths
+        view["show_pending"] = (candidate_count is not None and candidate_count > 0
+                                and "open_pending" in actions
+                                and "wiki/待确认.md" in result_paths)
+    elif state == "failed":
+        title = "本次知识整理未完成"
+        if (completed is not None and batch_count is not None
+                and completed < batch_count):
+            title = f"本次整理停在第 {completed + 1} 批"
+        can_retry = "retry" in actions and task_id is not None
+        if can_retry:
+            detail = "已完成批次并保留；可以从未完成批次继续"
+            if completed is not None:
+                detail = f"已完成 {completed} 批并保留；可以从未完成批次继续"
+        elif error_code == "publish_conflict":
+            title = "知识库内容已经变化"
+            detail = "为保护新的修改，本次没有覆盖；请刷新后查看当前状态"
+        elif error_code == "recovery_failed" or snapshot.get("recovery_state") in {"required", "failed"}:
+            title = "本次整理需要恢复"
+            detail = "已有结果保持不变；暂时不能继续，请刷新后查看当前状态"
+        else:
+            detail = "已完成批次保持不变；暂时不能继续，请刷新后查看当前状态"
+        view.update(tone="error", title=title, detail=detail,
+                    action="retry" if can_retry else None,
+                    button_label="继续整理" if can_retry else None)
+    elif state == "idle":
+        view["visible"] = False
+
+    if view["show_index"]:
+        view["index_url"] = _obsidian_url(vault_path, "wiki/index.md")
+    if view["show_pending"]:
+        view["pending_url"] = _obsidian_url(vault_path, "wiki/待确认.md")
+    return view
+
+
 def create_app(
     store: Store,
     distiller: Distiller | Callable[[], Distiller],
     settings_service: SettingsService | None = None,
     *,
     wake_worker: Callable[[], None] | None = None,
-    organization=None,
     collection_service=None,
+    wiki_workflow=None,
+    admission_gate=None,
+    wiki_kit_installer=None,
+    wiki_style_service=None,
 ) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     store.initialize()
+
+    @app.before_request
+    def enter_admission_gate():
+        if (admission_gate is None or request.method != "POST"
+                or request.endpoint == "insights.mutate"):
+            return None
+        try:
+            g.admission_lease = admission_gate.enter()
+        except Exception as error:
+            # Import lazily so source-level Web tests can still compose without
+            # the desktop lifecycle. Only the fixed lifecycle code crosses the
+            # boundary; arbitrary exceptions remain visible to the test/server.
+            from .worker_lifecycle import AdmissionError
+            if isinstance(error, AdmissionError) and str(error) == "update_reserved":
+                return ('应用正在准备更新，暂时不能开始新的操作。', 503,
+                        {'Content-Type': 'text/plain; charset=utf-8'})
+            raise
+        return None
+
+    @app.teardown_request
+    def leave_admission_gate(_error):
+        lease = getattr(g, "admission_lease", None)
+        if lease is not None:
+            lease.close()
+
     from werkzeug.exceptions import HTTPException
     @app.errorhandler(HTTPException)
     def http_error(error):
@@ -229,6 +514,103 @@ def create_app(
     # Starting the app must not mutate Keychain items. Label updates belong to
     # explicit configuration saves; a new app signature may require permission.
     app.register_blueprint(settings_blueprint(settings_service))
+    if wiki_kit_installer is not None:
+        app.extensions["wiki_kit_installer"] = wiki_kit_installer
+    if wiki_style_service is not None:
+        app.extensions["wiki_style_service"] = wiki_style_service
+
+    @app.context_processor
+    def phase4_settings_context():
+        if request.endpoint != "settings.page":
+            return {}
+        vault = store.setting("vault_path")
+        configured = isinstance(vault, str) and bool(vault.strip())
+        kit_status = style_status = None
+        if configured and wiki_kit_installer is not None:
+            try:
+                kit_status = wiki_kit_installer.status(vault)
+            except Exception:
+                kit_status = None
+        if configured and wiki_style_service is not None:
+            try:
+                style_status = wiki_style_service.status(vault)
+            except Exception:
+                style_status = None
+        message_key = request.args.get("message", "")
+        return {
+            "wiki_kit_status": _wiki_kit_settings_view(
+                kit_status,
+                vault_configured=configured,
+            ),
+            "wiki_style_status": _wiki_style_settings_view(
+                style_status,
+                vault_configured=configured,
+            ),
+            "phase4_message": _PHASE4_MESSAGES.get(message_key),
+            "phase4_message_error": (
+                message_key not in _PHASE4_SUCCESS_MESSAGES
+                if message_key in _PHASE4_MESSAGES else None
+            ),
+        }
+
+    def phase4_back(message: str):
+        return redirect(url_for("settings.page", open="paths", message=message))
+
+    def phase4_vault():
+        vault = store.setting("vault_path")
+        return vault if isinstance(vault, str) and vault.strip() else None
+
+    @app.post("/settings/wiki-kit")
+    def mutate_wiki_kit():
+        action = request.form.get("action", "")
+        methods = {
+            "install": getattr(wiki_kit_installer, "install", None),
+            "repair": getattr(wiki_kit_installer, "install", None),
+            "recover": getattr(wiki_kit_installer, "recover", None),
+        }
+        operation = methods.get(action)
+        if operation is None:
+            return phase4_back("wiki_settings_action_invalid")
+        vault = phase4_vault()
+        if vault is None:
+            return phase4_back("wiki_settings_vault_required")
+        try:
+            operation(vault)
+        except Exception as error:
+            return phase4_back(_phase4_error_message("wiki_kit", error))
+        return phase4_back({
+            "install": "wiki_kit_installed",
+            "repair": "wiki_kit_repaired",
+            "recover": "wiki_kit_recovered",
+        }[action])
+
+    @app.post("/settings/wiki-style")
+    def mutate_wiki_style():
+        action = request.form.get("action", "")
+        methods = {
+            "install": getattr(wiki_style_service, "install", None),
+            "update": getattr(wiki_style_service, "install", None),
+            "enable": getattr(wiki_style_service, "enable", None),
+            "disable": getattr(wiki_style_service, "disable", None),
+            "recover": getattr(wiki_style_service, "recover", None),
+        }
+        operation = methods.get(action)
+        if operation is None:
+            return phase4_back("wiki_settings_action_invalid")
+        vault = phase4_vault()
+        if vault is None:
+            return phase4_back("wiki_settings_vault_required")
+        try:
+            operation(vault)
+        except Exception as error:
+            return phase4_back(_phase4_error_message("wiki_style", error))
+        return phase4_back({
+            "install": "wiki_style_installed",
+            "update": "wiki_style_updated",
+            "enable": "wiki_style_enabled",
+            "disable": "wiki_style_disabled",
+            "recover": "wiki_style_recovered",
+        }[action])
     from .collections import Collections, CollectionDiscovery
     from .douyin_collections import DouyinCollections, CollectionError
     from .collection_web import collection_blueprint, MESSAGES
@@ -245,32 +627,74 @@ def create_app(
     app.register_blueprint(topic_blueprint(store, _obsidian_url))
 
     @app.context_processor
-    def organization_context():
-        from .organization import organization_status
-        try:
-            return {'organization_status': organization_status(store)}
-        except (ValueError, sqlite3.Error):
-            return {'organization_status': {'pending': 0, 'error': '暂时无法读取待整理知识。'}}
+    def wiki_context():
+        cached = getattr(g, "wiki_status", None)
+        if cached is None:
+            try:
+                snapshot = wiki_workflow.snapshot() if wiki_workflow is not None else {"state": "idle"}
+                cached = _wiki_status_view(snapshot, store.setting("vault_path"))
+            except (OSError, sqlite3.Error, ValueError, RuntimeError):
+                cached = _wiki_status_view({"state": "unknown"}, None)
+            g.wiki_status = cached
+        return {"wiki_status": cached}
 
     @app.post('/organization')
     def organize():
-        from knowledge_distiller.organization_service import OrganizationStartKind
-        if organization is None:
+        if wiki_workflow is None:
             return '整理服务尚未启动，请从日常启动入口打开程序。', 503, {'Content-Type': 'text/plain; charset=utf-8'}
-        engine = organization() if callable(organization) else organization
-        result = engine.start_or_reuse()
-        if result.kind is OrganizationStartKind.READ_FAILED:
-            return '暂时无法读取待整理知识，本次没有开始。', 503, {'Content-Type': 'text/plain; charset=utf-8'}
-        if wake_worker is not None:
-            wake_worker()
-        return redirect(url_for('home'))
+        try:
+            result = wiki_workflow.submit_all()
+        except (OSError, sqlite3.Error, ValueError, RuntimeError):
+            return ('暂时无法确认整理状态，请刷新后查看；已有记录保持不变。', 503,
+                    {'Content-Type': 'text/plain; charset=utf-8'})
+        g.wiki_status = _wiki_status_view(result, store.setting("vault_path"))
+        return render_template("home.html", **_home_context(store, None))
+
+    @app.post('/organization/<task_id>/retry')
+    def retry_organization(task_id: str):
+        if wiki_workflow is None:
+            return '整理服务尚未启动，请从日常启动入口打开程序。', 503, {'Content-Type': 'text/plain; charset=utf-8'}
+        if re.fullmatch(r"[0-9a-f]{32}", task_id) is None:
+            abort(404)
+        try:
+            result = wiki_workflow.retry(task_id)
+        except (OSError, sqlite3.Error, ValueError, RuntimeError):
+            return ('暂时无法确认整理状态，请刷新后查看；已有记录保持不变。', 503,
+                    {'Content-Type': 'text/plain; charset=utf-8'})
+        g.wiki_status = _wiki_status_view(result, store.setting("vault_path"))
+        return render_template("home.html", **_home_context(store, None))
 
     def service() -> Distiller:
         return distiller() if callable(distiller) else distiller
 
+    @app.post('/collections/<int:operation>/visibility/<action>')
+    def collection_visibility(operation, action):
+        from .collection_visibility import CollectionVisibility, CollectionVisibilityError
+        if action not in {'hide', 'restore'}:
+            abort(404)
+        try:
+            visibility = CollectionVisibility(store)
+            (visibility.hide if action == 'hide' else visibility.restore)(operation)
+        except CollectionVisibilityError:
+            abort(409)
+        # Visibility never calls resume, preparation or wake.
+        return redirect(url_for('home'), code=303)
+
+    def prepare_remaining(item_id, result):
+        if result.state == 'waiting_user':
+            # One exact item, using the real producer queue and proof lifecycle.
+            store.discover_pending_presentations(item_id=item_id, limit=1)
+        row = store.item_bundle(item_id)
+        if row is not None and row['state'] == 'queued' and wake_worker is not None:
+            wake_worker()
+
     @app.get("/")
     def home():
-        store.expire_submitted_sources()
+        if wiki_workflow is not None:
+            try:
+                wiki_workflow.request_refresh(force=False)
+            except (OSError, sqlite3.Error, ValueError, RuntimeError):
+                pass
         selected = request.args.get("item", type=int)
         return render_template("home.html", **_home_context(store, selected))
 
@@ -361,10 +785,10 @@ def create_app(
 
     @app.get('/items/<int:item_id>/confirmation-context/<concern_id>')
     def confirmation_context(item_id, concern_id):
-        row = store.item_bundle(item_id)
-        if row is None or not row['confirmation_json']:
+        prepared = _ready_presentation_context(store, item_id)
+        if prepared is None:
             abort(404)
-        pending = store.confirmation_view(item_id)
+        pending = prepared['pending']
         concern = next((c for c in pending.get('concerns', [])
                         if concern_id in {c.get('concern_uid'), c.get('audio_name')}), None)
         if concern is None:
@@ -421,6 +845,18 @@ def create_app(
         action = 'candidate' if 'candidate_value' in request.form else request.form.get('action', '')
         value = request.form.get('candidate_value', request.form.get('value', ''))
         try:
+            submitted = dict(request_id=request.form.get('request_id', ''),
+                group_id=request.form.get('group_id', ''), group_revision=request.form.get('group_revision', ''),
+                selected_member_uids=request.form.getlist('selected_member_uids'), action=action, value=value)
+            # Parse the existing request shape; Store alone validates the
+            # authoritative payload/selection receipt. No new decision here.
+            if (submitted['request_id'] and len(submitted['request_id']) <= 128
+                    and submitted['selected_member_uids']
+                    and len(set(submitted['selected_member_uids'])) == len(submitted['selected_member_uids'])):
+                if store.group_decision(item_id, submitted) is not None:
+                    return redirect(url_for('home', item=item_id))
+            if _ready_presentation_context(store, item_id) is None:
+                abort(409)
             result = service().resolve_group(item_id, action, value,
                 token=request.form.get('token', ''), request_id=request.form.get('request_id', ''),
                 group_id=request.form.get('group_id', ''), group_revision=request.form.get('group_revision', ''),
@@ -428,8 +864,7 @@ def create_app(
         except ValueError as error:
             return render_template('home.html', **_home_context(store, item_id,
                 confirmation_error={'id': item_id, 'concern_id': '', 'message': str(error), 'value': value})), 409
-        if result.state == 'queued' and wake_worker is not None:
-            wake_worker()
+        prepare_remaining(item_id, result)
         return redirect(url_for('home', item=item_id))
 
     @app.post("/items/<int:item_id>/confirm")
@@ -448,6 +883,15 @@ def create_app(
                     if concern:
                         display = local_choices(concern)
                         submitted_value = display['prefix'] + value.strip() + display['suffix']
+            if request.form.get('concern_revision'):
+                try:
+                    prior = store.confirmation_decision(item_id, request.form['concern_revision'], action, submitted_value)
+                except ValueError:
+                    abort(409)
+                if prior is not None:
+                    return redirect(url_for('home', item=item_id))
+            if _ready_presentation_context(store, item_id) is None:
+                abort(409)
             result = service().resolve(
                 item_id, action, submitted_value, token=request.form.get("token", ""),
                 concern_id=request.form.get("concern_id", ""),
@@ -461,16 +905,31 @@ def create_app(
                     "message": str(error), "value": value,
                 }),
             ), 400
-        if result.state == "queued" and wake_worker is not None:
-            wake_worker()
+        prepare_remaining(item_id, result)
         return redirect(url_for("home", item=item_id))
 
     @app.get("/items/<int:item_id>/confirmation-audio")
     def confirmation_audio(item_id: int):
-        path = service().confirmation_audio(item_id, request.args.get("concern_id", ""))
-        if path is None or not path.is_file():
-            abort(404)  # A missing clip is recorded as serve_failed by the distiller.
-        response = send_file(path, mimetype="audio/wav", conditional=True)
+        prepared = _ready_presentation_context(store, item_id)
+        if prepared is None:
+            abort(404)
+        pending = prepared['pending']
+        requested = request.args.get('concern_id', '')
+        concerns = pending.get('concerns', [])
+        matches = (concerns if not requested and len(concerns) == 1 else
+                   [c for c in concerns if requested and
+                    requested in {c.get('concern_uid'), c.get('audio_name')}])
+        if len(matches) != 1:
+            abort(404)
+        from .confirmation_preparation import prepared_audio, PreparationError
+        try:
+            data = prepared_audio(pending, prepared['item_runtime_root'], matches[0]['concern_uid'],
+                                  source_descriptor=prepared['source_descriptor'])
+        except (PreparationError, OSError, ValueError, TypeError, KeyError):
+            abort(404)
+        if data is None:
+            abort(404)
+        response = send_file(BytesIO(data), mimetype="audio/wav", conditional=True)
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -587,6 +1046,64 @@ def create_app(
 from .link_intake import douyin_url
 
 
+def _ready_presentation_context(store, item_id):
+    """Read the whole current pending before any group/member projection."""
+    from .confirmation_preparation import ready, needs_sentence_fields
+    from .store import SourceReviewConflict
+    row = store.item_bundle(item_id)
+    if row is None or row['state'] != 'waiting_user' or not row['confirmation_json'] or row['dismissed_at'] is not None:
+        return None
+    try:
+        context = store.presentation_context(item_id)
+        pending = context['pending']
+        if not ready(pending, context['item_runtime_root'], source_descriptor=context['source_descriptor']):
+            return None
+        if pending.get('kind') != 'image':
+            for concern in pending.get('concerns', []):
+                if needs_sentence_fields(pending, concern):
+                    english_candidate_display(pending['snapshot'], concern)
+        return context
+    except (SourceReviewConflict, ValueError, TypeError, KeyError, OSError):
+        return None
+
+
+def _saved_raw(store, row, vault):
+    """Read a durable writer receipt, never rehash files in home polling."""
+    if row['state'] not in {'succeeded', 'raw_saved'}:
+        return False
+    from .database import connect
+    with connect(store.path) as db:
+        # Writer-only immutable events and records, with current head and owner.
+        # This is historical successful persistence, not fresh filesystem health.
+        return db.execute('''SELECT 1 FROM ingestion_events e JOIN raw_records r
+            ON r.raw_id=json_extract(e.detail_json,'$.manifest.raw_id')
+            WHERE e.item_id=? AND e.kind='raw_verified' AND e.contract='raw-verified-v1'
+              AND json_extract(e.detail_json,'$.manifest.owner_item_id')=e.item_id
+              AND e.subject_kind=r.subject_kind AND e.subject_id=r.subject_id
+              AND r.content_sha256=json_extract(e.detail_json,'$.manifest.content_sha256')
+              AND r.written_at IS NOT NULL
+              AND NOT EXISTS(SELECT 1 FROM raw_records n WHERE n.supersedes=r.raw_id)
+              AND (e.subject_kind='material' AND e.subject_id=? OR e.subject_kind='capture'
+                   AND EXISTS(SELECT 1 FROM capture_state s WHERE s.item_id=e.item_id AND s.capture_id=e.subject_id))
+            LIMIT 1''', (row['item_id'], row['material_id'])).fetchone() is not None
+
+
+def _corrected_annotation_items(store, item_ids):
+    """Only an explicit user correction withdraws a prior independent card."""
+    from .database import connect
+    if not item_ids:
+        return set()
+    with connect(store.path) as db:
+        return {r['item_id'] for r in db.execute('''SELECT s.item_id FROM capture_state s
+            JOIN capture_identity_events e USING(capture_id)
+            WHERE s.item_id IN (''' + ','.join('?' for _ in item_ids) + ''')
+              AND e.event_id=(SELECT MAX(n.event_id) FROM capture_identity_events n
+                             WHERE n.capture_id=e.capture_id)
+              AND e.result='annotation' AND e.basis='用户' AND e.target_message_id IS NOT NULL
+              AND EXISTS(SELECT 1 FROM capture_identity_events old WHERE old.capture_id=e.capture_id
+                         AND old.event_id<e.event_id AND old.result IN ('my_thought','third_party'))''',tuple(item_ids))}
+
+
 def _home_context(
     store: Store,
     selected: int | None,
@@ -606,20 +1123,65 @@ def _home_context(
     if selected_row is not None and selected_row['dismissed_at'] is None and not any(r['item_id']==selected for r in rows):
         rows.insert(0,selected_row)
     from .collections import Collections
-    from .collection_web import cards
-    collection_cards = cards(Collections(store))
+    from .collection_web import card
+    from .database import connect
+    service = Collections(store)
+    with connect(store.path) as db:
+        operation_ids = [r[0] for r in db.execute('SELECT operation_id FROM collection_operations ORDER BY created_at DESC,operation_id DESC LIMIT 30')]
+        if selected is not None:
+            operation_ids += [r[0] for r in db.execute('SELECT operation_id FROM collection_members WHERE item_id=? LIMIT 1',(selected,)) if r[0] not in operation_ids]
+    collection_cards = [card(service.detail(operation)) for operation in operation_ids]
+    from .collection_visibility import CollectionVisibility
+    visibility = CollectionVisibility(store)
+    hidden_collections = [c for c in collection_cards if visibility.visibility(c['operation_id']) == 'hidden']
+    hidden_ids = {m['item_id'] for c in hidden_collections for m in c['members']}
+    # Explicit read-through is display only, including original source links.
+    viewed = request.args.get('view_collection', type=int) if request else None
+    viewed_ids = {m['item_id'] for c in hidden_collections if c['operation_id'] == viewed for m in c['members']}
+    known = {r['item_id'] for r in rows}
+    active_collections = [c for c in collection_cards if c['state'] in {'queued','working','waiting_user'}]
+    latest_stopped = next((c for c in collection_cards if c['state']=='cancelled' and c not in hidden_collections),None)
+    for c in collection_cards:
+        # Completed historical members already use the bounded recent-items
+        # page. Only current work, one stopped task, or explicit read-through
+        # needs an expanded scope; never hydrate every historical collection.
+        if c not in active_collections and c is not latest_stopped and c['operation_id'] != viewed:
+            continue
+        for member in c['members']:
+            if member['item_id'] not in known:
+                rows.append(store.item_bundle(member['item_id']))
+                known.add(member['item_id'])
+    withdrawn = _corrected_annotation_items(store, {r['item_id'] for r in rows})
+    all_rows = rows
+    rows = [r for r in rows if r['item_id'] not in withdrawn
+            and (r['item_id'] not in hidden_ids or r['item_id'] in viewed_ids)]
+    saved = {r['item_id'] for r in all_rows if _saved_raw(store, r, vault_path)}
+    stopped_ids = {m['item_id'] for c in collection_cards if c['state']=='cancelled' for m in c['members']}
+    preparing_members = []
+    preparing_ids = set()
+    for row in rows:
+        if not row['confirmation_json'] or row['state'] not in {'queued', 'working', 'waiting_user', 'failed'}:
+            continue
+        if row['state']=='failed' and json.loads(row['confirmation_json']).get('presentation_preparation',{}).get('outcome')!='failed':
+            continue
+        context = store.presentation_context(row['item_id'])
+        from .confirmation_preparation import presentation_state
+        pending = context['pending']
+        if presentation_state(pending, context['item_runtime_root'], source_descriptor=context['source_descriptor'])['outcome'] in {'not-ready','failed'}:
+            preparing_ids.add(row['item_id'])
+            preparing_members.extend('member-'+str(row['item_id'])+'-'+group['member_uids'][0]
+                for group in pending.get('groups', []) if group['member_uids'])
     selected_collection = next((c for c in collection_cards if any(m['item_id']==selected for m in c['members'])),None)
     processing = tuple(
-        _item_view(row, vault_path, store.path.parent) for row in rows if row["state"] == "working"
+        _item_view(row, vault_path, store.path.parent) for row in rows
+        if row["state"] == "working" and row['item_id'] not in preparing_ids
     )
     waiting = tuple(
-        _item_view(row, vault_path, store.path.parent) for row in sorted((r for r in rows if r["state"] == "queued"),
+        _item_view(row, vault_path, store.path.parent) for row in sorted((r for r in rows if r["state"] == "queued" and r['item_id'] not in preparing_ids and r['item_id'] not in stopped_ids),
             key=lambda r: (r["queued_at"] or "", r["item_id"]))
     )
     # Queue identities belong to cards, not each item's most recent update.
-    scopes = [('items', 'independent')]
-    if selected_collection:
-        scopes.append(('collection', str(selected_collection['operation_id'])))
+    scopes = [('items', 'independent')] + [('collection', str(c['operation_id'])) for c in collection_cards]
     queue = [entry for kind, scope in scopes for entry in store.manual_cards(kind, scope)]
     queue.sort(key=lambda entry: entry['enqueue_seq'])
     row_by_id = {row['item_id']: row for row in rows}
@@ -628,13 +1190,18 @@ def _home_context(
         row = row_by_id.get(entry['item_id'])
         if row is None or row['state'] != 'waiting_user':
             continue
-        pending = store.confirmation_view(row['item_id'])
+        prepared = _ready_presentation_context(store, row['item_id'])
+        if prepared is None:
+            continue
+        pending = prepared['pending']
         group = next((g for g in pending.get('groups', []) if g['group_id'] == entry['group_id']), None)
         if group is None:
             continue
         members = set(group['member_uids'])
         projected = {**pending, 'concerns': [c for c in pending.get('concerns', []) if c['concern_uid'] in members][:1]}
         view = _item_view({**dict(row), 'confirmation_json': json.dumps(projected)}, vault_path, store.path.parent)
+        if view['confirmation'] is None:
+            continue
         view['group'] = group
         view['enqueue_seq'] = entry['enqueue_seq']
         todo_cards.append(view)
@@ -644,26 +1211,51 @@ def _home_context(
     recent = tuple(
         _item_view(row, vault_path, store.path.parent)
         for row in rows
-        if row["state"] == "succeeded" and row["payload_json"] is not None
+        if row["state"] in {'succeeded','raw_saved'} and (row["payload_json"] is not None or row['item_id'] in saved)
     )
+    recent = [dict(v, raw_saved=v['id'] in saved and not v['core_points'] and not v['other_points']
+                   and not next(r for r in rows if r['item_id']==v['id'])['payload_json']) for v in recent]
+    for c in collection_cards:
+        if c['state'] not in {'cancelled','partial','failed'} or c in hidden_collections:
+            continue
+        member_ids = {m['item_id'] for m in c['members']}
+        if any(m['state']=='working' for m in c['members']):
+            continue
+        first = next((v for v in recent if v['id'] in member_ids), None)
+        if first:
+            first['hide_operation'] = c['operation_id']
+            first['hide_total'] = c['total']
+    process_counts = dict(total=len(processing), completed=0, remaining=len(processing), position=1)
+    if processing:
+        scope = next((c for c in collection_cards if any(m['item_id']==processing[0]['id'] for m in c['members'])),None)
+        if scope:
+            completed = sum(m['item_id'] in saved for m in scope['members'])
+            process_counts = dict(total=scope['total'],completed=completed,remaining=scope['total']-completed,
+                position=next(i for i,m in enumerate(scope['members'],1) if m['item_id']==processing[0]['id']))
+    selected_view = None
+    if selected_row is not None:
+        selected_data = dict(selected_row)
+        if selected_row['state'] == 'waiting_user' and _ready_presentation_context(store, selected_row['item_id']) is None:
+            selected_data['confirmation_json'] = None
+        selected_view = _item_view(selected_data, vault_path, store.path.parent)
     return {
         "collection_cards": collection_cards,
         "selected_collection": selected_collection,
         "collection_processing": sum(c['state']=='working' for c in collection_cards),
         "collection_waiting": sum(c['counts']['queued'] for c in collection_cards if c['state']=='queued'),
-        "selected": (
-            _item_view(selected_row, vault_path, store.path.parent)
-            if selected_row is not None
-            else None
-        ),
+        "selected": selected_view,
         "processing": processing,
         "waiting": waiting,
         "todo": todo,
         "recent": recent,
+        "process_counts": process_counts,
+        "preparing_members": preparing_members,
+        "hidden_collections": hidden_collections,
+        "stopped": tuple(_item_view(r,vault_path,store.path.parent) for r in rows if r['item_id'] in stopped_ids and r['state']=='queued'),
         "form_error": form_error,
         "draft": draft,
         "confirmation_error": confirmation_error,
-        "confirmation_count": sum(max(1, len(item["confirmation"]["concerns"])) for item in todo if item["state"] == "waiting_user"),
+        "confirmation_count": len(preparing_members) + sum(max(1, len(item["confirmation"]["concerns"])) for item in todo if item["state"] == "waiting_user"),
         "pending_captures": _pending_captures(store),
     }
 
@@ -712,10 +1304,16 @@ def _item_view(row, vault_path: str | None, data_root=None) -> dict[str, object]
                 concern['context'] = None
         confirmation.setdefault("review_required", True)
         text = confirmation.get("snapshot", "")
-        confirmation["english_assistance"] = english_assistance(text)
-        if not confirmation["english_assistance"]:
-            for concern in confirmation.get("concerns", []):
-                concern["display"] = local_choices(concern)
+        confirmation["english_assistance"] = english_assistance(text) or any(
+            english_assistance(c.get('text', '')) for c in confirmation.get('concerns', []))
+        if row['state'] == 'waiting_user' and confirmation.get('kind') != 'image':
+            try:
+                for concern in confirmation.get('concerns', []):
+                    concern['display'] = (english_candidate_display(text, concern)
+                        if confirmation['english_assistance'] else local_choices(concern))
+            except (ValueError, TypeError, KeyError):
+                # No empty English header/candidates presented as a ready card.
+                confirmation = None
     author = metadata.get("author", {}) if isinstance(metadata, dict) else {}
     kind = row["source_kind"] or row["input_kind"] or platform_for_url(row["submitted_url"]) or "unknown"
     local = kind in {"direct_text", "markdown", "pdf", "epub"}
@@ -746,7 +1344,7 @@ def _item_view(row, vault_path: str | None, data_root=None) -> dict[str, object]
         "canonical_url": "" if local else row['submitted_url'] if kind == 'xiaohongshu' else row["canonical_url"] or row["submitted_url"],
         "source_type": LABELS.get(kind, "未知来源"),
         "submitted_at": _submitted_at(row["created_at"]),
-        "stages": _stage_states(row["phase"]),
+        "stages": _stage_states(row["phase"], row),
         "collected_at": _collected_at(row["published_at"]),
         "obsidian_url": publication["url"],
         "publication_saved": publication["file"] is not None,
@@ -780,22 +1378,19 @@ def _submitted_at(value: str) -> str:
     return f"{submitted.month} 月 {submitted.day} 日  {submitted:%H:%M}"
 
 
-def _stage_states(current: str) -> tuple[dict[str, str], ...]:
-    phases = (
-        ("collecting", "采集"),
-        ("reviewing", "整理"),
-        ("distilling", "提炼"),
-        ("publishing", "收录"),
-    )
-    current_index = next(
-        (index for index, (phase, _) in enumerate(phases) if phase == current), 0
-    )
+def _stage_states(current: str, row=None) -> tuple[dict[str, str], ...]:
+    phases = ('采集', '识别', '确认', '保存')
+    current_index = 0 if current == 'collecting' else 3 if current == 'publishing' else 4 if current == 'done' else 1
+    if row is not None and current not in {'collecting', 'publishing', 'done'}:
+        if row['state'] == 'waiting_user' or row['confirmation_json'] or (
+                'source_fact_id' in row.keys() and row['source_fact_id'] is not None):
+            current_index = 2
     return tuple(
         {
             "label": label,
             "state": "green" if index < current_index else "yellow" if index == current_index else "grey",
         }
-        for index, (_, label) in enumerate(phases)
+        for index, label in enumerate(phases)
     )
 
 

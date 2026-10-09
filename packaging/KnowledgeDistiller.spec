@@ -14,7 +14,8 @@ while not (opencli/'dist/src/browser/page.js').is_file():
     opencli=opencli.parent
 
 resources = runpy.run_path(str(project / 'packaging/resources.py'))
-datas = resources['application_datas'](project) + resources['opencli_datas'](opencli)
+datas = (resources['application_datas'](project) + resources['vault_kit_datas'](project)
+         + resources['opencli_datas'](opencli))
 binaries = [(shutil.which(name),'bin') for name in ('node','ffmpeg','ffprobe')]
 hiddenimports = resources['installer_hiddenimports']('darwin')
 for package in ('config','core','storage','utils','auth','tos'):
@@ -45,11 +46,36 @@ for distribution in ('pyobjc-framework-Vision', 'opencv-python',
                      'docling', 'docling-slim', 'docling-core', 'docling-parse',
                      'docling-ibm-models', 'rapidocr', 'onnxruntime'):
     datas += copy_metadata(distribution, recursive=True)
+# R05: precise runtime data, dynamic languages, metadata and local source notices.
+r05 = runpy.run_path(str(project / 'src/knowledge_distiller/v1/r05_runtime_probe.py'))
+datas += r05['validated_notice_datas'](project / 'packaging/r05-notices')
+hiddenimports += ['knowledge_distiller.v1.web_article',
+                  'knowledge_distiller.v1.r05_runtime_probe', 'trafilatura', 'httpx', 'httpcore']
+r05_languages = collect_submodules('dateparser.data.date_translation_data')
+if len(r05_languages) != 206:
+    raise RuntimeError('R05 dateparser language inventory changed')
+hiddenimports += r05_languages
+for package, patterns, count in (
+    ('trafilatura', ['settings.cfg'], 1),
+    ('justext', ['stoplists/*.txt'], 100),
+    ('tld', ['res/effective_tld_names*.dat.txt'], 2),
+):
+    r05_data = collect_data_files(package, includes=patterns)
+    if len(r05_data) != count:
+        raise RuntimeError('R05 data inventory changed: ' + package)
+    datas += r05_data
+# Babel data and pickle imports are provided by the official PyInstaller hook.
+for distribution in ('trafilatura', 'httpx', 'httpcore', 'courlan', 'htmldate',
+                     'jusText', 'babel', 'dateparser', 'lxml-html-clean', 'tld',
+                     'tzlocal', 'charset-normalizer', 'urllib3'):
+    datas += copy_metadata(distribution)
+datas += copy_metadata('Pillow')
 datas = list(dict.fromkeys(datas))
 binaries = list(dict.fromkeys(binaries))
 hiddenimports = sorted(set(hiddenimports))
 a = Analysis([str(project/'packaging/mac_entry.py')],pathex=[str(project/'src')],
              binaries=binaries,datas=datas,hiddenimports=hiddenimports,
+             module_collection_mode={'objc': 'py', 'Foundation': 'py', 'Vision': 'py'},
              excludes=['mlx', 'mlx_qwen3_asr', 'paddle', 'paddleocr', 'paddlex', 'knowledge_distiller.legacy','pytest','tkinter','IPython','matplotlib','torchaudio'])
 # OpenCV's wheel embeds an older OpenSSL 3. PyInstaller otherwise aliases Node's
 # newer OpenSSL dependency to that copy, making bundled Node fail at dyld load.

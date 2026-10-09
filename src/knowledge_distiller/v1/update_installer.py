@@ -1,6 +1,8 @@
 """Owned helper stays alive while Sparkle replaces and relaunches the desktop app."""
 from __future__ import annotations
 
+from contextlib import closing
+import hashlib
 import json
 from pathlib import Path
 import secrets
@@ -9,6 +11,8 @@ import fcntl
 import signal
 import shutil
 import sqlite3
+import stat
+import tempfile
 import time
 import httpx
 import subprocess
@@ -16,6 +20,83 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .updates import Updates, UpdateError, parse_feed, validate_install_paths
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _database_image(path):
+    """Read a quiescent image without initializing or upgrading its schema."""
+    path = Path(path)
+    digest = _file_sha256(path)
+    with closing(sqlite3.connect(path.absolute().as_uri() + '?mode=ro', uri=True)) as db:
+        if (db.execute('PRAGMA quick_check').fetchall() != [('ok',)]
+                or db.execute('PRAGMA foreign_key_check').fetchall()):
+            raise OSError('database restore image is invalid')
+        version = db.execute('PRAGMA user_version').fetchone()[0]
+    if _file_sha256(path) != digest:
+        raise OSError('database restore image changed during validation')
+    return digest, version
+
+
+def _restore_database(backup, database):
+    """Publish a verified same-volume copy before exposing the old bundle.
+
+    This is one database replacement, not a crash-atomic bundle/DB transaction.
+    On failure the caller retains both bundles and the original backup.
+    """
+    backup, database = Path(backup), Path(database)
+    expected = _database_image(backup)
+    descriptor, name = tempfile.mkstemp(prefix='.kd-update-restore-', dir=database.parent)
+    stage = Path(name)
+    owned = os.fstat(descriptor)
+    os.close(descriptor)
+    try:
+        shutil.copy2(backup, stage)
+        current = stage.lstat()
+        if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+                or stat.S_IMODE(current.st_mode) != 0o600
+                or (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino)):
+            raise OSError('database restore stage identity changed')
+        if _database_image(stage) != expected:
+            raise OSError('database restore stage differs from backup')
+        with stage.open('rb') as stream:
+            current = os.fstat(stream.fileno())
+            if (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino):
+                raise OSError('database restore stage identity changed')
+            os.fsync(stream.fileno())
+        current = stage.lstat()
+        if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+                or stat.S_IMODE(current.st_mode) != 0o600
+                or (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino)):
+            raise OSError('database restore stage identity changed')
+        # The candidate has stopped; none of its SQLite sidecars may accompany
+        # this older image. The original backup is never consumed or removed.
+        for suffix in ('-wal', '-shm'):
+            Path(str(database) + suffix).unlink(missing_ok=True)
+        os.replace(stage, database)
+        directory = os.open(database.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        if _database_image(database) != expected:
+            raise OSError('database restore readback differs from backup')
+    finally:
+        # Clean only the exact file created by this invocation. A substituted
+        # path is not ours to remove, and a published stage no longer exists.
+        try:
+            current = stage.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if (current.st_dev, current.st_ino) == (owned.st_dev, owned.st_ino):
+                stage.unlink()
 
 
 def run(plan_path):
@@ -174,13 +255,13 @@ def run(plan_path):
             candidate.terminate()
             candidate.wait(timeout=60)
         if stopped and owns_previous and previous.exists():
-            if target.exists(): shutil.rmtree(target)
-            previous.rename(target)
             if snapshot_ready:
                 database = Path(plan['data_root'])/'knowledge.sqlite3'
-                for suffix in ('-wal', '-shm'):
-                    Path(str(database)+suffix).unlink(missing_ok=True)
-                shutil.copy2(backup_db, database)
+                _restore_database(backup_db, database)
+            # Never expose a launchable old program with a new/partial DB.
+            # If restoration above fails, target/previous/backup stay intact.
+            if target.exists(): shutil.rmtree(target)
+            previous.rename(target)
             arguments = [str(target/'Contents/MacOS/KnowledgeDistiller'), '--data-dir', plan['data_root']]
             if plan.get('no_open'): arguments.append('--no-open')
             fcntl.flock(installation_lock, fcntl.LOCK_UN)

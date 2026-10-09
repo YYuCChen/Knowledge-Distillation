@@ -29,6 +29,106 @@ def configure_bundled_runtime():
     os.environ.setdefault('LC_ALL', 'en_US.UTF-8')
 
 
+class DesktopTermination:
+    """Finish application-owned workers before Cocoa permits termination."""
+
+    def __init__(self, stop_workers):
+        self._stop_workers = stop_workers
+        self._guard = threading.Lock()
+        self._thread = None
+        self._ready = threading.Event()
+        self._delivered = False
+
+    def request(self) -> None:
+        with self._guard:
+            if self._thread is not None:
+                return
+            self._thread = threading.Thread(
+                target=self._wait, name='desktop-termination', daemon=True)
+            self._thread.start()
+
+    def _wait(self) -> None:
+        while True:
+            try:
+                if self._stop_workers():
+                    self._ready.set()
+                    return
+            except Exception as error:
+                logging.error('Application stop failed (%s)', type(error).__name__)
+            self._ready.wait(.05)
+
+    def take_ready(self) -> bool:
+        with self._guard:
+            if not self._ready.is_set() or self._delivered:
+                return False
+            self._delivered = True
+            return True
+
+    @property
+    def ready(self) -> bool:
+        return self._ready.is_set()
+
+
+class DesktopTerminationHandshake:
+    """Keep Cocoa termination calls on the main loop after workers stop."""
+
+    def __init__(self, termination: DesktopTermination):
+        self.termination = termination
+        self.signal_requested = False
+        self.stop_requested = False
+        self.termination_pending = False
+        self.signal_dispatched = False
+        self.completed = False
+
+    def request_signal(self) -> None:
+        self.signal_requested = True
+
+    def _request_stop(self) -> None:
+        if self.stop_requested:
+            return
+        self.stop_requested = True
+        self.termination.request()
+
+    def should_terminate(self) -> bool:
+        self._request_stop()
+        if self.termination.take_ready():
+            self.completed = True
+            return True
+        self.termination_pending = True
+        return False
+
+    def take_main_action(self) -> str | None:
+        if self.completed:
+            return None
+        if self.signal_requested:
+            self._request_stop()
+        if self.termination_pending:
+            if self.termination.take_ready():
+                self.completed = True
+                return 'reply'
+            return None
+        if (self.signal_requested and not self.signal_dispatched
+                and self.termination.ready):
+            self.signal_dispatched = True
+            return 'terminate'
+        return None
+
+
+class DesktopExitPreparation:
+    """Run the optional relaunch preparation once before Cocoa exits."""
+
+    def __init__(self, relaunch):
+        self.relaunch = relaunch
+        self.prepared = False
+
+    def prepare(self, restart: bool) -> None:
+        if self.prepared:
+            return
+        self.prepared = True
+        if restart:
+            self.relaunch()
+
+
 def serve(paths, port=57740, *, start_workers=True):
     """Bind before constructing the worker; never share an occupied socket."""
     try:
@@ -133,11 +233,15 @@ def request_reopen(port, token):
 
 def main(argv=None):
     configure_bundled_runtime()
-    if (sys.argv[1:] if argv is None else argv) == ['--bilibili-worker']:
+    raw_argv = sys.argv[1:] if argv is None else argv
+    if raw_argv and raw_argv[0] == '--wiki-kit':
+        from .wiki_kit_runtime import helper_main
+        raise SystemExit(helper_main(list(raw_argv[1:])))
+    if raw_argv == ['--bilibili-worker']:
         from .bilibili import _worker_main
         _worker_main()
         return
-    if (sys.argv[1:] if argv is None else argv) == ['--feishu-worker']:
+    if raw_argv == ['--feishu-worker']:
         from .feishu_socket import worker_main
         worker_main()
         return
@@ -157,11 +261,27 @@ def main(argv=None):
     parser.add_argument('--check-ocr-image', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--check-pdf', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--check-epub', type=Path, help=argparse.SUPPRESS)
+    parser.add_argument('--check-data-upgrade', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--migrate-raw', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--vault', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--dry-run', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--report', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.check_data_upgrade:
+        explicit_data_dir = any(
+            value == '--data-dir' or value.startswith('--data-dir=') for value in raw_argv)
+        conflicting = (args.port is not None or args.no_open or args.update_handshake
+                       or args.check_runtime or args.check_audio or args.check_ocr_image
+                       or args.check_pdf or args.check_epub or args.migrate_raw
+                       or args.vault or args.dry_run or args.report)
+        if not explicit_data_dir:
+            parser.error('--check-data-upgrade 需要显式 --data-dir')
+        if conflicting:
+            parser.error('--check-data-upgrade 不能与其他运行模式同时使用')
+        from .data_upgrade_probe import run as check_data_upgrade
+        raise SystemExit(check_data_upgrade(
+            args.data_dir, args.check_data_upgrade,
+            formal_root=AppPaths.mac_default().data_root))
     if args.migrate_raw:
         # One-time, explicit export of existing source facts to raw/外部/.
         from .raw_migration import main as migrate_raw
@@ -188,8 +308,11 @@ def main(argv=None):
     output = log_path.open('a', encoding='utf-8')
     sys.stdout = output
     sys.stderr = output
-    from AppKit import NSApplication, NSMenu, NSMenuItem, NSWorkspace, NSAlert, NSApplicationActivationPolicyRegular, NSApplicationActivateIgnoringOtherApps, NSApplicationActivateAllWindows
-    from Foundation import NSObject, NSURL, NSTimer
+    from AppKit import (NSApplication, NSMenu, NSMenuItem, NSWorkspace, NSAlert,
+        NSApplicationActivationPolicyRegular, NSApplicationActivateIgnoringOtherApps,
+        NSApplicationActivateAllWindows, NSModalPanelRunLoopMode, NSTerminateLater,
+        NSTerminateNow)
+    from Foundation import NSObject, NSURL, NSTimer, NSRunLoop, NSDefaultRunLoopMode
     native = NSApplication.sharedApplication()
     native.setActivationPolicy_(NSApplicationActivationPolicyRegular)
     if not args.update_handshake:
@@ -279,13 +402,11 @@ def main(argv=None):
             alert=NSAlert.alloc().init();alert.setMessageText_('知识蒸馏器暂未启动')
             alert.setInformativeText_(f'请重新打开应用；若仍无法启动，可查看诊断日志：{log_path}');alert.runModal()
             return
-    state_path.write_text(json.dumps({'port':server.server_port,'pid':os.getpid(),
-                                      'desktop_token':app.extensions['desktop_pages'].token}))
     url = (f'http://{local_address.host}:{server.server_port}/' if local_address and args.port is None
            else f'http://127.0.0.1:{server.server_port}/')
     startup_lock.close()
     updates = app.extensions['updates']
-    worker = app.config['KNOWLEDGE_DISTILLER_WORKER']
+    workers = app.config['KNOWLEDGE_DISTILLER_WORKERS']
 
     def begin_install():
         from .updates import UpdateError, validate_install_paths
@@ -294,7 +415,7 @@ def main(argv=None):
         validate_install_paths(paths.data_root, updates.info['bundle'])
         if app.extensions['qwen_component'].status()['busy']:
             raise UpdateError('Qwen 组件正在安装，请完成后再更新应用。')
-        if not worker.reserve_for_update():
+        if not workers.reserve_for_update():
             raise UpdateError('蒸馏或整理仍在进行，请完成后再安装。')
         try:
             plan = updates.root/'install-plan.json'
@@ -307,7 +428,7 @@ def main(argv=None):
             process = subprocess.Popen([str(helper), *(['--component'] if updates.info.get('component_updates') else []), str(plan)],
                                        start_new_session=True, stdout=output, stderr=output)
         except Exception:
-            worker.release_update()
+            workers.release_update()
             raise
         def watch():
             result = process.wait()
@@ -315,12 +436,12 @@ def main(argv=None):
                 with updates.lock:
                     updates.phase = 'error'
                     updates.error = '安装未完成，当前版本已保留。请重新检查后重试。'
-                worker.release_update()
+                workers.release_update()
         threading.Thread(target=watch, daemon=True, name='update-install-result').start()
 
     if updates.info['bundle'] and (Path(updates.info['bundle'])/'Contents/Helpers/Updater.app/Contents/MacOS/update-cli').is_file():
         updates.install = begin_install
-        updates.block_reason = lambda: ('下载完成，蒸馏或整理任务结束后可安装。' if not worker.update_ready()
+        updates.block_reason = lambda: ('下载完成，蒸馏或整理任务结束后可安装。' if not workers.update_ready()
             else '下载完成，Qwen 组件安装结束后可更新。' if app.extensions['qwen_component'].status()['busy'] else '')
     if not args.update_handshake and updates.info['feed_url'] and updates.info['public_key']:
         updates.start('check', automatic=True)
@@ -330,12 +451,12 @@ def main(argv=None):
 
     def request_restart(address):
         from .local_address import LocalAddressError
-        if app.extensions['qwen_component'].status()['busy'] or not worker.reserve_for_update():
+        if app.extensions['qwen_component'].status()['busy'] or not workers.reserve_for_update():
             raise LocalAddressError('local_address_busy')
         try:
             save_local_address(paths.data_root, address)
         except Exception:
-            worker.release_update()
+            workers.release_update()
             raise
         restart_request[:] = [(address.url, time.monotonic() + 0.75)]
 
@@ -356,15 +477,25 @@ def main(argv=None):
                          start_new_session=True, stdin=subprocess.DEVNULL, stdout=output, stderr=output)
     def stop():
         nonlocal stopped
-        if stopped:return
+        if stopped:return True
+        if not workers.stop():
+            logging.error('Application workers have not stopped; termination remains pending')
+            return False
         stopped = True
         reopener.closed = True
         server.shutdown();server.server_close()
-        app.config['KNOWLEDGE_DISTILLER_CLOSE_FEISHU']()
-        app.config['KNOWLEDGE_DISTILLER_WORKER'].stop()
         app.config['KNOWLEDGE_DISTILLER_CLOSE_BROWSERS']()
         state_path.unlink(missing_ok=True)
         lock.close();output.flush()
+        return True
+
+    termination = DesktopTermination(stop)
+    termination_handshake = DesktopTerminationHandshake(termination)
+    restart_after_stop = [False]
+    exit_preparation = DesktopExitPreparation(relaunch_after_exit)
+
+    def prepare_exit():
+        exit_preparation.prepare(restart_after_stop[0])
 
     from .desktop_pages import DockFollowUp
     follow_up = DockFollowUp()
@@ -425,13 +556,20 @@ def main(argv=None):
                                                   'browser_bundle_id':browser_bundle_id,
                                                   'desktop_token':app.extensions['desktop_pages'].token}))
         def applicationSupportsSecureRestorableState_(self,application):return True
-        def applicationWillTerminate_(self,notification):stop()
+        def applicationShouldTerminate_(self,application):
+            if termination_handshake.should_terminate():
+                prepare_exit()
+                return NSTerminateNow
+            return NSTerminateLater
+        def applicationWillTerminate_(self,notification):
+            if not stopped:
+                logging.error('Cocoa terminated before application workers stopped')
         def tick_(self,timer):
             reopener.poll()
             observe_owned_browsers()
             if restart_request and time.monotonic() >= restart_request[0][1]:
                 restart_request.clear()
-                relaunch_after_exit()
+                restart_after_stop[0] = True
                 native.terminate_(None)
                 return
             if app.extensions['desktop_pages'].take_request() and not args.no_open:
@@ -441,12 +579,18 @@ def main(argv=None):
                 if decision == 'accepted':
                     args.update_handshake = None
                     updates.phase = 'latest' if updates.feed and not updates.release else 'available' if updates.release else 'idle'
-                    worker.start()
-                    app.extensions['feishu'].start()
+                    workers.start()
                     if not args.no_open:
                         reveal(url)
                     if updates.info['feed_url'] and updates.info['public_key']:
                         updates.start('check', automatic=True)
+        def terminationTick_(self,timer):
+            action = termination_handshake.take_main_action()
+            if action == 'reply':
+                prepare_exit()
+                native.replyToApplicationShouldTerminate_(True)
+            elif action == 'terminate':
+                native.terminate_(None)
         def openHome_(self,sender):reveal(url)
         def openSettings_(self,sender):open_url(url+'settings')
         def applicationShouldHandleReopen_hasVisibleWindows_(self,application,visible):
@@ -465,7 +609,20 @@ def main(argv=None):
     actions.addItem_(NSMenuItem.alloc().initWithTitle_action_keyEquivalent_('退出知识蒸馏器','terminate:','q'))
     app_item.setSubmenu_(actions);native.setMainMenu_(menu)
     timer=NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(0.25,delegate,'tick:',None,True)
-    signal.signal(signal.SIGTERM,lambda signum,frame:native.terminate_(None))
+    termination_timer=NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
+        0.05, delegate, 'terminationTick:', None, True)
+    run_loop = NSRunLoop.mainRunLoop()
+    for mode in (NSDefaultRunLoopMode, NSModalPanelRunLoopMode):
+        run_loop.addTimer_forMode_(termination_timer, mode)
+    signal.signal(signal.SIGTERM,
+                  lambda signum,frame:termination_handshake.request_signal())
+    # Readiness includes the termination handshake. Candidate verification and
+    # second launchers must not act on a process that cannot yet stop cleanly.
+    state_path.write_text(json.dumps({'port':server.server_port,'pid':os.getpid(),
+                                      'desktop_token':app.extensions['desktop_pages'].token}))
     try:native.run()
     finally:
-        timer.invalidate();stop()
+        timer.invalidate()
+        termination_timer.invalidate()
+        while not stop():
+            time.sleep(.05)

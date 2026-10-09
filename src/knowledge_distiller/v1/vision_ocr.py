@@ -1,8 +1,19 @@
 """Apple Vision OCR, preserving the same immutable original-pixel evidence plane."""
 from io import BytesIO
-from dataclasses import replace
+from dataclasses import asdict, dataclass, replace
+from importlib.metadata import distribution, PathDistribution
+from importlib.machinery import SourceFileLoader, ModuleSpec
+import base64
+import os
+import stat
+from pathlib import Path
+import hashlib
+import json
 import platform
 import math
+import subprocess
+import sys
+import weakref
 
 from .ocr import OcrError, OcrResult, decode_image, validate_lines
 
@@ -28,11 +39,278 @@ STAGE_PERFORM = "perform_request"
 STAGE_PARSE = "parse_observations"
 STAGE_COORDINATES = "validate_coordinates"
 
+_RECEIPT_SEAL = object()
+
+
+def _sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _json_bytes(value):
+    def check(node):
+        if node is None or type(node) in (bool, int):
+            return
+        if isinstance(node, str):
+            if '\x00' in node:
+                raise ValueError
+            node.encode('utf-8', errors='strict')
+        elif type(node) is float:
+            if not math.isfinite(node):
+                raise ValueError
+        elif type(node) in (list, tuple):
+            for child in node:
+                check(child)
+        elif type(node) is dict:
+            for key, child in node.items():
+                if type(key) is not str:
+                    raise ValueError
+                check(key)
+                check(child)
+        else:
+            raise ValueError
+    check(value)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(',', ':'), allow_nan=False).encode('utf-8')
+
+
+def _output(result):
+    # Never recurse through an opaque seal/weakref with dataclasses.asdict.
+    payload = asdict(replace(result, receipt=None))
+    payload.pop('receipt')
+    return payload
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ImageOcrReceipt:
+    """Same-result, in-process evidence, not a whole-source qualification.
+
+    JSON cannot recreate authority. Arbitrary code controlling this process is
+    outside this boundary; this is not remote or cryptographic attestation.
+    """
+    _seal: object
+    _audit: bytes
+    _result: object
+
+    def __init__(self):
+        raise TypeError('opaque_image_ocr_receipt')
+
+    @property
+    def audit_json(self):
+        return self._audit.decode('utf-8')
+
+
+def _input(data, mime, member_id):
+    if (type(data) is not bytes or not data or type(mime) is not str
+            or type(member_id) is not str or not member_id or '\x00' in member_id):
+        raise ValueError
+    member_id.encode('utf-8', errors='strict')
+    return {'member_id': member_id, 'mime': mime, 'sha256': _sha(data), 'byte_count': len(data)}
+
+
+def validate_image_receipt(result, data, mime, member_id):
+    """Pure validation: never import a bridge, read an image or run OCR."""
+    try:
+        receipt = result.receipt
+        if (type(result) is not OcrResult or type(receipt) is not ImageOcrReceipt
+                or receipt._seal is not _RECEIPT_SEAL or receipt._result() is not result):
+            raise ValueError
+        audit = json.loads(receipt.audit_json)
+        output = _output(result)
+        if (audit['input'] != _input(data, mime, member_id)
+                or audit['output_sha256'] != _sha(_json_bytes(output))
+                or _json_bytes(audit['output']) != _json_bytes(output)):
+            raise ValueError
+        return audit
+    except (AttributeError, TypeError, ValueError, KeyError, OverflowError) as error:
+        raise OcrError('ocr_invalid_output', stage='receipt_validation') from error
+
+
+def _file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _origin_read(path, expected_bytes=None):
+    """Read a held regular file, checking its path and FD before and after."""
+    before = path.stat()
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError
+    count = before.st_size if expected_bytes is None else expected_bytes
+    if type(count) is not int or count < 0 or count != before.st_size:
+        raise ValueError
+    with path.open('rb') as stream:
+        if _file_identity(os.fstat(stream.fileno())) != _file_identity(before):
+            raise ValueError
+        data = stream.read(count + 1)
+        if len(data) != count or stream.read(1):
+            raise ValueError
+        if _file_identity(os.fstat(stream.fileno())) != _file_identity(before):
+            raise ValueError
+    if _file_identity(path.stat()) != _file_identity(before):
+        raise ValueError
+    return data, _file_identity(before)
+
+
+def _frozen_contents():
+    """Actual native main bundle/entry relationship, never a _MEIPASS claim."""
+    Foundation = sys.modules.get('Foundation')
+    objc = sys.modules.get('objc')
+    if (Foundation is None or objc is None
+            or not isinstance(Foundation.NSBundle, objc.objc_class)):
+        raise ValueError
+    bundle = Foundation.NSBundle.mainBundle()
+    if bundle is None or str(bundle.bundleIdentifier()) != 'local.knowledge-distiller.app':
+        raise ValueError
+    root = Path(str(bundle.bundlePath())).resolve(strict=True)
+    contents = (root / 'Contents').resolve(strict=True)
+    macos = (contents / 'MacOS').resolve(strict=True)
+    executable = Path(str(bundle.executablePath())).resolve(strict=True)
+    if (not root.is_dir() or root.suffix != '.app' or contents.parent != root
+            or not contents.is_dir() or macos.parent != contents or not macos.is_dir()
+            or not executable.is_file() or executable.parent != macos
+            or executable != Path(sys.executable).resolve(strict=True)):
+        raise ValueError
+    return contents
+
+
+def _source_origin(module, expected_name):
+    spec = module.__spec__
+    loader = module.__loader__
+    if (expected_name is None or module.__name__ != expected_name
+            or type(spec) is not ModuleSpec or spec.name != expected_name
+            or type(loader) is not SourceFileLoader or spec.loader is not loader
+            or loader.name != expected_name):
+        raise ValueError
+    paths = [Path(value).resolve(strict=True) for value in (
+        module.__file__, spec.origin, loader.get_filename(expected_name))]
+    if paths[0] != paths[1] or paths[0] != paths[2] or paths[0].suffix != '.py':
+        raise ValueError
+    return paths[0], id(spec), id(loader)
+
+
+def _bridge_origin(module, name):
+    expected_name = {'pyobjc-core': 'objc', 'pyobjc-framework-Vision': 'Vision',
+                     'pyobjc-framework-Cocoa': 'Foundation'}.get(name)
+    binding = _source_origin(module, expected_name)
+    origin = binding[0]
+    dist = distribution(name)
+    # Fixed wheel metadata: CPython PathDistribution._path is the directory used
+    # by its read_text()/files()/locate_file(), not a caller-supplied trust flag.
+    if not isinstance(dist, PathDistribution):
+        raise ValueError
+    metadata = Path(dist._path).resolve(strict=True)
+    if not metadata.is_dir() or metadata.suffix != '.dist-info':
+        raise ValueError
+    metadata_files = [metadata / 'METADATA', metadata / 'RECORD']
+    contents = _frozen_contents() if getattr(sys, 'frozen', False) else None
+    if contents is not None and any(not p.resolve(strict=True).is_relative_to(contents)
+                                    for p in (origin, metadata, *metadata_files)):
+        raise ValueError
+    before_metadata = [_origin_read(path) for path in metadata_files]
+    if dist.version != '12.2.2':
+        raise ValueError
+    matches = [p for p in dist.files or () if Path(dist.locate_file(p)).resolve() == origin]
+    if len(matches) != 1:
+        raise ValueError
+    entry = matches[0]
+    if (str(entry) != expected_name + '/__init__.py'
+            or entry.hash is None or entry.hash.mode != 'sha256'
+            or type(entry.size) is not int or entry.size < 0):
+        raise ValueError
+    data, identity = _origin_read(origin, entry.size)
+    digest = _sha(data)
+    expected = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode('ascii').rstrip('=')
+    if entry.hash.value != expected:
+        raise ValueError
+    if (before_metadata != [_origin_read(path) for path in metadata_files]
+            or (contents is not None and _frozen_contents() != contents)
+            or _source_origin(module, expected_name) != binding
+            or _origin_read(origin, entry.size) != (data, identity)):
+        raise ValueError
+    return {'distribution': name, 'version': dist.version, 'origin': str(matches[0]),
+            'origin_identity': identity, 'origin_sha256': digest}
+
+
+def _environment(objc, Vision, Foundation):
+    """Default native boundary; no caller-provided environment dict is trusted."""
+    if sys.platform != 'darwin':
+        raise ValueError
+    bridges = [_bridge_origin(module, name) for module, name in (
+        (objc, 'pyobjc-core'), (Vision, 'pyobjc-framework-Vision'),
+        (Foundation, 'pyobjc-framework-Cocoa'))]
+    classes = (Vision.VNRecognizeTextRequest, Vision.VNImageRequestHandler)
+    root = Path('/System/Library/Frameworks/Vision.framework').resolve(strict=True)
+    bundles = []
+    for cls in classes:
+        if not isinstance(cls, objc.objc_class):
+            raise ValueError
+        bundle = Foundation.NSBundle.bundleForClass_(cls)
+        path = Path(str(bundle.bundlePath())).resolve(strict=True)
+        identifier = str(bundle.bundleIdentifier())
+        if path != root or identifier != 'com.apple.VN':
+            raise ValueError
+        info = bundle.infoDictionary()
+        value = info.get('CFBundleVersion') if info is not None else None
+        bundles.append({'identifier': identifier, 'path': str(path),
+                        'version': str(value) if value is not None else 'unknown',
+                        'provenance': 'system-framework'})
+    if bundles[0] != bundles[1]:
+        raise ValueError
+    build = subprocess.run(['/usr/bin/sw_vers', '-buildVersion'], capture_output=True,
+                           text=True, check=True, timeout=2).stdout.strip()
+    product = platform.mac_ver()[0]
+    if not build or len(build) > 128 or not build.isalnum() or not product:
+        raise ValueError
+    return {'platform': 'darwin', 'os_product_version': product, 'os_build': build,
+            'bridges': bridges, 'pillow_version': distribution('Pillow').version,
+            'framework': bundles[0]}
+
+
+def _request_config(request):
+    config = {'revision': int(request.revision()),
+              'recognition_level': int(request.recognitionLevel()),
+              'languages': [str(v) for v in request.recognitionLanguages()],
+              'language_correction': bool(request.usesLanguageCorrection()),
+              'automatic_language': bool(request.automaticallyDetectsLanguage()),
+              'orientation': 1, 'handler_options': None}
+    if config != {'revision': VISION_REVISION, 'recognition_level': 0,
+                  'languages': ['zh-Hans', 'zh-Hant', 'en-US'],
+                  'language_correction': False, 'automatic_language': False,
+                  'orientation': 1, 'handler_options': None}:
+        raise ValueError
+    return config
+
+
+def _observed(call):
+    try:
+        value = call()
+        _json_bytes(value)
+        return value
+    except Exception:
+        return None  # Conversion stays diagnostic; failure cannot issue a receipt.
+
 
 class VisionOcrRunner:
     """Synchronous requests owned by the existing single worker; no network/model cache."""
 
+    def __init__(self):
+        self._receipt_diagnostic = 'unverified'
+
+    @property
+    def receipt_diagnostic(self):
+        return self._receipt_diagnostic
+
     def recognize_bytes(self, data: bytes, mime: str) -> OcrResult:
+        return self._recognize(data, mime)
+
+    def recognize_member(self, data: bytes, mime: str, member_id: str) -> OcrResult:
+        try:
+            _input(data, mime, member_id)
+        except (TypeError, ValueError) as error:
+            raise OcrError('ocr_invalid_image', stage='member_binding') from error
+        return self._recognize(data, mime, member_id=member_id)
+
+    def _recognize(self, data, mime, *, member_id=None):
+        self._receipt_diagnostic = 'unverified'
         image = decode_image(data, mime)
         width, height = image.size
         # A fresh PNG strips EXIF orientation and normalizes formats Vision does
@@ -42,10 +320,18 @@ class VisionOcrRunner:
         try:
             import objc
             import Vision
+            import Foundation
             from Foundation import NSData
         except (ImportError, OSError) as error:
             raise OcrError("ocr_runtime_unavailable", stage="bridge_import", cause=error) from error
         with objc.autorelease_pool():
+            controlled = member_id is not None and type(self) is VisionOcrRunner
+            plane = {'width': width, 'height': height, 'mode': image.mode,
+                     'sha256': _sha(image.tobytes()), 'byte_count': width * height * 3,
+                     'transparency': 'white-composite', 'exif_transpose': False,
+                     'handler_png_sha256': _sha(encoded.getvalue()),
+                     'handler_png_byte_count': encoded.tell()} if controlled else None
+            before = _observed(lambda: _environment(objc, Vision, Foundation)) if controlled else None
             stage = STAGE_REQUEST
             try:
                 request = Vision.VNRecognizeTextRequest.alloc().init()
@@ -54,6 +340,7 @@ class VisionOcrRunner:
                 request.setRecognitionLanguages_(["zh-Hans", "zh-Hant", "en-US"])
                 request.setUsesLanguageCorrection_(False)
                 request.setAutomaticallyDetectsLanguage_(False)
+                config_before = _observed(lambda: _request_config(request)) if controlled else None
                 stage = STAGE_HANDLER
                 payload = NSData.dataWithBytes_length_(encoded.getvalue(), encoded.tell())
                 # nil options: PyObjC 12.2.2 on macOS 27 bridges an empty Python
@@ -74,7 +361,39 @@ class VisionOcrRunner:
                 raise
             except Exception as error:
                 raise OcrError("ocr_inference_failed", stage=stage, cause=error) from error
-            return _result(observations, width, height)
+            result = _result(observations, width, height)
+            if not controlled:
+                return result
+            config_after = _observed(lambda: _request_config(request))
+            after = _observed(lambda: _environment(objc, Vision, Foundation))
+            result = replace(result, framework_version=(before['framework']['version']
+                             if before is not None else 'unknown'))
+            if before is None or before != after or config_before is None or config_before != config_after:
+                self._receipt_diagnostic = 'environment_or_configuration_unverified'
+                return result
+            try:
+                output = _output(result)
+                if (image.mode != 'RGB' or image.size != (width, height)
+                        or plane['sha256'] != _sha(image.tobytes())
+                        or plane['handler_png_sha256'] != _sha(encoded.getvalue())):
+                    raise ValueError
+                audit = {'protocol': 'image-ocr-execution-v1', 'input': _input(data, mime, member_id),
+                    'pixel_plane': plane,
+                    'environment': before, 'request': config_before,
+                    'execution': {'perform_succeeded': True, 'observation_count': len(observations),
+                        'outcome': 'blank' if not result.lines else 'nonblank',
+                        'coordinates': 'validated'}, 'output': output,
+                    'output_sha256': _sha(_json_bytes(output))}
+                receipt = object.__new__(ImageOcrReceipt)
+                result = replace(result, receipt=receipt)
+                object.__setattr__(receipt, '_seal', _RECEIPT_SEAL)
+                object.__setattr__(receipt, '_audit', _json_bytes(audit))
+                object.__setattr__(receipt, '_result', weakref.ref(result))
+                self._receipt_diagnostic = 'issued'
+                return result
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                self._receipt_diagnostic = 'output_unverified'
+                return replace(result, receipt=None)
 
 
 def _native_error(error):

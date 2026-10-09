@@ -210,22 +210,39 @@ def test_failed_audio_clip_retains_question_and_full_audio(tmp_path):
     from tests.v1.test_pipeline import distiller
     from knowledge_distiller.faithful_review import ReviewConcern
     from knowledge_distiller.v1.confirmation import ConfirmationAudioError
+    original=[]
     class Clipper:
-        def clip(self,*args): raise ConfirmationAudioError('test')
+        def clip(self,audio,*args):
+            original.append(audio.path.read_bytes())
+            raise ConfirmationAudioError('test')
     service,store,*_=distiller(tmp_path,concerns=(ReviewConcern(0,4,'持续切换','unclear',True),))
     service.confirmation_clipper=Clipper()
     item=store.create_item('https://v.douyin.com/test/')
     result=service.run(item)
-    assert result.state=='waiting_user'
-    pending=json.loads(store.item_bundle(item)['confirmation_json'])
-    assert pending['concerns'] and pending['lineage']['primary_asr']
+    assert result.state=='failed'
+    row=store.item_bundle(item)
+    assert row['error_code']=='confirmation_audio_unavailable'
+    assert row['confirmation_json'] is None and row['source_fact_id'] is None
+    assert row['knowledge_result_id'] is None and row['published_path'] is None
+    from knowledge_distiller.v1.database import connect
+    with connect(store.path) as db:
+        review=db.execute('SELECT status,result_json FROM source_review_results WHERE item_id=?',(item,)).fetchone()
+    assert review['status']=='failed'
+    retained=json.loads(review['result_json'])
+    assert retained['failure']=='confirmation_audio_unavailable'
+    concern,=retained['candidate']['concerns']
+    assert concern['text']=='持续切换' and concern['reason']=='unclear' and concern['meaning_may_change'] is True
+    assert retained['candidate']['text']=='持续切换会带来额外损耗。'
+    primary=json.loads((service.runtime_root/'items'/str(item)/'primary-recovery.json').read_text())['recovery']
+    assert primary['text']==retained['candidate']['text']
+    assert primary['chunks'] and primary['truncated'] is False
     audio=service.runtime_root/'items'/str(item)/'audio'/'standard.wav'
-    audio.parent.mkdir(parents=True,exist_ok=True);audio.write_bytes(b'synthetic original audio')
     # P01 keeps original media but never turns a failed local preview into a
     # full-recording listening assignment.
     assert service.confirmation_audio(item) is None
-    assert audio.read_bytes() == b'synthetic original audio'
-    assert '定位恢复未完成' in pending['concerns'][0]['reason']
+    assert original and audio.read_bytes()==original[0]
+    record=json.loads((service.runtime_root/'items'/str(item)/'confirmation-preparation.json').read_text())['payload']
+    assert record['status']=='failed' and record['code']=='confirmation_audio_unavailable'
 
 
 def test_subtitle_pipeline_does_not_require_full_asr(tmp_path):

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Mapping, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .document_source import DocumentSourceReceipt
 
 
 class SourceReadError(RuntimeError):
@@ -24,3 +27,4 @@ class ParsedSource:
     lineage: Mapping[str, object]
     media: tuple[ParsedMedia, ...] = ()
     uncertainties: tuple[Mapping[str, object], ...] = ()
+    receipt: DocumentSourceReceipt | None = None

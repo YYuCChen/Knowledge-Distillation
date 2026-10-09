@@ -142,6 +142,10 @@
   width: min(640px, calc(100vw - 32px));
   min-height: 56px;
   padding: 0 8px 0 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 12px;
   border-top: 1px solid var(--line);
   background: var(--page);
   z-index: 10;
@@ -149,8 +153,34 @@
 .organization-description { display: flex; align-items: center; gap: 10px; font: 400 10px/16px "Noto Sans SC", sans-serif; color: #4d4c48; letter-spacing: .5px; }
 .organization-icon { width: 64px; display: flex; justify-content: center; }
 .organization-icon img { width: 15px; height: 15px; }
+.home-page .organization-description { min-width: 0; align-items: flex-start; }
+.home-page .organization-icon { padding-top: 3px; flex: 0 0 64px; }
+.organization-copy { min-width: 0; display: grid; gap: 2px; }
+.organization-copy strong { color: var(--action-text); font: 500 11px/1.55 "Noto Sans SC", sans-serif; letter-spacing: .55px; }
+.organization-copy small { color: var(--muted); font: 400 10px/1.5 "Noto Sans SC", sans-serif; letter-spacing: .4px; overflow-wrap: anywhere; }
+.organization-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px 10px; }
+.organization-actions a { color: var(--action-text); font-size: 10px; line-height: 1.6; letter-spacing: .4px; text-underline-offset: 3px; }
+.organization-actions .outline-button { padding: 7.5px 14.5px; border: 1px solid var(--line); text-decoration: none; }
+.organization-actions .is-disabled { color: var(--muted); font-size: 10px; cursor: not-allowed; }
 .organization-section form { margin: 0; }
-.organization-section button { padding: 7.5px 14.5px; border: 0; border-radius: 6px; background: var(--soft); color: #4d4c48; font: 400 14px/normal "Noto Sans SC", sans-serif; letter-spacing: .7px; }
+.organization-section button { padding: 7.5px 14.5px; border: 0; border-radius: 6px; background: var(--soft); color: #4d4c48; font: 400 12px/17px "Noto Sans SC", sans-serif; letter-spacing: .6px; }
+.organization-section[data-tone="attention"] { border-top-color: var(--warning); }
+.organization-section[data-tone="error"] { border-top-color: var(--danger); }
+.organization-section[data-tone="complete"] { border-top-color: #7c9481; }
+
+@media (max-width: 480px) {
+  .organization-copy small { display: none; }
+}
+
+@media (max-width: 720px) {
+  .home-page .organization-section {
+    grid-template-columns: 1fr;
+    align-items: flex-start;
+    row-gap: 6px;
+    padding-block: 8px;
+  }
+  .organization-actions { padding-left: 64px; justify-content: flex-start; }
+}
 
 .organization-feedback {
   margin: 0 auto 0 10px;

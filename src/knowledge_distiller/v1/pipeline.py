@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import re
 import wave
+import hashlib
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -19,7 +21,6 @@ from .source_files import SourceCopyError
 from .file_sources import parse_submitted_source
 from .source_parsing import SourceReadError
 from .knowledge_model import AnthropicKnowledgeModel, KnowledgeModelError
-from .publisher import PublicationState, publish
 from .reviewer import RecordedReviewer
 from .store import Store, SourceReviewConflict
 from .source_versions import SourceVersionError
@@ -31,6 +32,9 @@ from .zhihu import ZhihuSourceError, zhihu_identity
 from .weibo import WeiboSourceError, weibo_identity
 from .ocr import OcrError, default_ocr_runner
 from .image_source import image_source_fact
+from .raw import LegacySourceVeto, RawError
+from .ingestion import IngestionError
+from .web_article import WebArticleSource, WebReadError
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,7 @@ class Distiller:
         weibo_source=None,
         ocr=None,
         documents=None,
+        web_article_source=None,
     ):
         self.store = store
         self.source = source
@@ -82,24 +87,38 @@ class Distiller:
         self.vault = vault
         self.ocr = ocr if ocr is not None else default_ocr_runner()
         self.documents = documents
+        self.web_article_source = web_article_source or WebArticleSource()
 
     def run(self, item_id: int) -> DistillResult:
+        try:
+            self._legacy_gate(item_id)
+        except LegacySourceVeto:
+            return DistillResult(item_id, self._item(item_id)['state'])
         row = self._item(item_id)
-        if row["published_path"] is not None:
-            self.store.mark_succeeded(item_id)
-            return DistillResult(item_id, "succeeded")
         try:
             if row["source_fact_id"] is None:
                 self._establish_source(item_id, row)
             return self._finish(item_id)
+        except LegacySourceVeto:
+            return DistillResult(item_id, self._item(item_id)['state'])
         except SourceReviewConflict:
             return DistillResult(item_id, self._item(item_id)['state'])
         except SourceCopyError:
+            try:
+                self._legacy_gate(item_id)
+            except LegacySourceVeto:
+                return DistillResult(item_id, self._item(item_id)['state'])
             self.store.mark_failed(item_id, self._item(item_id)["phase"], "source_copy_unavailable")
             return DistillResult(item_id, "failed")
-        except (OcrError, SourceVersionError, ChromeSessionError, DouyinSourceError, YouTubeSourceError, BilibiliSourceError, XiaohongshuSourceError, XPostSourceError, ZhihuSourceError, WeiboSourceError, KnowledgeModelError, DistillError) as error:
+        except (OcrError, SourceVersionError, ChromeSessionError, DouyinSourceError, YouTubeSourceError, BilibiliSourceError, XiaohongshuSourceError, XPostSourceError, ZhihuSourceError, WeiboSourceError, WebReadError, KnowledgeModelError, DistillError, RawError, IngestionError) as error:
+            try:
+                self._legacy_gate(item_id)
+            except LegacySourceVeto:
+                return DistillResult(item_id, self._item(item_id)['state'])
             if self._item(item_id)["state"] == "waiting_user":
                 return DistillResult(item_id, "waiting_user")
+            if isinstance(error, RawError) and error.args == ('raw_terminal_stale',):
+                return DistillResult(item_id, self._item(item_id)['state'])
             if isinstance(error, OcrError) and hasattr(error, 'partial_review'):
                 from .local_records import write_record
                 directory = self.runtime_root / "items" / str(item_id)
@@ -128,8 +147,25 @@ class Distiller:
                                    rejection_reason=error.rejection_reason if isinstance(error, KnowledgeModelError) else None)
             return DistillResult(item_id, "failed")
         finally:
-            from .temporary_artifacts import TemporaryArtifacts
-            TemporaryArtifacts(self.store, self.runtime_root).clean_item(item_id)
+            # A qualification/schema refusal preserves retained material.
+            # Do not let this fresh refusal replace an earlier normal error.
+            try:
+                self._legacy_gate(item_id)
+            except LegacySourceVeto:
+                pass
+            else:
+                from .temporary_artifacts import TemporaryArtifacts
+                TemporaryArtifacts(self.store, self.runtime_root).clean_item(item_id)
+
+    def _legacy_gate(self, item_id):
+        import sqlite3
+        from .database import connect
+        from .raw import _legacy_item_gate
+        try:
+            with connect(self.store.path) as db:
+                _legacy_item_gate(db, item_id)
+        except sqlite3.DatabaseError:
+            raise LegacySourceVeto('candidate_schema_rebuild_required') from None
 
     def suggest_candidates(self, item_id: int, *, token: str, concern_id: str = "") -> None:
         row = self._item(item_id)
@@ -144,6 +180,234 @@ class Distiller:
             concern['candidates'] = [choice['text'] for choice in choices]
             concern['candidate_explanations'] = {choice['text']: choice['meaning_zh'] for choice in choices}
         self.store.update_confirmation_suggestions(item_id, row['confirmation_json'], pending)
+
+    def _preparation_model(self):
+        """Public provenance only; never serialize clients, callbacks or secrets."""
+        from .confirmation_preparation import digest
+        from .reviewer import _CANDIDATE_ASSISTANCE_PROMPT
+        client = getattr(getattr(self.reviewer, 'binding', None), 'client', None)
+        def public(value):
+            return value if isinstance(value, str) and re.fullmatch(r'[\w./:-]{1,160}', value) else None
+        reviewer_type = type(self.reviewer).__module__ + '.' + type(self.reviewer).__qualname__
+        config = {k: public(getattr(client, k, None))
+                  for k in ('model', 'reasoning_effort', 'effort', 'service_tier')}
+        from urllib.parse import urlsplit
+        endpoint = urlsplit(getattr(client, 'base_url', '') or '')
+        config['provider_type'] = type(client).__module__ + '.' + type(client).__qualname__
+        config['endpoint'] = [endpoint.scheme, endpoint.hostname, endpoint.port, endpoint.path]
+        # Existing recognizer cache identities contain public runtime/request
+        # configuration, not credential callbacks; only their digest is stored.
+        cache = getattr(self.recognizer, 'cache_identity', None)
+        if isinstance(cache, dict):
+            cache = {k: cache[k] for k in ('provider', 'model', 'enabled', 'runtime_identity',
+                                          'resource_id', 'request') if k in cache}
+        elif not isinstance(cache, (str, list, tuple, type(None))):
+            cache = None
+        recognizer = {'type': type(self.recognizer).__module__ + '.' + type(self.recognizer).__qualname__,
+                      'model': public(getattr(self.recognizer, 'model', None)),
+                      'binding_model': public(getattr(getattr(self.recognizer, 'binding', None), 'model', None)),
+                      'cache_sha256': digest(cache)}
+        return {'reviewer_type': reviewer_type, 'model': config['model'],
+                'config_sha256': digest({'config': config, 'prompt': _CANDIDATE_ASSISTANCE_PROMPT}),
+                'recognizer_sha256': digest(recognizer)}
+
+    def pending_presentation_state(self, item_id):
+        """Read only durable DB proof and files; no model/config/secret factory."""
+        from .confirmation_preparation import presentation_state, PreparationError
+        try:
+            context = self.store.presentation_context(item_id)
+            state = presentation_state(context['pending'], context['item_runtime_root'],
+                                       source_descriptor=context['source_descriptor'])
+            return {'status': state['outcome'], 'code': state['code']}
+        except (SourceReviewConflict, PreparationError, ValueError, TypeError, KeyError, OSError):
+            return {'status': 'not-ready', 'code': 'review_incomplete'}
+
+    def prepare_pending_presentation(self, item_id):
+        """Producer only: worker must finish the returned ownership with Store CAS."""
+        ownership = None
+        try:
+            ownership = self.store.presentation_ownership(item_id)
+            context = self.store.presentation_context(item_id)
+            from .confirmation_preparation import input_binding
+            if input_binding(context['pending'], source_descriptor=context['source_descriptor']) != ownership['input_binding']:
+                raise SourceReviewConflict('presentation_ownership_conflict')
+            pending, evidence = self._prepare_presentation(item_id, context, attempt=ownership['attempt'])
+            # This is an early stale check, not a commit or atomic receipt.
+            if self.store.presentation_ownership(item_id) != ownership:
+                raise SourceReviewConflict('presentation_ownership_conflict')
+            return {'ownership': ownership, 'status': 'prepared', 'code': None,
+                    'pending': pending, 'evidence': evidence}
+        except SourceReviewConflict:
+            return {'ownership': None, 'status': 'not-ready', 'code': 'review_incomplete',
+                    'pending': None, 'evidence': None}
+        except Exception as error:
+            return {'ownership': ownership, 'status': 'failed' if ownership else 'not-ready',
+                    'code': _preparation_failure(error), 'pending': None, 'evidence': None}
+
+    def _prepare_presentation(self, item_id, context, *, attempt=1, new_review=None):
+        """Bounded per-attempt work; private checkpoint is never a DB ready proof."""
+        from .confirmation_preparation import (PROTOCOL, PreparationError, audio_required,
+            needs_sentence_fields, input_binding, build_evidence, validate_evidence,
+            validate_change, read_wav, digest, member_identity, text_sha256, evidence_context)
+        from .file_lock import acquire
+        from .audio_location_recovery import recover_locations
+        directory = context['item_runtime_root']
+        pending = deepcopy(context['pending'])
+        descriptor = context['source_descriptor']
+        binding = input_binding(pending, source_descriptor=descriptor)
+        model = self._preparation_model()
+        audio_needed = audio_required(pending, descriptor)
+        source = read_wav(directory, 'audio/standard.wav') if audio_needed else None
+        identity = evidence_context(binding, source, model)
+        if type(attempt) is not int or attempt <= 0:
+            raise PreparationError()
+        directory.mkdir(parents=True, exist_ok=True)
+        lock = directory / '.audio-recovery.lock'
+        if directory.is_symlink() or lock.is_symlink() or (directory / 'confirmation').is_symlink():
+            raise PreparationError('confirmation_audio_unavailable')
+        with acquire(lock):
+            prior = _presentation_record(directory)
+            if prior is None and (directory / 'confirmation-preparation.json').exists():
+                # Do not replay possibly completed work from a damaged cache.
+                # Persist a fixed failure; the worker's explicit durable retry
+                # advances attempt before creating a clean checkpoint.
+                _write_presentation_record(directory, {'identity': identity, 'attempt': attempt,
+                    'status': 'failed', 'code': 'review_incomplete', 'clips': {}, 'assistance': {}})
+                raise PreparationError()
+            same = prior is not None and prior.get('identity') == identity
+            if same and prior.get('attempt') == attempt:
+                if prior.get('status') == 'prepared':
+                    final = self.store.presentation_context(item_id, prior['pending'], new_review=new_review)
+                    validate_change(pending, final['pending'])
+                    validate_evidence(final['pending'], prior['evidence'], directory,
+                                      source_descriptor=final['source_descriptor'])
+                    return final['pending'], prior['evidence']
+                # A failed or indeterminate model/recovery attempt needs explicit
+                # durable retry. Never automatically repeat it after reboot.
+                if prior.get('status') in {'failed', 'running'}:
+                    raise PreparationError(prior.get('code', 'review_incomplete'))
+            record = {'identity': identity, 'attempt': attempt, 'status': 'running',
+                      'code': None, 'clips': {}, 'assistance': {}, 'model': model,
+                      'source': source, 'recovery_started': False, 'assistance_started': False}
+            if prior and prior.get('source') == source:
+                record['clips'] = deepcopy(prior.get('clips', {}))
+            if same:
+                record['assistance'] = deepcopy(prior.get('assistance', {}))
+            _write_presentation_record(directory, record)
+            updated = deepcopy(pending)
+            ranges = {c['concern_uid']: None for c in pending['concerns']}
+            try:
+                if audio_needed:
+                    timeline = pending.get('audio_timeline')
+                    if not isinstance(timeline, dict) or not isinstance(timeline.get('text'), str):
+                        raise PreparationError('confirmation_audio_unavailable')
+                    if abs(timeline['duration_seconds'] - source['duration_seconds']) > .25:
+                        raise PreparationError('confirmation_audio_unavailable')
+                    audio = StandardAudio(directory / 'audio/standard.wav', source['duration_seconds'])
+                    recovery = PrimaryRecovery(timeline['text'], None,
+                        tuple(PrimaryChunk(**chunk) for chunk in timeline.get('chunks', [])),
+                        timeline_status=timeline.get('timeline_status', 'unverified'))
+                    recovery_key = digest({'source': source, 'asr': timeline['text'],
+                                           'recognizer': model['recognizer_sha256']})
+                    if prior and prior.get('recovery_key') == recovery_key and prior.get('timeline'):
+                        recovery = PrimaryRecovery(recovery.text, recovery.language,
+                            tuple(PrimaryChunk(**chunk) for chunk in prior['timeline']['chunks']),
+                            timeline_status=prior['timeline']['timeline_status'])
+                    issues = {c['concern_uid']: ReviewConcern(c['start'], c['end'], c['text'], c['reason'],
+                        True, candidate_readings=tuple(c['candidates'])) for c in updated['concerns']}
+                    missing = []
+                    for c in updated['concerns']:
+                        uid = c['concern_uid']
+                        clip = record['clips'].get(uid)
+                        member_key = digest({'identity': member_identity(c), 'text': c['text'],
+                                             'source': source, 'review': pending['review_identity']})
+                        reusable = False
+                        if clip and clip.get('member_key') == member_key:
+                            try:
+                                reusable = read_wav(directory, 'confirmation/' + clip['file']) == clip['wav']
+                            except (PreparationError, KeyError, TypeError):
+                                pass
+                        if reusable:
+                            c.update(audio_file=clip['file'], audio_recovery_required=False)
+                            ranges[uid] = clip['range']
+                        else:
+                            missing.append(c)
+                    if any(locate_concern_audio(audio, recovery, updated['snapshot'], issues[c['concern_uid']])
+                           is None for c in missing):
+                        record['recovery_started'] = True
+                        _write_presentation_record(directory, record)
+                        recovery = recover_locations(self.recognizer, audio, recovery, directory)
+                    record['recovery_key'] = recovery_key
+                    record['timeline'] = {'chunks': [asdict(c) for c in recovery.chunks],
+                                          'timeline_status': recovery.timeline_status}
+                    _write_presentation_record(directory, record)
+                    for c in missing:
+                        uid = c['concern_uid']
+                        span = locate_concern_audio(audio, recovery, updated['snapshot'], issues[uid])
+                        if span is None:
+                            raise PreparationError('confirmation_audio_unavailable')
+                        # Filename ordinal is only syntax; all reuse/evidence is UID bound.
+                        name = f'concern-1-{uuid4().hex}.wav'
+                        record['cutting_uid'] = uid
+                        _write_presentation_record(directory, record)
+                        target = directory / 'confirmation' / name
+                        self.confirmation_clipper.clip(audio, recovery, updated['snapshot'], issues[uid], target)
+                        observed = read_wav(directory, 'confirmation/' + name)
+                        record['clips'][uid] = {'file': name, 'wav': observed, 'range': list(span),
+                            'member_key': digest({'identity': member_identity(c), 'text': c['text'],
+                                                 'source': source, 'review': pending['review_identity']})}
+                        c.update(audio_file=name, audio_recovery_required=False)
+                        ranges[uid] = list(span)
+                        _write_presentation_record(directory, record)
+                    updated['audio_timeline'] = {**timeline, **record['timeline']}
+                    updated['audio_alignment'] = 'local_preview_10s_v3'
+                needs = [c for c in updated['concerns'] if needs_sentence_fields(updated, c)]
+                missing_assistance = []
+                for c in needs:
+                    fields = record['assistance'].get(c['concern_uid'])
+                    if fields is None:
+                        missing_assistance.append(c)
+                    else:
+                        c.update(deepcopy(fields))
+                if missing_assistance:
+                    record['assistance_started'] = True
+                    _write_presentation_record(directory, record)
+                    assistance = self.reviewer.prepare_candidate_assistance(updated['snapshot'], missing_assistance)
+                    for c in missing_assistance:
+                        fields = assistance[c['audio_name']]
+                        if set(fields) != {'sentence_span', 'candidate_translations', 'candidate_basis'}:
+                            raise PreparationError()
+                        c.update(deepcopy(fields))
+                        record['assistance'][c['concern_uid']] = deepcopy(fields)
+                    _write_presentation_record(directory, record)
+                final = self.store.presentation_context(item_id, updated, new_review=new_review)
+                validate_change(pending, final['pending'])
+                if input_binding(final['pending'], source_descriptor=final['source_descriptor']) != binding:
+                    raise SourceReviewConflict('presentation_ownership_conflict')
+                evidence = build_evidence(final['pending'], directory,
+                    source_descriptor=final['source_descriptor'], model=model, ranges=ranges)
+                record.update(status='prepared', pending=final['pending'], evidence=evidence)
+                _write_presentation_record(directory, record)
+                return final['pending'], evidence
+            except SourceReviewConflict:
+                raise
+            except Exception as error:
+                record.update(status='failed', code=_preparation_failure(error))
+                try:
+                    _write_presentation_record(directory, record)
+                except OSError:
+                    pass
+                raise DistillError(record['code']) from None
+
+    def prepared_confirmation_audio(self, item_id, member_uid):
+        """Read verified bytes through the shared gate, with no repair side effects."""
+        from .confirmation_preparation import prepared_audio, PreparationError
+        try:
+            context = self.store.presentation_context(item_id)
+            return prepared_audio(context['pending'], context['item_runtime_root'], member_uid,
+                                  source_descriptor=context['source_descriptor'])
+        except (SourceReviewConflict, PreparationError, OSError, TypeError, KeyError, ValueError):
+            return None
 
     def resolve(self, item_id, action, value="", *, token="", concern_id="", concern_revision="", actor="local"):
         from .confirmation_revision import ConfirmationConflict, revision
@@ -507,32 +771,11 @@ class Distiller:
         if not _is_confirmation_name(name):
             return None
         path = self.runtime_root / "items" / str(item_id) / "confirmation" / name
-        timeline = pending.get('audio_timeline')
-        if timeline and pending.get('audio_alignment') not in {'asr_chunk_v2', 'local_preview_10s_v3'}:
-            # Upgrade only the playback artifact when requested. Never retry,
-            # confirm, or rewrite an existing user task during app upgrade.
-            aligned = path.with_suffix('.v2.wav')
-            if not aligned.is_file():
-                recovery = PrimaryRecovery(timeline['text'], None,
-                    tuple(PrimaryChunk(**chunk) for chunk in timeline['chunks']),
-                    timeline_status=timeline.get('timeline_status', 'unverified'))
-                audio = StandardAudio(path.parent.parent / 'audio' / 'standard.wav', timeline['duration_seconds'])
-                try:
-                    self.confirmation_clipper.clip(audio, recovery, pending['snapshot'],
-                        ReviewConcern(concern['start'], concern['end'], concern['text'], concern['reason'], True), aligned)
-                except ConfirmationAudioError as error:
-                    from .audio_diagnostics import record
-                    record(self.runtime_root, item_id, concern.get('audio_name'), 'serve_failed',
-                           error=error, reason='realign_failed')
-                    return None
-            return aligned
-        if path.is_file() and not path.is_symlink():
-            return path
-        # Missing local playback is a recovery state, never a full-audio task.
-        from .audio_diagnostics import record
-        record(self.runtime_root, item_id, concern.get('audio_name'), 'serve_failed',
-               reason='symlink' if path.is_symlink() else 'missing_file')
-        return None
+        # Legacy path API retained for existing internal consumers, but GET
+        # never clips, recovers, writes diagnostics, or creates a model client.
+        if self.pending_presentation_state(item_id)['status'] != 'prepared':
+            return None
+        return path if path.is_file() and not path.is_symlink() else None
 
     def rerecognize_group(self, item_id, *, token, request_id, group_id, group_revision,
                           selected_member_uids, actor="local"):
@@ -634,6 +877,7 @@ class Distiller:
         return DistillResult(item_id, state)
 
     def _establish_source(self, item_id: int, row) -> None:
+        self._legacy_gate(item_id)
         if row["input_kind"] in {"direct_text", "markdown", "pdf", "epub", "image"}:
             self.store.mark_working(item_id, "reviewing")
             review_revision = self._item(item_id)['review_revision']
@@ -670,15 +914,16 @@ class Distiller:
         self.store.mark_working(item_id, "collecting")
         work_dir = self.runtime_root / "items" / str(item_id)
         captured = None
-        from .intake import platform_for_url
+        from .intake import source_route
         from .captures import FeishuVoiceSource, is_voice_url
-        kind = 'feishu_voice' if is_voice_url(row['submitted_url']) else platform_for_url(row['submitted_url'])
+        kind = 'feishu_voice' if is_voice_url(row['submitted_url']) else source_route(row['submitted_url'])
         if kind is None:
             raise DistillError('source_platform_unsupported')
         source = {'douyin': self.source, 'youtube': self.youtube_source,
                   'xiaohongshu': self.xiaohongshu_source, 'x': self.xpost_source,
                   'zhihu': self.zhihu_source, 'weibo': self.weibo_source,
                   'bilibili': self.bilibili_source,
+                  'web_article': self.web_article_source,
                   'feishu_voice': FeishuVoiceSource(self.store) if kind == 'feishu_voice' else None}.get(kind)
         if source is None:
             raise DistillError(kind + '_runtime_unavailable')
@@ -694,6 +939,8 @@ class Distiller:
             metadata = json.loads(row["metadata_json"])
             if not isinstance(metadata, dict):
                 raise DistillError("material_metadata_invalid")
+            if kind == 'web_article':
+                source_options = {'members': self.store.media_members(row['material_id'])}
             captured = source.reuse_retained(
                 source_key=row["source_key"],
                 submitted_url=row["submitted_url"],
@@ -709,6 +956,15 @@ class Distiller:
         material_id = self.store.attach_material(item_id, captured)
         existing = self._item(item_id)
         if existing["source_fact_id"] is not None:
+            return
+
+        if kind == 'web_article':
+            review_revision = existing['review_revision']
+            fact = SourceFact(captured.metadata['original_description'])
+            lineage = captured.metadata['web_lineage']
+            self.store.commit_source_review(item_id, review_revision, captured.source_key,
+                {'schema': 1, 'snapshot': fact.snapshot, 'uncertainties': (), 'lineage': lineage},
+                fact=fact, lineage=lineage)
             return
 
         if kind in {'douyin', 'xiaohongshu', 'x', 'zhihu', 'weibo'} and captured.metadata.get('note_kind') == 'normal':
@@ -786,46 +1042,24 @@ class Distiller:
                    'review_diagnostics': list(review.candidate.diagnostics)}
         blocking = []
         replay_recovery = recognition.recovery
-        if any(c.meaning_may_change and locate_concern_audio(normalized.audio,
-                replay_recovery, review.candidate.text, c) is None for c in review.candidate.concerns):
-            from .audio_location_recovery import recover_locations
-            try:
-                replay_recovery = recover_locations(self.recognizer, normalized.audio,
-                    recognition.recovery, work_dir)
-            except (OSError, ValueError, EOFError, wave.Error):
-                pass  # Keep the completed review and its unresolved local fields.
         generation = uuid4().hex
         for index, concern in enumerate(review.candidate.concerns, start=1):
             if not concern.meaning_may_change:
                 continue
             name = f"concern-{index}-{generation}.wav"
-            replay_note = ""
-            try:
-                self.confirmation_clipper.clip(
-                    normalized.audio,
-                    replay_recovery,
-                    review.candidate.text,
-                    concern,
-                    work_dir / "confirmation" / name,
-                )
-            except ConfirmationAudioError as error:
-                replay_note = " 局部原音定位恢复未完成，已保留疑点与原文，可重试恢复。"
-                from .audio_diagnostics import record
-                record(self.runtime_root, item_id, name, 'initial_clip_failed', error=error)
-
             blocking.append(
                 _compact_concern({
                     "start": concern.start_offset,
                     "end": concern.end_offset,
                     "text": concern.text,
-                    "reason": concern.reason + replay_note,
+                    "reason": concern.reason,
                     "candidate_explanations": dict(concern.candidate_explanations),
                     "candidates": list(
                         dict.fromkeys((concern.text, *concern.candidate_readings))
                     ),
                     "audio_name": name,
                     "member_id": "primary-audio",
-                    "audio_recovery_required": bool(replay_note),
+                    "audio_recovery_required": True,
                 })
             )
         uncertainties = tuple(
@@ -855,92 +1089,65 @@ class Distiller:
                     "duration_seconds": normalized.audio.duration_seconds},
             }
         group_client = self.reviewer.binding.client if isinstance(self.reviewer, RecordedReviewer) else None
+        from .confirmation_preparation import PROTOCOL
+        prospective = (review_revision, review_identity, stage_result)
         confirmation = form_groups(confirmation, item_id, group_client)
+        context = self.store.presentation_context(item_id, confirmation, new_review=prospective)
+        try:
+            confirmation, evidence = self._prepare_presentation(item_id, context, new_review=prospective)
+        except (DistillError, ValueError, OSError) as error:
+            if isinstance(error, SourceReviewConflict):
+                raise
+            code = _preparation_failure(error)
+            self.store.commit_source_review(item_id, review_revision, review_identity,
+                                            {**stage_result, 'failure': code})
+            raise DistillError(code) from None
+        confirmation['presentation_preparation'] = {'protocol': PROTOCOL,
+            'input_binding': evidence['input_binding'], 'attempt': 1,
+            'outcome': 'prepared', 'evidence': evidence}
         self.store.commit_source_review(item_id, review_revision, review_identity,
                                         stage_result, confirmation=confirmation)
 
     def _finish_partial_source(self, item_id: int, row, pending: dict) -> None:
+        self._legacy_gate(item_id)
         if pending.get('group_confirmation_contract'):
             raise DistillError('group_unresolved_members_require_review')
-        # Judge the remaining clear content before freezing an incomplete SourceFact.
-        self.store.mark_working(item_id, "distilling")
-        candidate = SourceFact(pending['snapshot'], tuple(pending['uncertainties']))
+        expected_confirmation = row['confirmation_json']
+        self.store.mark_working(item_id, 'reviewing')
+        row = self._item(item_id)
+        # Explicit unable decisions retain their unknown spans; saving these
+        # source facts does not assert completeness or generate old knowledge.
+        fact = SourceFact(pending['snapshot'], tuple(pending['uncertainties'] + pending['resolved']))
         if row['source_kind'] == 'xiaohongshu':
             from .xiaohongshu import native_video_fact
-            candidate = native_video_fact(json.loads(row['metadata_json']), candidate)
-        try:
-            knowledge = self._knowledge_for_item(item_id).derive(candidate.snapshot, candidate.uncertainties)
-        except KnowledgeModelError as error:
-            if error.args != ("knowledge_not_qualified",):
-                raise
-            concerns = [{**c, "reason": "剩余明确内容不足以形成可靠知识，请补充此处文字或重新识别。"}
-                        for c in pending["deferred_concerns"]]
-            self.store.mark_waiting(item_id, {**pending, "concerns": concerns, "review_required": True})
-            return
-        fact = SourceFact(pending["snapshot"], tuple(pending["uncertainties"] + pending["resolved"]))
-        fact_id = self.store.establish_source_fact(row["material_id"], fact)
-        self.store.establish_knowledge(fact_id, knowledge)
+            fact = native_video_fact(json.loads(row['metadata_json']), fact)
+        self.store.retain_partial_source(item_id, row['review_revision'], expected_confirmation, fact)
         self._remove_confirmation_audio(item_id, pending["deferred_concerns"])
 
     def _finish(self, item_id: int) -> DistillResult:
+        self._legacy_gate(item_id)
         row = self._item(item_id)
         if row["source_fact_id"] is None:
             return DistillResult(item_id, "waiting_user")
-        if row["source_kind"] == "feishu_voice":
-            # A voice quick note ends as the user's own words in raw/自述, not as knowledge.
-            self.store.mark_succeeded(item_id)
-            try:
-                from .captures import Captures
-                Captures(self.store).write_ready()
-            except Exception as error:
-                import logging
-                logging.getLogger(__name__).warning('capture raw deferred (%s)', type(error).__name__)
-            return DistillResult(item_id, "succeeded")
-        self._write_raw(row)
         if row["knowledge_result_id"] is None:
             if self.store.prepare_image_review(item_id):
                 row = self._item(item_id)
                 if row['state'] == 'waiting_user':
                     return DistillResult(item_id, 'waiting_user')
-            self.store.mark_working(item_id, "distilling")
-            try:
-                members = self.store.media_members(row['material_id']) if row['source_kind'] in {'xiaohongshu', 'x', 'weibo'} else []
-                if any(m['mime_type'].startswith('image/') for m in members) and 'image_ocr' not in json.loads(row['lineage_json']):
-                    raise DistillError('ocr_legacy_source_requires_review')
-                knowledge = self._knowledge_for_item(item_id).derive(
-                    row["snapshot"], json.loads(row["uncertainties_json"])
-                )
-            except KnowledgeModelError:
-                raise
-            self.store.establish_knowledge(int(row["source_fact_id"]), knowledge)
-        self.store.mark_working(item_id, "publishing")
-        if self.vault is None:
-            raise DistillError("vault_not_configured")
-        try:
-            publication = publish(self.store, item_id, self.vault)
-        except ValueError as error:
-            raise DistillError(str(error)) from error
-        if publication.state is PublicationState.CONFLICT:
-            raise DistillError("obsidian_target_conflict")
-        self.store.mark_succeeded(item_id)
-        return DistillResult(item_id, "succeeded")
+            members = self.store.media_members(row['material_id']) if row['source_kind'] in {'xiaohongshu', 'x', 'weibo'} else []
+            if any(m['mime_type'].startswith('image/') for m in members) and 'image_ocr' not in json.loads(row['lineage_json']):
+                raise DistillError('ocr_legacy_source_requires_review')
+        if row['confirmation_json'] is not None:
+            return DistillResult(item_id, 'waiting_user')
+        if row['state'] in {'queued', 'working'}:
+            self.store.mark_working(item_id, 'publishing')
+            row = self._item(item_id)
+        self.store.complete_raw_item(item_id, self.vault, expected_revision=row['review_revision'])
+        return DistillResult(item_id, self._item(item_id)['state'])
 
     def _write_raw(self, row) -> None:
-        """The finished material goes to raw/ (raw-interface §5.1) before any
-        distillation, so a knowledge failure never keeps it out. A raw failure
-        is recorded for backfill and never blocks the V1 note."""
-        try:
-            from .raw import RawLedger
-            from .captures import Captures
-            ledger = RawLedger(self.store)
-            record = ledger.ensure_material(int(row['material_id']),
-                                            **Captures(self.store).material_hints(row['item_id']))
-            if record is not None and record['written_at'] is None:
-                ledger.write(record, self.vault)
-        except Exception as error:
-            import logging
-            logging.getLogger(__name__).warning('raw deferred for material %s (%s)',
-                                                row['material_id'], type(error).__name__)
+        """Compatibility entry point uses the same reliable raw-only terminal."""
+        self.store.complete_raw_item(row['item_id'], self.vault, expected_revision=row['review_revision'])
 
     def _knowledge_for_item(self, item_id):
         scope = getattr(self.knowledge_model, 'for_item', None)
@@ -1000,6 +1207,48 @@ def _pending_confirmation(row, token: str, *, allow_legacy: bool = False) -> dic
         raise ConfirmationConflict("旧版待确认请重新识别。" if not current else "来源确认已更新，请查看当前疑点；输入已保留。")
     pending.setdefault("review_required", True)
     return pending
+
+
+def _preparation_failure(error):
+    from .confirmation_preparation import FAILURE_CODES, PreparationError
+    from .llm import LLMRequestError
+    if isinstance(error, (PreparationError, DistillError, LLMRequestError)) and str(error) in FAILURE_CODES:
+        return str(error)
+    if isinstance(error, LLMRequestError):
+        return 'llm_request_failed'
+    if isinstance(error, BlockingIOError):
+        return 'review_incomplete'
+    if isinstance(error, (ConfirmationAudioError, wave.Error, EOFError, OSError)):
+        return 'confirmation_audio_unavailable'
+    return 'review_incomplete'
+
+
+def _write_presentation_record(directory, record):
+    from .local_records import write_record
+    from .confirmation_preparation import digest
+    write_record(directory / 'confirmation-preparation.json',
+                 {'schema': 2, 'payload': record, 'sha256': digest(record)})
+
+
+def _presentation_record(directory):
+    """Cache integrity only. Ready always requires shared DB/evidence readback."""
+    from .confirmation_preparation import digest
+    path = directory / 'confirmation-preparation.json'
+    try:
+        if path.is_symlink() or path.parent.is_symlink():
+            return None
+        envelope = json.loads(path.read_text())
+        payload = envelope['payload']
+        if (type(envelope.get('schema')) is int and envelope['schema'] == 2
+                and isinstance(payload, dict) and envelope['sha256'] == digest(payload)
+                and type(payload.get('attempt')) is int and payload['attempt'] > 0
+                and payload.get('status') in {'running', 'prepared', 'failed'}
+                and isinstance(payload.get('clips'), dict)
+                and isinstance(payload.get('assistance'), dict)):
+            return payload
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
 
 
 def _is_confirmation_name(value: object) -> bool:

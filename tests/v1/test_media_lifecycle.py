@@ -9,6 +9,12 @@ from knowledge_distiller.v1.media_lifecycle import release_completed, compact, p
 from knowledge_distiller.v1.store import Store
 
 
+def _drop_schema_22_wiki_tables(connection: sqlite3.Connection) -> None:
+    """Remove V3 tables when a latest-schema fixture is rewound to schema 15."""
+    for table in ("wiki_observations", "wiki_task_raw", "wiki_task_batches", "wiki_tasks"):
+        connection.execute(f"DROP TABLE {table}")
+
+
 def captured(tmp_path, *, kind='douyin'):
     store = Store(tmp_path / 'isolated.sqlite3')
     store.initialize()
@@ -103,6 +109,7 @@ def test_upgrade_preserves_history_preview_does_not_write(tmp_path):
             BEGIN SELECT RAISE(ABORT,'SourceFact media is immutable'); END""")
         db.execute("DROP TABLE IF EXISTS group_decisions")
         db.execute("DROP TABLE IF EXISTS manual_cards")
+        _drop_schema_22_wiki_tables(db)
         db.execute('PRAGMA user_version=15')
     before = store.path.read_bytes()
     report = preview(store.path)

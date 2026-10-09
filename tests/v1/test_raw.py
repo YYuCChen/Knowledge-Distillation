@@ -19,6 +19,12 @@ from knowledge_distiller.v1.store import Store
 PNG = b'\x89PNG\r\n\x1a\n' + b'synthetic image bytes' * 20
 
 
+def _drop_schema_22_wiki_tables(connection: sqlite3.Connection) -> None:
+    """Remove V3 tables when a latest-schema fixture is rewound to schema 19."""
+    for table in ("wiki_observations", "wiki_task_raw", "wiki_task_batches", "wiki_tasks"):
+        connection.execute(f"DROP TABLE {table}")
+
+
 @pytest.fixture
 def store(tmp_path):
     result = Store(tmp_path / 'isolated.sqlite3')
@@ -136,8 +142,10 @@ def test_released_image_is_named_not_invented(store):
     snapshot = '正文。'
     material_id = material(store, 'weibo', snapshot, media=[('image-1', PNG)])
     with connect(store.path) as db:
+        guard = db.execute("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='source_media_no_update'").fetchone()[0]
         db.execute('DROP TRIGGER source_media_no_update')
         db.execute("UPDATE source_media SET content=X'' WHERE material_id=?", (material_id,))
+        db.execute(guard)
     record, text, vault = written(store, material_id)
     envelope, body = split(text)
     assert envelope['未保留附件'] == ['image-1'] and '![[' not in body
@@ -290,6 +298,7 @@ def legacy_database(tmp_path, count=3):
     with connect(store.path) as db:
         db.execute('DROP TABLE raw_records')
         db.execute('DROP TABLE raw_counters')
+        _drop_schema_22_wiki_tables(db)
         db.execute('PRAGMA user_version = 19')
     return store, ids
 

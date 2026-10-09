@@ -791,6 +791,25 @@ def validate_result(scenario, attempt, returncode, plan=None, logdir=None):
                 or result.get('update_helper_runtime') != helper or result.get('launches') != 2
                 or result.get('pages') != 4 or result.get('fixed_port') != 57740):
             return 'failed','candidate_runtime_or_journey_mismatch'
+        wiki_helpers=result.get('wiki_helpers')
+        if expected_platform == 'mac':
+            protocol={} if not isinstance(wiki_helpers,dict) else wiki_helpers.get('protocol_scan')
+            display={} if not isinstance(wiki_helpers,dict) else wiki_helpers.get('display_plan')
+            if (result.get('wiki_workflow_entry') is not True
+                    or not isinstance(wiki_helpers,dict)
+                    or set(wiki_helpers) != {'synthetic_vault','protocol_scan','display_plan','app_database_started'}
+                    or wiki_helpers.get('synthetic_vault') is not True
+                    or wiki_helpers.get('app_database_started') is not False
+                    or not isinstance(protocol,dict)
+                    or protocol != {'protocol_version':2,'structure_valid':True}
+                    or not isinstance(display,dict)
+                    or set(display) != {'state','page_count','structure_valid'}
+                    or display.get('state') != 'planned'
+                    or type(display.get('page_count')) is not int or display['page_count'] < 1
+                    or display.get('structure_valid') is not True):
+                return 'failed','candidate_wiki_workflow_mismatch'
+        elif 'wiki_workflow_entry' in result or 'wiki_helpers' in result:
+            return 'failed','candidate_wiki_workflow_mismatch'
         for name in ('runtime.log','launch.log','support.md'):
             digest(attempt/'verification'/name)
     elif scenario['runner']['adapter'] in ('audio_pcm','audio_engine'):

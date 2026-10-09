@@ -6,6 +6,7 @@
   <header class="topbar"><span></span><a href="{{ url_for('settings.page', return_to=request.full_path) }}">设置{% if update is defined %}<img data-update-attention src="{{ url_for('static', filename='icons/update-attention.svg') }}" alt="有新版更新说明" {% if not update.attention %}hidden{% endif %}>{% endif %}</a></header>
   <nav class="main-nav" aria-label="主要页面"><strong aria-current="page">主题</strong><a href="{{ url_for('home') }}">首页</a><a href="{{ url_for('insights.index') }}">新知</a></nav>
   <header class="topic-heading"><h1>主题</h1>{% if snapshot %}<p>{{ snapshot.topics|length }} 个主题、{{ snapshot.knowledge_count }} 篇知识</p>{% endif %}</header>
+  <p class="legacy-notice"><strong>历史内容只读保留</strong><span>新的整理结果进入 Obsidian 知识库；这里仍可搜索和阅读已有主题与新知。</span></p>
   <form class="topic-search" method="get" action="{{ url_for('topics.index') }}" role="search">
     <button aria-label="搜索" title="搜索" type="submit"><img src="{{ url_for('static', filename='icons/topic-search.svg') }}" alt=""></button>
     <input type="search" name="q" value="{{ query }}" placeholder="搜索主题、观点或新知" aria-label="搜索主题、观点或新知" autocomplete="off">

@@ -9,12 +9,35 @@ from knowledge_distiller.v1.feishu_actions import FeishuActions
 from knowledge_distiller.v1.feishu_intake import FeishuIntake
 
 
-def setup_action(inbox):
+def setup_action(inbox, *, prepared=False):
     inbox.receive(history_message(message()),history=True)
     item=inbox.store.create_item('https://www.douyin.com/video/101',receipt_key=(inbox.app_id,'om_1',0))
     with connect(inbox.store.path) as db:
         db.execute("UPDATE feishu_receipts SET card_id='om_card'")
-    inbox.store.mark_waiting(item,{'token':'pending-1','snapshot':'原文','concerns':[{'audio_name':'c1'}]})
+    pending={'token':'pending-1','snapshot':'原文','concerns':[{'audio_name':'c1'}]}
+    if prepared:
+        from knowledge_distiller.v1.domain import CapturedMaterial
+        from .test_confirmation_preparation_storage import _pending, _wav, _claimed, _success
+        root=inbox.store.path.parent
+        media=root/'synthetic-confirmation.mp4';media.write_bytes(b'synthetic source')
+        inbox.store.attach_material(item,CapturedMaterial('douyin','101',
+            'https://www.douyin.com/video/101','https://www.douyin.com/video/101',
+            {'fixture_contract':'synthetic-confirmation-source'},media,2))
+        pending=_pending()
+        pending.update(snapshot='原文',audio_timeline={'text':'原文','duration_seconds':2.0,
+            'timeline_status':'available','chunks':[{'text':'原文','start_seconds':0.0,'end_seconds':2.0}]},
+            concerns=[{'start':0,'end':2,'text':'原文','reason':'合成待确认',
+                       'audio_name':'c1','candidates':['原文']}])
+    inbox.store.mark_waiting(item,pending)
+    if prepared:
+        item_root=inbox.store.preparation_runtime_root/'items'/str(item)
+        _wav(item_root/'audio'/'standard.wav')
+        ownership,context=_claimed(inbox.store,item)
+        assert inbox.store.finish_pending_presentation(item,ownership,
+            _success(inbox.store,item,ownership,context))=='waiting_user'
+        from knowledge_distiller.v1.confirmation_preparation import ready
+        current=inbox.store.presentation_context(item)
+        assert ready(current['pending'],item_root,source_descriptor=current['source_descriptor'])
     token=json.loads(inbox.store.item_bundle(item)['confirmation_json'])['token']
     payload={'event':{'operator':{'open_id':'ou_owner'},'context':{'open_chat_id':'oc_private','open_message_id':'om_card'},
                      'action':{'value':{'kind':'source_confirmation','item_id':item,'token':token,'concern_id':'c1',
@@ -23,7 +46,7 @@ def setup_action(inbox):
 
 
 def test_replayed_card_after_save_does_not_resolve_twice(inbox):
-    item,payload=setup_action(inbox)
+    item,payload=setup_action(inbox,prepared=True)
     engine=SimpleNamespace(resolve=Mock(side_effect=lambda *a,**k: inbox.store.resolve_confirmation(
         item,inbox.store.item_bundle(item)['confirmation_json'],next_confirmation={'snapshot':'核对文字','concerns':[]})))
     actions=FeishuActions(inbox,None,engine)
@@ -48,7 +71,7 @@ def test_other_sender_card_or_item_cannot_act(inbox):
 
 
 def test_desktop_saved_confirmation_closes_old_feishu_button(inbox):
-    item,payload=setup_action(inbox)
+    item,payload=setup_action(inbox,prepared=True)
     row=inbox.store.item_bundle(item)
     inbox.store.resolve_confirmation(item,row['confirmation_json'],next_confirmation={'concerns':[],'snapshot':'电脑确认'})
     engine=SimpleNamespace(resolve=Mock())

@@ -3,18 +3,6 @@ let polling = false;
 let actionGeneration = 0;
 const drafts = new Map();
 let lastServerHTML = document.querySelector('#home-results')?.innerHTML;
-// The organization event this tab saw when it loaded. A failure recorded before
-// then is history, not feedback for this page (BUG-20260916-02); a refresh or a
-// new tab starts from a new baseline, and each tab keeps its own.
-const organizationBaseline = (node => node && {
-  event: node.dataset.organizationEvent || '',
-  failed: node.dataset.organizationFailed === 'true',
-})(document.querySelector('.organization-feedback'));
-
-function observedOrganizationFailure(node) {
-  return node.dataset.organizationFailed === 'true' && !(organizationBaseline?.failed &&
-    node.dataset.organizationEvent === organizationBaseline.event);
-}
 
 document.addEventListener('change', event => {
   if (!event.target.matches('[data-source-file]')) return;
@@ -45,6 +33,17 @@ function retainsLocalWork(node) {
 }
 
 function preserveCompletedCards(current, next, submittedCard) {
+  // A missing prepared projection is not a completed human decision.
+  const preparing = new Set(JSON.parse(next.getAttribute('data-preparing-members') || '[]'));
+  for (const card of current.querySelectorAll('.todo-card-shell[data-sync-key^="member-"]')) {
+    if (!preparing.has(card.dataset.syncKey) || card.dataset.syncKey === submittedCard) continue;
+    const copy = card.cloneNode(true);
+    delete copy.dataset.staleConfirmation;
+    copy.removeAttribute('title');
+    copy.dataset.preparingConfirmation = 'true';
+    for (const button of copy.querySelectorAll('button:not([data-card-toggle])')) button.disabled = true;
+    next.querySelector('.todo-list')?.append(copy);
+  }
   for (const card of current.querySelectorAll('.todo-card-shell[data-sync-key^="member-"]')) {
     if (card.dataset.syncKey === submittedCard ||
         next.querySelector(`[data-sync-key="${CSS.escape(card.dataset.syncKey)}"]`)) continue;
@@ -122,7 +121,9 @@ function reconcile(current, next) {
     else reconcile(match, incoming);
     used.add(match);
     if (match !== cursor) {
-      if (match.parentNode === current && typeof current.moveBefore === 'function') current.moveBefore(match, cursor);
+      const carriesAudio = match.nodeType === Node.ELEMENT_NODE &&
+        (match.matches('audio') || match.querySelector('audio'));
+      if (!carriesAudio && match.parentNode === current && typeof current.moveBefore === 'function') current.moveBefore(match, cursor);
       else current.insertBefore(match, cursor);
     }
     cursor = serverNode(match.nextSibling);
@@ -135,22 +136,18 @@ function applyPage(html, submittedForm, submittedCard) {
   const current = document.querySelector('#home-results');
   const next = page.querySelector('#home-results');
   if (!current || !next) throw new Error('没有收到完整页面，请稍后再试。');
-  const feedback = document.querySelector('.organization-feedback');
-  const nextFeedback = page.querySelector('.organization-feedback');
-  if (feedback && nextFeedback) {
-    feedback.textContent = nextFeedback.textContent;
-    feedback.dataset.organizationEvent = nextFeedback.dataset.organizationEvent || '';
-    feedback.dataset.organizationFailed = nextFeedback.dataset.organizationFailed || 'false';
-    feedback.hidden = nextFeedback.hidden && !observedOrganizationFailure(nextFeedback);
-  }
   const status = page.querySelector('.topbar-status');
   if (status) reconcile(document.querySelector('.topbar-status'), status);
-  if (next.innerHTML === lastServerHTML && !submittedForm) return;
+  if (next.innerHTML === lastServerHTML && !submittedForm &&
+      next.getAttribute('data-preparing-members') === current.getAttribute('data-preparing-members')) return;
   const anchors = Array.from(current.querySelectorAll('[data-sync-key^="member-"], [data-sync-key^="task-"], [data-sync-key^="group-"]'))
     .filter(node => node.getBoundingClientRect().bottom > 0);
   const anchor = anchors.filter(node => !anchors.some(child => child !== node && node.contains(child))).find(node => page.querySelector(`[data-sync-key="${CSS.escape(node.dataset.syncKey)}"]`));
   const anchorTop = anchor?.getBoundingClientRect().top;
   const active = document.activeElement;
+  const editing = current.contains(active) && active?.matches?.('input:not([type="hidden"]), textarea');
+  const selection = editing && Number.isInteger(active.selectionStart) && Number.isInteger(active.selectionEnd)
+    ? {start: active.selectionStart, end: active.selectionEnd, direction: active.selectionDirection} : null;
   const activeCard = active?.closest?.('[data-sync-key]');
   const activeIndex = anchors.indexOf(activeCard);
   for (const form of current.querySelectorAll('form[id]')) {
@@ -172,6 +169,14 @@ function applyPage(html, submittedForm, submittedCard) {
     const count = form.querySelector('[data-selection-count]');
     if (count) count.textContent = form.querySelectorAll('[name="selected_member_uids"]:checked').length;
   }
+  if (editing && active.isConnected && current.contains(active) && document.activeElement !== active) {
+    active.focus({preventScroll: true});
+    if (document.activeElement === active && selection &&
+        (active.matches('textarea') || ['text', 'search', 'tel', 'url', 'password'].includes(active.type)) &&
+        typeof active.setSelectionRange === 'function') {
+      active.setSelectionRange(selection.start, selection.end, selection.direction);
+    }
+  }
   if (active && !active.isConnected && activeIndex >= 0) {
     const surviving = [...anchors.slice(activeIndex + 1), ...anchors.slice(0, activeIndex).reverse()].find(node => node.isConnected);
     const target = surviving?.querySelector('input:not([type="hidden"]), button:not([disabled]), summary, a');
@@ -191,8 +196,15 @@ document.addEventListener('click', event => {
 
 document.addEventListener('input', event => {
   if (event.target.matches('.manual-confirmation input[name="value"]')) {
-    event.target.setAttribute('aria-invalid', 'false');
-    event.target.placeholder = '自定义输入…';
+    const input = event.target;
+    input.setAttribute('aria-invalid', 'false');
+    input.placeholder = input.dataset.defaultPlaceholder || '自定义输入…';
+    const emptyError = input.dataset.emptyError ? document.getElementById(input.dataset.emptyError) : null;
+    if (emptyError) {
+      emptyError.hidden = true;
+      input.removeAttribute('data-empty-confirmation');
+      if (input.getAttribute('aria-describedby') === emptyError.id) input.removeAttribute('aria-describedby');
+    }
   }
 });
 
@@ -251,12 +263,20 @@ document.addEventListener('submit', async event => {
   }
   if (!form.closest('#home-results')) return;
   event.preventDefault();
-  if (form.closest('[data-stale-confirmation]')) return;
+  if (form.closest('[data-stale-confirmation], [data-preparing-confirmation]')) return;
   if (updating) return;
   if ((form.matches('.manual-confirmation') || (form.matches('[data-group-confirmation]') && event.submitter?.value === 'manual')) && !form.elements.value.value.trim()) {
     const input = form.elements.value;
-    input.value = '';
-    input.placeholder = '请输入正确文字';
+    const emptyError = input.dataset.emptyError ? document.getElementById(input.dataset.emptyError) : null;
+    if (emptyError) {
+      input.placeholder = '请输入确认文字';
+      input.setAttribute('data-empty-confirmation', '');
+      input.setAttribute('aria-describedby', emptyError.id);
+      emptyError.hidden = false;
+    } else {
+      input.value = '';
+      input.placeholder = '请输入正确文字';
+    }
     input.setAttribute('aria-invalid', 'true');
     input.focus();
     return;

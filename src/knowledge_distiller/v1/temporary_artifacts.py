@@ -115,6 +115,10 @@ class TemporaryArtifacts:
     def _needs_media(row):
         # A retry before SourceFact still needs capture/ASR/OCR bytes. Elapsed
         # time alone is not abandonment; an explicit dismissal ends ownership.
+        if row is not None and row['ingestion_contract'] != 'legacy':
+            # A1 has no read-only filesystem proof boundary. Never infer safe
+            # cleanup from SourceFact, written_at, dismissal or process events.
+            return True
         return bool(row is not None and row['source_fact_id'] is None
                     and row['dismissed_at'] is None
                     and not (row['error_code'] or '').endswith('_input_unsupported'))
@@ -125,7 +129,7 @@ class TemporaryArtifacts:
         with connect(self.store.path) as db:
             return db.execute('''SELECT 1 FROM distill_items i
                 WHERE i.item_id!=? AND i.material_id=(SELECT material_id FROM distill_items WHERE item_id=?)
-                AND (i.confirmation_json IS NOT NULL OR i.state='working'
+                AND (i.ingestion_contract!='legacy' OR i.confirmation_json IS NOT NULL OR i.state='working'
                      OR (i.dismissed_at IS NULL AND i.state!='succeeded')) LIMIT 1''', (item, item)).fetchone() is not None
 
     @staticmethod

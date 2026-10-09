@@ -1,0 +1,686 @@
+{
+  "schema": 1,
+  "versions": {
+    "trafilatura": "2.3.1",
+    "httpx": "0.28.1",
+    "httpcore": "1.0.9"
+  },
+  "files": [
+    {
+      "path": "NOTICE.txt",
+      "size": 3576,
+      "sha256": "3c0ff6a7e8d523233ad94019f12701ad9f12306259e185c87f73e9498af4561b",
+      "origin": "KnowledgeDistiller R05 notice, approved 2026-10-08"
+    },
+    {
+      "path": "licenses/PSL/MPL-2.0.txt",
+      "size": 16726,
+      "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+      "origin": "https://www.mozilla.org/media/MPL/2.0/index.txt"
+    },
+    {
+      "path": "licenses/babel/LICENSE.unicode",
+      "size": 2033,
+      "sha256": "b4c0ae8ef04f7059f96ce5bbe0467f9fe6f6d81bbe13517701dfeb961fb4d0b6",
+      "origin": "https://pypi.org/project/babel/2.18.0/"
+    },
+    {
+      "path": "licenses/babel/licenses/LICENSE",
+      "size": 1531,
+      "sha256": "86bad5758c7859ba06251f8f12eee885eca31369923dfb2b87a7c13c3634d870",
+      "origin": "https://pypi.org/project/babel/2.18.0/"
+    },
+    {
+      "path": "licenses/charset-normalizer/licenses/LICENSE",
+      "size": 1071,
+      "sha256": "6d0d41bfe170ac6c7dc248c9a63e254d0fb45a60d50a8257d0af92c6e249b887",
+      "origin": "https://pypi.org/project/charset-normalizer/3.5.2/"
+    },
+    {
+      "path": "licenses/courlan/licenses/LICENSE",
+      "size": 10173,
+      "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
+      "origin": "https://pypi.org/project/courlan/1.4.0/"
+    },
+    {
+      "path": "licenses/dateparser/licenses/AUTHORS.rst",
+      "size": 711,
+      "sha256": "c7261e4f6006295aec1d8c683b180313c5e648aed536d24da85cf0db924b1368",
+      "origin": "https://pypi.org/project/dateparser/1.4.3/"
+    },
+    {
+      "path": "licenses/dateparser/licenses/LICENSE",
+      "size": 1469,
+      "sha256": "8639063668407f5e478ae2d3c3c17966088558b4b5574b548c436eea302bbe7e",
+      "origin": "https://pypi.org/project/dateparser/1.4.3/"
+    },
+    {
+      "path": "licenses/htmldate/licenses/LICENSE",
+      "size": 10173,
+      "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
+      "origin": "https://pypi.org/project/htmldate/1.11.0/"
+    },
+    {
+      "path": "licenses/httpcore/licenses/LICENSE.md",
+      "size": 1518,
+      "sha256": "fdcb59154c74cbaba16a11242f7740bea9f23d6feb5547917d8c5f94a80392a5",
+      "origin": "https://pypi.org/project/httpcore/1.0.9/"
+    },
+    {
+      "path": "licenses/httpx/licenses/LICENSE.md",
+      "size": 1508,
+      "sha256": "4ec59d544f12b5f539a3a716fd321ac58ccd8030b465221f2c880200cdf28d8d",
+      "origin": "https://pypi.org/project/httpx/0.28.1/"
+    },
+    {
+      "path": "licenses/jusText/LICENSE.rst",
+      "size": 1339,
+      "sha256": "d71c0b2234fd22e9f295986ed8f22cf425b7a4c269248d214eb8bda2a32e7179",
+      "origin": "https://pypi.org/project/jusText/3.0.2/"
+    },
+    {
+      "path": "licenses/lxml-html-clean/licenses/LICENSE.txt",
+      "size": 1488,
+      "sha256": "69edb445c1335a8312d4c09271847e9956d84f0d9f724d125340cc3fad767b2a",
+      "origin": "https://pypi.org/project/lxml-html-clean/0.4.5/"
+    },
+    {
+      "path": "licenses/tld/licenses/LICENSE.rst",
+      "size": 159,
+      "sha256": "38e859c063ef83eb1c68d28ab67ffad56e056398c453e4c2968d56de2ea8e777",
+      "origin": "https://pypi.org/project/tld/0.13.2/"
+    },
+    {
+      "path": "licenses/tld/licenses/LICENSE_GPL2.0.txt",
+      "size": 18083,
+      "sha256": "df0f0b30b87a86746921a95164387878646d6aa0683a7b211fa8a40e114d6111",
+      "origin": "https://pypi.org/project/tld/0.13.2/"
+    },
+    {
+      "path": "licenses/tld/licenses/LICENSE_LGPL_2.1.txt",
+      "size": 26434,
+      "sha256": "96131738ed6ddc1cde3e1482a125a227b5a5b4988131b0b4bc275cfe373664d8",
+      "origin": "https://pypi.org/project/tld/0.13.2/"
+    },
+    {
+      "path": "licenses/tld/licenses/LICENSE_MPL_1.1.txt",
+      "size": 25679,
+      "sha256": "3ea07a3dffe4f0b5ef7a92a3f474198dfdf7daca596c8bdbbcf184ae20443a8c",
+      "origin": "https://pypi.org/project/tld/0.13.2/"
+    },
+    {
+      "path": "licenses/trafilatura/licenses/LICENSE",
+      "size": 10173,
+      "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
+      "origin": "https://pypi.org/project/trafilatura/2.3.1/"
+    },
+    {
+      "path": "licenses/tzlocal/licenses/LICENSE.txt",
+      "size": 1060,
+      "sha256": "d99ab209aeb16aad2c25c90ffd83c1a981e290ffff76a420a2ab03e03f041b8c",
+      "origin": "https://pypi.org/project/tzlocal/5.4.4/"
+    },
+    {
+      "path": "licenses/urllib3/licenses/LICENSE.txt",
+      "size": 1093,
+      "sha256": "130e3a64d5fdd5d096a752694634a7d9df284469de86e5732100268041e3d686",
+      "origin": "https://pypi.org/project/urllib3/2.8.0/"
+    },
+    {
+      "path": "sources/tld-0.13.2.tar.gz",
+      "size": 467175,
+      "sha256": "d983fa92b9d717400742fca844e29d5e18271079c7bcfabf66d01b39b4a14345",
+      "origin": "https://files.pythonhosted.org/packages/5c/5d/76b4383ac4e5b5e254e50c09807b3e13820bed6d6c11cd540264988d6802/tld-0.13.2.tar.gz"
+    }
+  ],
+  "resources": {
+    "trafilatura": [
+      {
+        "path": "settings.cfg",
+        "size": 1074,
+        "sha256": "00a97270d18936bae4dd60cc305c6cffa9eeef845f0a5176ad305329a73387b9"
+      }
+    ],
+    "justext": [
+      {
+        "path": "stoplists/Afrikaans.txt",
+        "size": 1205,
+        "sha256": "60068b7f2b1a4b44407a3ff69556765a683194923ec6aea1782c34565a78e6d4"
+      },
+      {
+        "path": "stoplists/Albanian.txt",
+        "size": 3424,
+        "sha256": "de5562aa3f62270b261829462e691208c3c184094d44ffb953226a6126ca027c"
+      },
+      {
+        "path": "stoplists/Arabic.txt",
+        "size": 30217,
+        "sha256": "535516447421193b69aa3e17d0d0f0b7ca3bd45d7bb4ce4a61b4cfaf92102e58"
+      },
+      {
+        "path": "stoplists/Aragonese.txt",
+        "size": 918,
+        "sha256": "dbed3e949121890f15d98541dabfde35ee48c204a58d54eac9fac587786f0141"
+      },
+      {
+        "path": "stoplists/Armenian.txt",
+        "size": 45410,
+        "sha256": "1bc4d48ef035c668db49b45b13947e17e6ca732476b1693af41afe78eccdbe1c"
+      },
+      {
+        "path": "stoplists/Aromanian.txt",
+        "size": 3544,
+        "sha256": "2b7df1823e6cded7bcd8c791eefbe6bc091b790764ffa9bf15b84250a7828b37"
+      },
+      {
+        "path": "stoplists/Asturian.txt",
+        "size": 4379,
+        "sha256": "585e9122ff8f8b1ff44686536fa15c6333024ef31bf3811910728379ac6b1cbb"
+      },
+      {
+        "path": "stoplists/Azerbaijani.txt",
+        "size": 33201,
+        "sha256": "c6d3202699aa70e9f005c29c8cdbe62b68af179e3b4750133ff99863b1f3f106"
+      },
+      {
+        "path": "stoplists/Basque.txt",
+        "size": 17791,
+        "sha256": "8d28351210ce5a7c6b8e2650f35f8bdabf83caed30d3a797ff30e075c2755d16"
+      },
+      {
+        "path": "stoplists/Belarusian.txt",
+        "size": 65883,
+        "sha256": "84bdc9fd506a966d973fae7c72b4fbf0e8ac4404ba8c5ebc5fec3c3b295a4ff8"
+      },
+      {
+        "path": "stoplists/Belarusian_Taraskievica.txt",
+        "size": 62122,
+        "sha256": "daf6bfec7bbe521dee8681665946bc59e87308239ad7d05f07e0dafcdd62ec0a"
+      },
+      {
+        "path": "stoplists/Bengali.txt",
+        "size": 18721,
+        "sha256": "4d96e8bd35faeb08eb5d6bb0e8a5418f269112fc6a9552762560d7b1f339c176"
+      },
+      {
+        "path": "stoplists/Bishnupriya_Manipuri.txt",
+        "size": 950,
+        "sha256": "cd70857234f275d0a931a2a9540836629110a4c360adb7db91894b0065b24593"
+      },
+      {
+        "path": "stoplists/Bosnian.txt",
+        "size": 16143,
+        "sha256": "59d5223b8e8182ab8b07df0d50dce98aa140543ef811dfd10509344e0b4b3349"
+      },
+      {
+        "path": "stoplists/Breton.txt",
+        "size": 1649,
+        "sha256": "765f65ffa8cea2fa5a8fdcb8a61388b24c0e365618a779f100544571ba0d40ab"
+      },
+      {
+        "path": "stoplists/Bulgarian.txt",
+        "size": 15206,
+        "sha256": "8a92d0d65efd05fcc0efd5f344e13317bbf98f52ed4c96cd993d50f9d1626673"
+      },
+      {
+        "path": "stoplists/Catalan.txt",
+        "size": 1344,
+        "sha256": "97d4c4edfa848606d5ed0b815d81cb988f0677f714c89c135449d8d623724ed1"
+      },
+      {
+        "path": "stoplists/Cebuano.txt",
+        "size": 57,
+        "sha256": "03c2da16c0b6f001b1e526b025119dc99fd463426dd353036975d19db799ba4a"
+      },
+      {
+        "path": "stoplists/Chuvash.txt",
+        "size": 35124,
+        "sha256": "8deaff9cadeafd0a611f569e3382a3d3e98832ce5fce5107a7fcc873efb1afa1"
+      },
+      {
+        "path": "stoplists/Croatian.txt",
+        "size": 17928,
+        "sha256": "2331fc8d07231a65c7d61132c5af6d78e48873cad3cc2334220852230d4345cf"
+      },
+      {
+        "path": "stoplists/Czech.txt",
+        "size": 25564,
+        "sha256": "881a2340f6ac199396eb15f4db54964c201c1c66c7fa66752327c9d95c1a72b9"
+      },
+      {
+        "path": "stoplists/Danish.txt",
+        "size": 3504,
+        "sha256": "4358a9f8cb5516c9626597b3a1cd0e5e5fd20080b6341032b6829e8b17ce9d38"
+      },
+      {
+        "path": "stoplists/Dutch.txt",
+        "size": 1756,
+        "sha256": "b406014534235aa3f688477e6dbb1347b3955909e2c2ac3258fe2054c20458a5"
+      },
+      {
+        "path": "stoplists/English.txt",
+        "size": 3123,
+        "sha256": "6b4fc520e2b14c27a8a046d9ce3814dad6d28a18654bf8b029a0828a253c3428"
+      },
+      {
+        "path": "stoplists/Esperanto.txt",
+        "size": 3657,
+        "sha256": "561fca7dedaf48da02a5eda958207bbb34e6d2e9f0ce189fd90d4f92e2a41edc"
+      },
+      {
+        "path": "stoplists/Estonian.txt",
+        "size": 50849,
+        "sha256": "5cc8166c5f5b496f1f226850981197a5de113bdcc370f3c5dc30f399b1a60a21"
+      },
+      {
+        "path": "stoplists/Finnish.txt",
+        "size": 66511,
+        "sha256": "aedc458d998e34376b1fa673c495c6af44bca59bb12c44be5bd6d04c697e7e20"
+      },
+      {
+        "path": "stoplists/French.txt",
+        "size": 2656,
+        "sha256": "a228cb3129b5186241c445d981fbc4a8a9e888d34f541c6707ec9ee4a74e28cc"
+      },
+      {
+        "path": "stoplists/Galician.txt",
+        "size": 2857,
+        "sha256": "ca5fc2d377733a1d81cd8e0635671659a8bbcc78ce711e38c132d2c39105bb55"
+      },
+      {
+        "path": "stoplists/Georgian.txt",
+        "size": 128465,
+        "sha256": "a969af94cc2b7fb1cdad377b87b08d1d53ecc972c6a8949c48e68ff1eb47463a"
+      },
+      {
+        "path": "stoplists/German.txt",
+        "size": 4653,
+        "sha256": "5ce9b8b9442c356bf68584feb9c84ef914f58d8ea7e2a43512ee4519b6bee188"
+      },
+      {
+        "path": "stoplists/Greek.txt",
+        "size": 7796,
+        "sha256": "70a311196e3598313b4606d43f85773b41774d01ae6308fe9480340986857732"
+      },
+      {
+        "path": "stoplists/Gujarati.txt",
+        "size": 6073,
+        "sha256": "75f87ae1ac1b3cc2e277acf2f4f2e25d5be68a056fd2bb74f6b803562db2efc8"
+      },
+      {
+        "path": "stoplists/Haitian.txt",
+        "size": 175,
+        "sha256": "20a6b35d87203fa79851378ece09b91c42d573c6367bd3ddee911c98b11a0614"
+      },
+      {
+        "path": "stoplists/Hebrew.txt",
+        "size": 45229,
+        "sha256": "26a79fa4ec8498aa8ab48d28bad1c163b0426b60d28d58809b9bb3bdffc349a5"
+      },
+      {
+        "path": "stoplists/Hindi.txt",
+        "size": 4944,
+        "sha256": "fa103d357188211d5fcd1732b7ea8081fcfacd0bab181dcfbf7c3c244dd50301"
+      },
+      {
+        "path": "stoplists/Hungarian.txt",
+        "size": 29227,
+        "sha256": "4e811046248ff7a7b7139865f258307aa4a9e51e451419f8732a514fbcebf6be"
+      },
+      {
+        "path": "stoplists/Icelandic.txt",
+        "size": 4813,
+        "sha256": "6254526e692b0928bdd5464c66a356486d446ff9148bd99968a165b4e5959297"
+      },
+      {
+        "path": "stoplists/Ido.txt",
+        "size": 249,
+        "sha256": "f96a3653e3386f356ac70d00328097a1b54762a8fdf5c3ae7ee2f0c687c8a78e"
+      },
+      {
+        "path": "stoplists/Igbo.txt",
+        "size": 733,
+        "sha256": "c204a082cf15f07f90c58c97b39234d3f0956ed9dfe9d07921782a7fcb132e3f"
+      },
+      {
+        "path": "stoplists/Indonesian.txt",
+        "size": 6758,
+        "sha256": "f0143b4011cb6e179d872707095833688ef5b9f812dba9d4ebaeca0c0065d1af"
+      },
+      {
+        "path": "stoplists/Irish.txt",
+        "size": 1191,
+        "sha256": "9972859974937c30ad8cf261a4b22180ef88d70e4f1042d6f1b0615da9ab4522"
+      },
+      {
+        "path": "stoplists/Italian.txt",
+        "size": 3715,
+        "sha256": "f64ed3eba980c2fe20535ea7bbf37201adae498571edd3aca838f8474c10c6fc"
+      },
+      {
+        "path": "stoplists/Javanese.txt",
+        "size": 4533,
+        "sha256": "16a195e31e0586375edceec7b9754acba25dbeaab07b5e62b65987c3e6073960"
+      },
+      {
+        "path": "stoplists/Kannada.txt",
+        "size": 161220,
+        "sha256": "d61e660a8c849db40c2d88c95161bd5b9d998e9fb8a4051e2aa78976d02c8fa1"
+      },
+      {
+        "path": "stoplists/Kazakh.txt",
+        "size": 52789,
+        "sha256": "386ea9a2f64ebbcd6ea973ffc2e78ba0822390d2e899f76829824e7b791203aa"
+      },
+      {
+        "path": "stoplists/Korean.txt",
+        "size": 131487,
+        "sha256": "1a03b7c30c13d370c544ca37b428eef87f1fd568cf1306d5aecf26393920709a"
+      },
+      {
+        "path": "stoplists/Kurdish.txt",
+        "size": 3530,
+        "sha256": "8bf246c4bb81eec28c89cecb9063b5c9e67e3f3ed506cd2e7ca0b1e131db5e97"
+      },
+      {
+        "path": "stoplists/Kyrgyz.txt",
+        "size": 54729,
+        "sha256": "b3ff0d24ac31e4e9b1b7b0f2721a765869a5011006ecff2cd73a9cad9260d29b"
+      },
+      {
+        "path": "stoplists/Latin.txt",
+        "size": 14282,
+        "sha256": "5a5ca98fbf69b0e65eeca5874b3b94e16f0968f352490ac60f6d20996d8154c2"
+      },
+      {
+        "path": "stoplists/Latvian.txt",
+        "size": 30561,
+        "sha256": "7394f635d2b4406adba1582cf118ef5e534eb3b185e2bb0117419fe1037c6c4d"
+      },
+      {
+        "path": "stoplists/Lithuanian.txt",
+        "size": 43497,
+        "sha256": "e26add88d75715d61b4c80333ebbf832dcb75bab58a624af7ba2f3a1544b31dc"
+      },
+      {
+        "path": "stoplists/Lombard.txt",
+        "size": 738,
+        "sha256": "82d949fb5970fb1c7d09991b87faf8a7726715632b4e34747977f221ea030190"
+      },
+      {
+        "path": "stoplists/Low_Saxon.txt",
+        "size": 1051,
+        "sha256": "17e7b85a3f40cf044c15f18fe481197dae80691013ad632569c575e0dd450aee"
+      },
+      {
+        "path": "stoplists/Luxembourgish.txt",
+        "size": 2374,
+        "sha256": "11ff566538529321cda6c3c3f0492c95aef33388b4e05feed963638ea1c3ddf0"
+      },
+      {
+        "path": "stoplists/Macedonian.txt",
+        "size": 11982,
+        "sha256": "1ae68489a82768ffe332be752d18be580d8e63d064c1b5ce7f39ac5928c0fecf"
+      },
+      {
+        "path": "stoplists/Malay.txt",
+        "size": 6368,
+        "sha256": "c96fa5e0099f76820adaa7cb0820ac16acfde86dd35d52ff2b486776e9dc0579"
+      },
+      {
+        "path": "stoplists/Malayalam.txt",
+        "size": 309082,
+        "sha256": "6110d1da32e96731feadcc2314801f8d99946a8494e9a970f41fc73ee5324d37"
+      },
+      {
+        "path": "stoplists/Maltese.txt",
+        "size": 11115,
+        "sha256": "881ea00cd1f7950bbf331ab18f722ec048fe1ac8ea3504b674888d5a0c812ece"
+      },
+      {
+        "path": "stoplists/Marathi.txt",
+        "size": 39588,
+        "sha256": "99538abd7ed0df6c692d047dbc336358425f664bc13c40bc6f631a3f11aa66d9"
+      },
+      {
+        "path": "stoplists/Neapolitan.txt",
+        "size": 1749,
+        "sha256": "69f98e67232f3973e00ed2b3eff0684620aa9986b1e411efeb3fb2563ea3d366"
+      },
+      {
+        "path": "stoplists/Nepali.txt",
+        "size": 26543,
+        "sha256": "03af02de49f3cf74bac77fe48effdc20d33fa6e48997dcd8781375e8fd5bec6d"
+      },
+      {
+        "path": "stoplists/Newar.txt",
+        "size": 1465,
+        "sha256": "2276cdb8373a988f827b931b113adae4e96acf6f53a0aadc5d4dc95ad29f9f42"
+      },
+      {
+        "path": "stoplists/Norwegian_Bokmal.txt",
+        "size": 2850,
+        "sha256": "a9b3d7086b05312c6f0197a809afe6e84cf99d6be1d52c0ee689cc39190deaba"
+      },
+      {
+        "path": "stoplists/Norwegian_Nynorsk.txt",
+        "size": 2002,
+        "sha256": "e9145278ff9fc0982a935d47c78bf1e8f1114afb5bb4fedc9cd3be65ccd24dbe"
+      },
+      {
+        "path": "stoplists/Occitan.txt",
+        "size": 3109,
+        "sha256": "d494e4c96a1478122237bf47e3d5750bd1fe4c44dce703f73691a35ed4b5e60e"
+      },
+      {
+        "path": "stoplists/Persian.txt",
+        "size": 4642,
+        "sha256": "5ece8d47fb5cdcc5a7e7dfe22988db07afc7dc5d011690bf514e0c5f899e6a78"
+      },
+      {
+        "path": "stoplists/Piedmontese.txt",
+        "size": 419,
+        "sha256": "e8f498c79df7bb23001ccbb5a5857400b9ce36de19411f4936516bcc5f4d0d86"
+      },
+      {
+        "path": "stoplists/Polish.txt",
+        "size": 29632,
+        "sha256": "9c354c42f10ddc69c5a82561dcca0456743f1525499e1a30927cc7eb2c5dc6fd"
+      },
+      {
+        "path": "stoplists/Portuguese.txt",
+        "size": 3261,
+        "sha256": "687fe5964fbe33bcd8f4e4cb0c6ef25274fd9f1d374d6a1c8cb015aa73e4a4f1"
+      },
+      {
+        "path": "stoplists/Quechua.txt",
+        "size": 2237,
+        "sha256": "be6a286dbf699f4516f53716a1f75de48064bba134cffe2d5ddc418123c3bf39"
+      },
+      {
+        "path": "stoplists/Romanian.txt",
+        "size": 7067,
+        "sha256": "510944314f9ffbc6e8b2f77cb4660caf78f0f69c6af1b2defc85ba4a416c8fe0"
+      },
+      {
+        "path": "stoplists/Russian.txt",
+        "size": 77600,
+        "sha256": "32170cb9a4a83f2e1d0524ab87868bff66eb9248ac214d64b2c83854b48f94bd"
+      },
+      {
+        "path": "stoplists/Samogitian.txt",
+        "size": 14867,
+        "sha256": "a26e4934a06df5fdbfbefffbd312a4d1672b76dc580d3552f690d1196739e8cc"
+      },
+      {
+        "path": "stoplists/Serbian.txt",
+        "size": 21052,
+        "sha256": "2ca87f847ab8dd5ce2d115cd183e856d37496b04c5d3cdd2dd00a189cf67daae"
+      },
+      {
+        "path": "stoplists/Serbo_Croatian.txt",
+        "size": 17311,
+        "sha256": "6b95a8f397796c3f2f8acb5619c9d1c7cbdbc4dd6ae7f6e6e8141b8c968cafc4"
+      },
+      {
+        "path": "stoplists/Sicilian.txt",
+        "size": 3167,
+        "sha256": "458e677249930f87a83ab11ed537b8d9aa1cb1037ba4deece5e31e0fd7e3637f"
+      },
+      {
+        "path": "stoplists/Simple_English.txt",
+        "size": 1567,
+        "sha256": "03866bd9ecdfb7adbd0e58d6448f15ae3203c68798359c0a910d92dbe3cb6742"
+      },
+      {
+        "path": "stoplists/Slovak.txt",
+        "size": 28930,
+        "sha256": "17ee4757f84e48b0c3d9ecf402714fb252a8ceffe73690cf178927a880780859"
+      },
+      {
+        "path": "stoplists/Slovenian.txt",
+        "size": 17179,
+        "sha256": "e37ef18196c99c7ae0c4c7333cae2104305b827060a590d0cae3a0f2596d5578"
+      },
+      {
+        "path": "stoplists/Spanish.txt",
+        "size": 1851,
+        "sha256": "6ea8062ad0a58fbf337095d9bf3f66afa5e15bfbc28744e57ad790b9042b4813"
+      },
+      {
+        "path": "stoplists/Sundanese.txt",
+        "size": 5971,
+        "sha256": "78680f9fc3cf0cb7f7b8feacef7aea7f6819ee7663114944af748c36bfc56479"
+      },
+      {
+        "path": "stoplists/Swahili.txt",
+        "size": 2406,
+        "sha256": "f2090e77e61ecf22dc023213f1812cd8d4165e25a6e67e75131d8333bf45d1c5"
+      },
+      {
+        "path": "stoplists/Swedish.txt",
+        "size": 4870,
+        "sha256": "f45a96cceedd0718333b329c4dfc083dfaba7f6edf0fd1b88f4cce933a78f195"
+      },
+      {
+        "path": "stoplists/Tagalog.txt",
+        "size": 980,
+        "sha256": "3454199b134823597a9894a024c623f95d1c6aadd86835e5c840fc50f16b7e97"
+      },
+      {
+        "path": "stoplists/Tamil.txt",
+        "size": 154484,
+        "sha256": "c9a4ed7ed9105adc69a161ff053b08f85ae9b37133703eb0481be06329e9bfa8"
+      },
+      {
+        "path": "stoplists/Telugu.txt",
+        "size": 95849,
+        "sha256": "64b03c6294c9096d071653bcfac13a13ee722af5e72529dcf9b8f60dfead91e2"
+      },
+      {
+        "path": "stoplists/Turkish.txt",
+        "size": 25673,
+        "sha256": "48223eefa79d9f05945282f8877c6c4e43400cb30b58933a92bc0c76e3720424"
+      },
+      {
+        "path": "stoplists/Turkmen.txt",
+        "size": 27602,
+        "sha256": "4429eb56fdd42e49a7887627cdd7c117d050a2707f815f5e5e7a55930af8de95"
+      },
+      {
+        "path": "stoplists/Ukrainian.txt",
+        "size": 75370,
+        "sha256": "626968892220c4ef229823a78463017d9499e8cd965b668c391d5bda8cde25d6"
+      },
+      {
+        "path": "stoplists/Urdu.txt",
+        "size": 1900,
+        "sha256": "bc8342ef6005f50e82c32672863a30b195555c8d01b465ce6fbeb606b524b6e4"
+      },
+      {
+        "path": "stoplists/Uzbek.txt",
+        "size": 51738,
+        "sha256": "f15dce83893e4c7dba78d7e7d561e299b4b10a8a55f6bb2200d71d15563de96d"
+      },
+      {
+        "path": "stoplists/Vietnamese.txt",
+        "size": 1769,
+        "sha256": "845ab86a39aba2ad5757aa3f0bcd731fbb186e2176dfdb105fc39f41d4d4f547"
+      },
+      {
+        "path": "stoplists/Volapuk.txt",
+        "size": 533,
+        "sha256": "5f762ecc9e2718d94d7b96883b31f33c0586a0576be2b533d8c0a054083c5908"
+      },
+      {
+        "path": "stoplists/Walloon.txt",
+        "size": 910,
+        "sha256": "865792ded96467f41a325ccc64ac0ed3a8ebe41089b8e686b5cc00a44f28eb64"
+      },
+      {
+        "path": "stoplists/Waray_Waray.txt",
+        "size": 47,
+        "sha256": "7c907ab674fbab796ba6afb361113c35f03f145ff18ada1826d043bda5bb5338"
+      },
+      {
+        "path": "stoplists/Welsh.txt",
+        "size": 3338,
+        "sha256": "1f85f46fa67ad8a28534a3dd387ba57c5a5d610617279894e72d70fe8f1b565d"
+      },
+      {
+        "path": "stoplists/West_Frisian.txt",
+        "size": 1353,
+        "sha256": "60c4264345ccae7813a6d54a1a9447e5629f5017ee9148b8e1cfba276c764392"
+      },
+      {
+        "path": "stoplists/Western_Panjabi.txt",
+        "size": 2230,
+        "sha256": "3d1ced37e55d1d016d990c8cbcc8d4965e7200b64d7c619dfdc96b51903f58dc"
+      },
+      {
+        "path": "stoplists/Yoruba.txt",
+        "size": 1748,
+        "sha256": "ab8c888b140c8c1081c43de5afe9250556b84ac549a7853a3a806c90d0d97f6d"
+      }
+    ],
+    "tld": [
+      {
+        "path": "res/effective_tld_names.dat.txt",
+        "size": 330904,
+        "sha256": "abf32ce9987d505b89765d76f35760543851235508f1f426b5b259a2062b5f68"
+      },
+      {
+        "path": "res/effective_tld_names_public_only.dat.txt",
+        "size": 330904,
+        "sha256": "abf32ce9987d505b89765d76f35760543851235508f1f426b5b259a2062b5f68"
+      }
+    ],
+    "babel": [
+      {
+        "path": "global.dat",
+        "size": 461219,
+        "sha256": "a389dc74e1eba5b601c3c7b417c8d07b9e41f199370d10cc2cc70c771771156e"
+      },
+      {
+        "path": "locale-data/en.dat",
+        "size": 220701,
+        "sha256": "894baebce3c3dcd9049e46342ba8a9617689954fdd82011e7ab5397351144196"
+      },
+      {
+        "path": "locale-data/zh.dat",
+        "size": 152100,
+        "sha256": "4a94a499d54de4f5fb08276ca3507e4b241928c0d3c997d9793da5fe48f61682"
+      },
+      {
+        "path": "locale-data/root.dat",
+        "size": 51999,
+        "sha256": "40362f72d2907c126508c525db819fef51c8650ab5e3f5752dc4cafbab9dc334"
+      },
+      {
+        "path": "locale-data/LICENSE.unicode",
+        "size": 2033,
+        "sha256": "b4c0ae8ef04f7059f96ce5bbe0467f9fe6f6d81bbe13517701dfeb961fb4d0b6"
+      }
+    ]
+  }
+}

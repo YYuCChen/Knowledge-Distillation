@@ -1,6 +1,8 @@
 from knowledge_distiller.v1.database import SCHEMA_VERSION
 import json
 import sqlite3
+import ast
+import inspect
 from pathlib import Path
 
 import pytest
@@ -39,6 +41,80 @@ def knowledge() -> Knowledge:
         (),
         (Evidence("e1", 0, 7, "持续切换会带来"),),
     )
+
+
+def _drop_schema_22_wiki_tables(connection: sqlite3.Connection) -> None:
+    """Remove V3 tables when a latest-schema fixture is rewound to an older release."""
+    for table in ("wiki_observations", "wiki_task_raw", "wiki_task_batches", "wiki_tasks"):
+        connection.execute(f"DROP TABLE {table}")
+
+
+def _historical_database(path, version):
+    """Build synthetic historical DDL forward, never rewind a current database.
+
+    The initializer's pre-18 SQL branches define these historical additions.
+    Only fixture construction stops at that boundary; the tested initializer
+    remains unchanged and must honor the protected historical26 endpoint.
+    """
+    from knowledge_distiller.v1 import database
+    schema = SCHEMA
+    if version < 12:
+        schema = schema.replace('    rejection_reason TEXT,\n', '')
+    if version < 13:
+        schema = schema.replace('    dismissed_at TEXT,\n', '')
+    if version in (1, 2):
+        schema = schema.replace("    lineage_json TEXT NOT NULL DEFAULT '{}',\n", '')
+        schema = schema.replace('    published_vault TEXT,\n', '')
+        if version == 1:
+            schema = schema.replace('    queued_at TEXT NOT NULL,\n', '')
+        with sqlite3.connect(path) as db:
+            db.executescript(schema)
+            db.execute(f'PRAGMA user_version={version}')
+    else:
+        tree = ast.parse(inspect.getsource(database.initialize))
+        function = tree.body[0]
+        body = function.body[-1].body  # connection context, not product mutation
+        cutoff = next(i for i, node in enumerate(body)
+                      if isinstance(node, ast.If)
+                      and ast.dump(node.test) == ast.dump(ast.parse(f'version < {version + 1}', mode='eval').body))
+        function.body[-1].body = body[:cutoff]
+        namespace = {**vars(database), 'SCHEMA': schema}
+        exec(compile(tree, '<synthetic-historical-migration-prefix>', 'exec'), namespace)
+        namespace['initialize'](path)
+    with sqlite3.connect(path) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == version
+
+
+def _old_item(path, *, failed=False, reason=None):
+    with connect(path) as db:
+        columns = {r[1] for r in db.execute('PRAGMA table_info(distill_items)')}
+        values = dict(item_id=1, submitted_url='https://v.douyin.com/a/',
+                      state='failed' if failed else 'queued', phase='distilling' if failed else 'collecting',
+                      error_code='knowledge_not_qualified' if failed else None,
+                      created_at='2026-09-05T01:02:03+00:00', updated_at='2026-09-05T01:02:03+00:00')
+        if 'queued_at' in columns:
+            values['queued_at'] = values['created_at']
+        if reason is not None:
+            values['rejection_reason'] = reason
+        db.execute(f'INSERT INTO distill_items({",".join(values)}) VALUES ({",".join("?" for _ in values)})', tuple(values.values()))
+        return dict(db.execute('SELECT * FROM distill_items WHERE item_id=1').fetchone())
+
+
+def _assert_old_item_preserved(before, after):
+    assert {key: after[key] for key in before} == before
+    defaults = {'rejection_reason': None, 'dismissed_at': None, 'submitted_title': '',
+                'review_revision': 0, 'ingestion_contract': 'legacy',
+                'source_binding_sha256': None, 'relation_binding_sha256': None}
+    assert {key: after[key] for key in after.keys() - before.keys()} == {
+        key: defaults[key] for key in defaults if key not in before}
+
+
+def _old_fact(path, snapshot):
+    with connect(path) as db:
+        db.execute("INSERT INTO materials(material_id,source_kind,source_key,submitted_url,canonical_url,metadata_json,created_at,snapshot_key) VALUES(1,'synthetic','123','synthetic://old','synthetic://old','{}','old','legacy')")
+        db.execute("UPDATE distill_items SET material_id=1 WHERE item_id=1")
+        db.execute("INSERT INTO source_facts VALUES(1,1,?,'[]','{}','old')", (snapshot,))
+    return 1
 
 
 @pytest.fixture
@@ -170,29 +246,16 @@ def test_unknown_schema_version_is_not_guessed(tmp_path: Path) -> None:
     with sqlite3.connect(path) as connection:
         connection.execute("PRAGMA user_version = 99")
 
-    with pytest.raises(RuntimeError, match="unsupported database version"):
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match="^unsupported frozen migration source: 99$"):
         Store(path).initialize()
+    assert path.read_bytes() == before
 
 
 def test_v1_schema_migrates_existing_queue_order(tmp_path: Path) -> None:
     path = tmp_path / "v1.sqlite3"
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            """CREATE TABLE distill_items (
-                   item_id INTEGER PRIMARY KEY,
-                   created_at TEXT NOT NULL, confirmation_json TEXT
-               )"""
-        )
-        connection.execute(
-            "INSERT INTO distill_items (created_at) VALUES ('2026-09-05T01:02:03+00:00')"
-        )
-        connection.execute("CREATE TABLE source_facts (source_fact_id INTEGER PRIMARY KEY, material_id INTEGER)")
-        connection.execute("CREATE TABLE source_connections (platform TEXT PRIMARY KEY)")
-        connection.execute("CREATE TABLE materials " + SCHEMA.split("CREATE TABLE materials ", 1)[1].split(";", 1)[0])
-        connection.execute("DROP TABLE IF EXISTS group_decisions")
-        connection.execute("DROP TABLE IF EXISTS manual_cards")
-        connection.execute("PRAGMA user_version=1")
-        connection.execute("CREATE TABLE knowledge_results (knowledge_result_id INTEGER PRIMARY KEY, source_fact_id INTEGER)")
+    _historical_database(path, 1)
+    _old_item(path)
 
     from knowledge_distiller.v1.database import initialize
     initialize(path)
@@ -202,7 +265,7 @@ def test_v1_schema_migrates_existing_queue_order(tmp_path: Path) -> None:
         queued_at = connection.execute(
             "SELECT queued_at FROM distill_items WHERE item_id = 1"
         ).fetchone()[0]
-    assert version == SCHEMA_VERSION
+    assert version == 26  # Explicit protected pre-21 endpoint, not frozen27.
     assert queued_at == "2026-09-05T01:02:03+00:00"
 
 
@@ -226,25 +289,15 @@ def test_fifo_retry_rejoins_tail_and_restart_recovers_head(store: Store) -> None
 
 def test_v2_migration_does_not_infer_old_publication_destination(tmp_path: Path) -> None:
     path = tmp_path / "old.sqlite3"
-    with sqlite3.connect(path) as connection:
-        connection.executescript("""
-            CREATE TABLE knowledge_results (
-                knowledge_result_id INTEGER PRIMARY KEY,
-                source_fact_id INTEGER,
-                published_path TEXT
-            );
-            INSERT INTO knowledge_results VALUES (1, NULL, '知识蒸馏器/old.md');
-            CREATE TABLE distill_items (item_id INTEGER PRIMARY KEY, confirmation_json TEXT, created_at TEXT);
-            CREATE TABLE source_facts (source_fact_id INTEGER PRIMARY KEY, material_id INTEGER);
-            CREATE TABLE source_connections (platform TEXT PRIMARY KEY);
-            PRAGMA user_version = 2;
-        """)
-    with sqlite3.connect(path) as connection:
-        connection.execute("CREATE TABLE materials " + SCHEMA.split("CREATE TABLE materials ", 1)[1].split(";", 1)[0])
+    _historical_database(path, 2)
+    with connect(path) as db:
+        db.execute("INSERT INTO materials VALUES(1,'synthetic','old','old','old','{}','old')")
+        db.execute("INSERT INTO source_facts(source_fact_id,material_id,snapshot,uncertainties_json,created_at) VALUES(1,1,'旧来源','[]','old')")
+        db.execute("INSERT INTO knowledge_results VALUES(1,1,'{}','知识蒸馏器/old.md','old','old')")
     from knowledge_distiller.v1.database import initialize
     initialize(path)
     with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 26
         assert connection.execute(
             "SELECT published_path, published_vault FROM knowledge_results"
         ).fetchone() == ("知识蒸馏器/old.md", None)
@@ -265,71 +318,45 @@ def test_waiting_and_failure_are_user_visible_facts(store: Store) -> None:
 
 def test_v11_migration_preserves_item_and_does_not_invent_rejection_reason(tmp_path):
     store = Store(tmp_path / 'v11.sqlite3')
-    store.initialize()
-    item = store.create_item('https://v.douyin.com/a/')
-    store.mark_failed(item, 'distilling', 'knowledge_not_qualified')
-    with connect(store.path) as db:
-        db.execute('ALTER TABLE distill_items DROP COLUMN rejection_reason')
-        for table in ('media_lifecycle','feishu_parts','feishu_receipts','feishu_binding','collection_previews'):
-            db.execute(f'DROP TABLE {table}')
-        db.execute("DROP TABLE IF EXISTS group_decisions")
-        db.execute("DROP TABLE IF EXISTS manual_cards")
-        db.execute('PRAGMA user_version=11')
-        before = dict(db.execute('SELECT * FROM distill_items').fetchone())
+    _historical_database(store.path, 11)
+    before = _old_item(store.path, failed=True)
     store.initialize()
     with connect(store.path) as db:
         after = dict(db.execute('SELECT * FROM distill_items').fetchone())
-        assert after.pop('rejection_reason') is None
-        assert after == before
+        assert after['rejection_reason'] is None
+        _assert_old_item_preserved(before, after)
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
-        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 26
 
 
 def test_v12_dismiss_migration_preserves_existing_failure(tmp_path):
     store = Store(tmp_path / 'v12.sqlite3')
-    store.initialize()
-    item = store.create_item('https://v.douyin.com/a/')
-    store.mark_failed(item, 'distilling', 'knowledge_not_qualified', rejection_reason='仅描述外观。')
-    with connect(store.path) as db:
-        db.execute('DROP TRIGGER source_media_no_update')
-        db.execute("""CREATE TRIGGER source_media_no_update BEFORE UPDATE ON source_media
-            WHEN EXISTS(SELECT 1 FROM source_facts WHERE material_id=OLD.material_id)
-            BEGIN SELECT RAISE(ABORT,'SourceFact media is immutable'); END""")
-        db.execute('ALTER TABLE distill_items DROP COLUMN dismissed_at')
-        for table in ('media_lifecycle','feishu_parts','feishu_receipts','feishu_binding','collection_previews'):
-            db.execute(f'DROP TABLE {table}')
-        db.execute("DROP TABLE IF EXISTS group_decisions")
-        db.execute("DROP TABLE IF EXISTS manual_cards")
-        db.execute('PRAGMA user_version=12')
-        before = dict(db.execute('SELECT * FROM distill_items').fetchone())
+    _historical_database(store.path, 12)
+    before = _old_item(store.path, failed=True, reason='仅描述外观。')
     store.initialize()
     with connect(store.path) as db:
         after = dict(db.execute('SELECT * FROM distill_items').fetchone())
-        assert after.pop('dismissed_at') is None
-        assert after == before
+        assert after['dismissed_at'] is None
+        _assert_old_item_preserved(before, after)
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 26
 
 
 def test_v13_title_migration_preserves_user_state_and_source_fact(tmp_path):
     from knowledge_distiller.v1.database import connect
     store = Store(tmp_path/'migration.sqlite3')
-    store.initialize()
-    item = store.create_item('https://www.douyin.com/video/123')
-    store.mark_failed(item, 'collecting', 'fixture_failure')
+    _historical_database(store.path, 13)
+    before = _old_item(store.path, failed=True)
     with connect(store.path) as db:
-        db.execute('ALTER TABLE distill_items DROP COLUMN submitted_title')
-        for table in ('media_lifecycle','feishu_parts','feishu_receipts','feishu_binding','collection_previews'):
-            db.execute(f'DROP TABLE {table}')
-        db.execute("DROP TABLE IF EXISTS group_decisions")
-        db.execute("DROP TABLE IF EXISTS manual_cards")
-        db.execute('PRAGMA user_version=13')
+        db.execute("UPDATE distill_items SET phase='collecting',error_code='fixture_failure' WHERE item_id=1")
         before = dict(db.execute('SELECT * FROM distill_items').fetchone())
     store.initialize()
     with connect(store.path) as db:
         after = dict(db.execute('SELECT * FROM distill_items').fetchone())
-        assert after.pop('submitted_title') == ''
-        assert after == before
+        assert after['submitted_title'] == ''
+        _assert_old_item_preserved(before, after)
         assert db.execute('PRAGMA foreign_key_check').fetchone() is None
         assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 26
 
 
 def test_recent_limit_counts_distinct_knowledge_and_preserves_pending_tasks(store, tmp_path):
@@ -370,22 +397,33 @@ def test_recent_card_keeps_the_first_completed_attempt(store, tmp_path):
 
 
 def test_previous_release_schema_16_upgrades_and_keeps_facts(store,tmp_path):
-    item=store.create_item('https://v.douyin.com/a/')
-    material=store.attach_material(item,captured(tmp_path))
-    fact=store.establish_source_fact(material,SourceFact('升级必须保留的真实来源。'))
-    with connect(store.path) as db:
-        db.execute('DROP TABLE confirmation_decisions')
-        db.execute('DROP TABLE feishu_action_queue')
-        db.execute("DROP TABLE IF EXISTS group_decisions")
-        db.execute("DROP TABLE IF EXISTS manual_cards")
-        db.execute('PRAGMA user_version=16')
+    store = Store(tmp_path / 'historical16.sqlite3')
+    _historical_database(store.path, 16)
+    _old_item(store.path)
+    item=1
+    fact=_old_fact(store.path, '升级必须保留的真实来源。')
     store.initialize()
     with connect(store.path) as db:
         # Schema 18 adds complete review results; migration must retain facts.
-        assert db.execute('PRAGMA user_version').fetchone()[0]== SCHEMA_VERSION
+        assert db.execute('PRAGMA user_version').fetchone()[0]== 26
         assert db.execute('SELECT snapshot FROM source_facts WHERE source_fact_id=?',(fact,)).fetchone()[0]=='升级必须保留的真实来源。'
         assert db.execute('PRAGMA foreign_key_check').fetchone() is None
         assert db.execute('SELECT count(*) FROM confirmation_decisions').fetchone()[0]==0
+    # Only this representative historical lane checks a second initialize.
+    # The real frozen26 preflight, not the version number alone, admits it.
+    with connect(store.path) as db:
+        legacy = {}
+        for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+            columns = [r[1] for r in db.execute(f'PRAGMA table_info("{table}")')]
+            legacy[table] = (columns, sorted((tuple(r) for r in db.execute(f'SELECT * FROM "{table}"')), key=repr))
+    store.initialize()
+    with connect(store.path) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        for table, (columns, rows) in legacy.items():
+            projection = ','.join(f'"{column}"' for column in columns)
+            assert sorted((tuple(r) for r in db.execute(f'SELECT {projection} FROM "{table}"')), key=repr) == rows
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+        assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 
 
 def test_review_commit_rejects_late_attempt_after_requeue(store, tmp_path):
@@ -427,23 +465,18 @@ def test_review_commit_and_fact_are_atomic_on_database_failure(store, tmp_path):
 
 
 def test_schema_17_adds_review_state_without_inventing_completion(store, tmp_path):
-    item = store.create_item('https://v.douyin.com/a/')
-    store.attach_material(item, captured(tmp_path))
+    store = Store(tmp_path / 'historical17.sqlite3')
+    _historical_database(store.path, 17)
+    _old_item(store.path)
+    item = 1
+    _old_fact(store.path, '升级前的真实来源。')
     before = dict(store.item_bundle(item))
-    before.pop('review_revision')
-    with connect(store.path) as db:
-        db.execute('DROP TRIGGER distill_review_revision')
-        db.execute('DROP TABLE source_review_results')
-        db.execute('ALTER TABLE distill_items DROP COLUMN review_revision')
-        db.execute("DROP TABLE IF EXISTS group_decisions")
-        db.execute("DROP TABLE IF EXISTS manual_cards")
-        db.execute('PRAGMA user_version=17')
     store.initialize()
     after = dict(store.item_bundle(item))
-    assert after.pop('review_revision') == 0
-    assert after == before
+    assert after['review_revision'] == 0
+    _assert_old_item_preserved(before, after)
     with connect(store.path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 26
         assert db.execute('SELECT count(*) FROM source_review_results').fetchone()[0] == 0
         assert not db.execute('PRAGMA foreign_key_check').fetchall()
 

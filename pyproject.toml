@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "knowledge-distiller"
-version = "2.0.0"
+version = "3.0.0"
 description = "Local-first knowledge distiller MVP"
 requires-python = ">=3.11.16,<3.12"
 dependencies = [
@@ -15,7 +15,9 @@ dependencies = [
   "jsonschema>=4.23,<5",
   "PyYAML>=6.0.2,<7",
   "pypdf>=6,<7",
-  "httpx>=0.27,<1",
+  "httpx==0.28.1",
+  "httpcore==1.0.9",
+  "trafilatura==2.3.1",
   "cryptography==50.0.1; sys_platform == 'win32'",
   "playwright==1.61.0",
   "websocket-client==1.9.0",
@@ -45,7 +47,7 @@ build = [
   "pyinstaller==6.22.2",
 ]
 secondary = [
-  "httpx>=0.27,<1",
+  "httpx==0.28.1",
   "cryptography==50.0.1; sys_platform == 'win32'",
   "tos==2.9.2",
 ]

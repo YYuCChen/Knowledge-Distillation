@@ -1,7 +1,7 @@
 """Shared desktop/Feishu link intake on the existing source adapters."""
 import re
 from urllib.parse import urlsplit
-from .intake import links_in, platform_for_url
+from .intake import links_in, platform_for_url, source_route
 from .chrome import ChromeSessionError
 from .bilibili import BilibiliSourceError
 
@@ -11,7 +11,10 @@ class LinkIntake:
         self.store, self.settings, self.collections, self.errors = store, settings, collections, errors
 
     def submit(self, value, *, receipt_key=None, durable=False):
-        platform = platform_for_url(links_in(value)[0])
+        matches = links_in(value)
+        if not matches or not matches[0]:
+            raise ValueError('暂不支持这个来源链接，请提交支持的平台链接或选择完整文本。')
+        platform = source_route(matches[0])
         if platform == 'weibo':
             from .weibo import weibo_identity, connection_authority
             matches = links_in(value)
@@ -92,6 +95,8 @@ class LinkIntake:
                 item_id = self.store.create_item(links[0], receipt_key=receipt_key)
             else:
                 item_id = self.store.create_item(douyin_url(value), receipt_key=receipt_key)
+        elif platform == 'web_article' and len(matches) == 1:
+            item_id = self.store.create_item(matches[0], receipt_key=receipt_key)
         else:
             raise ValueError('暂不支持这个来源链接，请提交支持的平台链接或选择完整文本。')
         return item_id

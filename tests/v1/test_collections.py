@@ -8,7 +8,7 @@ from knowledge_distiller.v1.collections import Collections, PreviewChanged
 from knowledge_distiller.v1.douyin_collections import CollectionError, Scope, Member, connection_authority
 from knowledge_distiller.v1.domain import CapturedMaterial,SourceFact,Knowledge,Point,Evidence
 from knowledge_distiller.v1.database import connect
-from knowledge_distiller.v1.publisher import publish
+from knowledge_distiller.v1.raw import RawLedger
 from knowledge_distiller.v1.store import Store
 from knowledge_distiller.v1.worker import SingleWorker
 
@@ -36,20 +36,17 @@ class Model:
     def __init__(self):self.calls=0;self.invalid=False
     def derive_collection(self,basis):
         self.calls+=1
-        return {'qualified':True,'title':'集合综合','subtitle':'两个来源的共同认识','summary':'有依据的摘要',
-                'points':[{'id':'c1','statement':'具体背景中的共同判断','argument':'保持原有条件',
-                           'supports':[{'knowledge_result_id':999999 if self.invalid else item['knowledge_result_id'],'point_id':'p1'} for item in basis]}]}
+        raise AssertionError('R01 collection must not generate legacy combined knowledge')
 
 
 class Boundary:
-    """Coordinator test double; SQLite, worker, evidence and publisher are real."""
+    """Coordinator test double; SQLite, worker and raw readback are real."""
     def __init__(self,store,root):
         self.store=store;self.root=root;self.vault=root/'vault';self.vault.mkdir(exist_ok=True)
+        self.store.set_setting('vault_path',str(self.vault))
         self.knowledge_model=Model();self.fail=set();self.wait=set();self.calls=[];self.after=None
     def run(self,item):
         row=self.store.item_bundle(item)
-        if row['published_path']:
-            self.store.mark_succeeded(item);return
         key=row['submitted_url'].rsplit('/',1)[1];self.calls.append(key)
         if key in self.fail:
             self.store.mark_failed(item,'collecting','temporary');return
@@ -60,11 +57,11 @@ class Boundary:
         with connect(self.store.path) as db:
             member=db.execute('SELECT * FROM collection_members WHERE item_id=?',(item,)).fetchone()
         path=self.root/(key+'.mp4');path.write_bytes(key.encode())
-        metadata={'original_description':'描述'+key,'native_content_version':member['native_version'] if member else 'standalone'}
+        metadata={'original_description':'描述'+key,'native_content_version':member['native_version'] if member else 'standalone',
+                  'session_authority':connection_authority(self.store)}
         material=self.store.attach_material(item,CapturedMaterial('douyin',key,row['submitted_url'],row['submitted_url'],metadata,path,1))
         text='来源正文'+key;fact=self.store.establish_source_fact(material,SourceFact(text))
-        self.store.establish_knowledge(fact,Knowledge('标题'+key,'具体副标题','摘要',(Point('p1','原始观点','具体论证',('e1',)),),(),(Evidence('e1',0,len(text),text),)))
-        publish(self.store,item,self.vault);self.store.mark_succeeded(item)
+        self.store.complete_raw_item(item,self.vault)
         if self.after:self.after(item)
 
 
@@ -92,31 +89,34 @@ def test_confirm_replay_remains_same_work_after_remote_drift_and_restart(setup):
     assert len(c.list())==1
 
 
-def test_complete_set_creates_separate_combined_result_with_real_lineage(setup):
+def test_complete_set_retains_raw_and_explicit_relationship_without_combined(setup):
     store,c,d,root=setup;op,_=accept(c);boundary=Boundary(store,root);drain(SingleWorker(store,boundary))
     result=c.detail(op)
     assert result['state']=='succeeded' and result['consequence']=='complete'
-    assert boundary.calls==['101','102'] and boundary.knowledge_model.calls==1
-    refs=result['result']['points'][0]['supports'];assert {r['native_id'] for r in refs}=={'101','102'}
-    assert all(r['evidence'][0]['text'].startswith('来源正文') for r in refs)
+    assert boundary.calls==['101','102'] and boundary.knowledge_model.calls==0
+    assert result['result'] is None
+    assert {m['native_id'] for m in result['members']}=={'101','102'}
+    with connect(store.path) as db:
+        for member in result['members']:
+            receipt=RawLedger(store).read_item(db,member['item_id'],boundary.vault)
+            assert '来源正文' in (boundary.vault/receipt.relative_path).read_text()
     with connect(store.path) as db:
         assert db.execute('SELECT COUNT(*) FROM source_facts').fetchone()[0]==2
-        assert db.execute('SELECT COUNT(*) FROM knowledge_results').fetchone()[0]==2
-        assert db.execute('SELECT COUNT(*) FROM collection_results').fetchone()[0]==1
+        assert db.execute('SELECT COUNT(*) FROM knowledge_results').fetchone()[0]==0
+        assert db.execute('SELECT COUNT(*) FROM collection_results').fetchone()[0]==0
         with pytest.raises(sqlite3.IntegrityError):db.execute("UPDATE collection_operations SET manifest_json='{}'")
         with pytest.raises(sqlite3.IntegrityError):db.execute('DELETE FROM collection_members')
-        with pytest.raises(sqlite3.IntegrityError):db.execute("UPDATE collection_results SET payload_json='{}'")
 
 
 def test_failure_isolated_then_retry_preserves_successful_member(setup):
     store,c,d,root=setup;op,_=accept(c);b=Boundary(store,root);b.fail={'101'};worker=SingleWorker(store,b)
     drain(worker);info=c.detail(op)
     assert info['state']=='partial' and info['result'] is None and b.knowledge_model.calls==0
-    success=store.item_bundle(info['members'][1]['item_id'])['knowledge_result_id']
+    success=RawLedger(store).current('material',store.item_bundle(info['members'][1]['item_id'])['material_id'])['raw_id']
     b.fail.clear();c.resume(op,info['revision']);drain(worker)
     assert c.detail(op)['state']=='succeeded'
     assert b.calls==['101','102','101']
-    assert store.item_bundle(info['members'][1]['item_id'])['knowledge_result_id']==success
+    assert RawLedger(store).current('material',store.item_bundle(info['members'][1]['item_id'])['material_id'])['raw_id']==success
 
 
 def test_queued_cancel_and_same_snapshot_submit_do_not_restart(setup):
@@ -143,12 +143,11 @@ def test_unsupported_members_stay_visible_and_do_not_enter_retry(setup):
     with pytest.raises(CollectionError,match='nothing_to_retry'):c.resume(op,info['revision'])
 
 
-def test_invalid_combined_cannot_commit_and_retry_does_not_redo_items(setup):
+def test_unusable_old_combined_model_does_not_block_raw_completion(setup):
     store,c,d,root=setup;op,_=accept(c);b=Boundary(store,root);b.knowledge_model.invalid=True;worker=SingleWorker(store,b)
     drain(worker);info=c.detail(op)
-    assert info['state']=='failed' and info['consequence']=='complete' and info['result'] is None
-    assert info['error_code']=='collection_combined_invalid'
-    b.knowledge_model.invalid=False;c.resume(op,info['revision']);drain(worker)
+    assert info['state']=='succeeded' and info['consequence']=='complete' and info['result'] is None
+    assert info['error_code'] is None and b.knowledge_model.calls==0
     assert b.calls==['101','102'] and c.detail(op)['state']=='succeeded'
 
 
@@ -186,7 +185,7 @@ def test_multi_confirmation_keeps_scope_ordinals_and_reports_interrupted_group(s
     assert error.value.operations==operations[:1] and error.value.expected==2
 
 
-def test_web_preview_confirm_cancel_resume_and_combined_evidence(setup):
+def test_web_preview_confirm_cancel_resume_and_raw_members(setup):
     from knowledge_distiller.v1.web import create_app
     store,c,d,root=setup;b=Boundary(store,root)
     app=create_app(store,b,collection_service=c);app.config['TESTING']=True;client=app.test_client()
@@ -204,7 +203,9 @@ def test_web_preview_confirm_cancel_resume_and_combined_evidence(setup):
     assert client.post(f'{detail}/resume',data={'revision':c.detail(op)['revision']}).status_code==302
     drain(SingleWorker(store,b))
     page=client.get(detail)
-    assert page.status_code==200 and '来源正文101' in page.text and '集合综合' in page.text
+    assert page.status_code==200 and '作品一' in page.text and '作品二' in page.text
+    assert c.detail(op)['state']=='succeeded' and c.detail(op)['result'] is None
+    assert b.knowledge_model.calls==0
     assert client.get('/').status_code==200
     assert client.get('/static/icons/topic-chevron.svg').status_code==200
 
@@ -227,15 +228,15 @@ def test_web_short_single_and_same_topic_authorization(setup):
     assert client.post('/collections/confirm',data=data).status_code==302 and len(c.list())==1
 
 
-def test_cancel_during_combined_generation_preserves_intent_on_model_failure(setup):
+def test_cancel_after_last_raw_commit_preserves_intent_on_boundary_failure(setup):
     store,c,d,root=setup;op,_=accept(c);b=Boundary(store,root);worker=SingleWorker(store,b)
-    worker.run_one();worker.run_one()
-    def fail(basis):
+    worker.run_one()
+    def fail(item):
         info=c.detail(op)
         assert info['state']=='working'
         c.cancel(op,info['revision'])
         raise RuntimeError('model interrupted')
-    b.knowledge_model.derive_collection=fail
+    b.after=fail
     worker.run_one()
     assert c.detail(op)['state']=='cancelled' and c.detail(op)['result'] is None
     assert all(m['state']=='succeeded' for m in c.detail(op)['members'])
@@ -250,7 +251,7 @@ def test_changed_member_cannot_retry_within_frozen_scope(setup):
     assert store.item_bundle(member['item_id'])['state']=='failed'
 
 
-def test_stop_at_last_member_boundary_can_resume_only_combined(setup):
+def test_stop_at_last_member_boundary_resumes_without_recollecting(setup):
     store,c,d,root=setup;op,_=accept(c);b=Boundary(store,root);worker=SingleWorker(store,b)
     worker.run_one()
     b.after=lambda item:c.cancel(op,c.detail(op)['revision'])
@@ -359,6 +360,8 @@ def test_same_topic_finishes_each_source_without_calling_synthesis(setup):
     info=c.detail(operation)
     assert info['state']=='succeeded'
     assert info['result'] is None and boundary.knowledge_model.calls==0
-    assert all(store.item_bundle(m['item_id'])['published_path'] for m in info['members'])
+    with connect(store.path) as db:
+        assert all(RawLedger(store).read_item(db,m['item_id'],boundary.vault) for m in info['members'])
+    assert all(store.item_bundle(m['item_id'])['knowledge_result_id'] is None for m in info['members'])
     with connect(store.path) as db:
         assert db.execute('SELECT COUNT(*) FROM collection_results').fetchone()[0]==0

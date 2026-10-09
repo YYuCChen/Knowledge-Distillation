@@ -14,14 +14,14 @@
 
 {% block topbar %}
   <header class="topbar page-width">
-    {% set active_count = processing|length + collection_processing %}
-    {% set queued_count = waiting|length + collection_waiting %}
-    <span class="topbar-status" role="status" aria-live="polite" {% if organization_status.running %}data-live-status{% endif %}>
+    {% set active_count = processing|length %}
+    {% set queued_count = waiting|length %}
+    <span class="topbar-status" role="status" aria-live="polite" {% if wiki_status.running %}data-live-status{% endif %}>
       <span class="app-state">
-        <span class="activity-dot {{ 'is-active' if organization_status.running or active_count else 'is-error' if organization_status.error and not queued_count else '' }}" aria-hidden="true"></span>
-        {% if organization_status.running and active_count %}正在整理 · 正在蒸馏{% elif organization_status.running %}正在整理{% elif active_count %}正在蒸馏{% elif queued_count %}队列等待{% elif organization_status.error %}状态暂不可用{% else %}正常{% endif %}
+        <span class="activity-dot {{ 'is-active' if wiki_status.running or active_count else 'is-error' if wiki_status.state in ['failed', 'unknown'] and not queued_count else '' }}" aria-hidden="true"></span>
+        {% if wiki_status.running and active_count %}正在整理 · 正在蒸馏{% elif wiki_status.running %}正在整理{% elif active_count %}正在蒸馏{% elif queued_count %}队列等待{% elif wiki_status.queued %}知识整理已排队{% elif wiki_status.state == 'unknown' %}状态暂不可用{% else %}正常{% endif %}
       </span>
-      {% if active_count or queued_count %}<span class="queue-state">{{ active_count }} 批 · {{ queued_count }} 等待</span>{% endif %}
+      {% if active_count or queued_count %}<span class="queue-state">{{ active_count }} 条处理中 · {{ queued_count }} 条等待</span>{% endif %}
     </span>
     <a href="{{ url_for('settings.page') }}">设置{% if update is defined %}<img data-update-attention src="{{ url_for('static', filename='icons/update-attention.svg') }}" alt="有新版更新说明" {% if not update.attention %}hidden{% endif %}>{% endif %}</a>
   </header>
@@ -49,7 +49,6 @@
           <input type="hidden" name="content_kind" value="{{ request.form.get('content_kind', '') if request.form.get('content_kind') in ['links', 'text'] else '' }}">
           <input type="hidden" name="processing_mode" value="">
           {% if form_error %}<p class="form-error" role="alert">{{ form_error }}</p>{% endif %}
-          <p class="organization-feedback" role="alert" data-organization-event="{{ organization_status.latest_event or '' }}" data-organization-failed="{{ 'true' if organization_status.failed else 'false' }}" {% if not organization_status.error %}hidden{% endif %}>{% if organization_status.error %}{{ organization_status.error }}{% elif organization_status.failed %}本次知识整理未完成，已有主题和新知保留，可以重试。{% endif %}</p>
           <span data-source-filename></span>
           <label class="upload" title="选择一个 PDF、EPUB 或 Markdown 文件">
             <img
@@ -83,9 +82,7 @@
       </div>
     </dialog>
 
-    <div id="home-results">
-    {% include "_collection_cards.html" %}
-    {% if selected_collection %}<p class="collection-return">本条属于 {{ selected_collection.title }} · <a href="{{ url_for('collections.detail', operation=selected_collection.operation_id) }}">返回集合</a></p>{% endif %}
+    <div id="home-results" data-preparing-members='{{ preparing_members|default([])|tojson }}'>
     {% if processing %}
       <section class="section" data-sync-key="processing" data-live-status>
         <h2>处理中</h2>
@@ -93,9 +90,9 @@
         <details class="status-panel processing-panel" data-persist-details="processing">
           <summary class="processing-strip">
             <span class="process-counts">
-              <span>本轮 · <b>1</b> 条</span>
-              <span>已完成 · <b>0</b> 条</span>
-              <span>剩余 · <b>1</b> 条</span>
+              <span>本轮 · <b>{{ process_counts.total }}</b> 条</span>
+              <span>已完成 · <b>{{ process_counts.completed }}</b> 条</span>
+              <span>剩余 · <b>{{ process_counts.remaining }}</b> 条</span>
             </span>
             <span class="process-boundary" aria-hidden="true"></span>
             <span class="process-state">
@@ -120,7 +117,7 @@
           </summary>
           <div class="operation-rows">
             <p class="operation-row processing-row">
-              <span>1/1</span>
+              <span>{{ process_counts.position }}/{{ process_counts.total }}</span>
               <span title="{{ active.title }}">{{ active.title }}</span>
               <span>{{ active.source_type }}</span>
             </p>
@@ -129,22 +126,23 @@
       </section>
     {% endif %}
 
-    {% if waiting %}
+    {% if waiting or stopped %}
+      {% set waiting_rows = waiting if waiting else stopped %}
       <section class="section" data-sync-key="waiting" data-live-status>
-        <h2>等待中</h2>
+        <h2>{{ '等待中' if waiting else '已停止' }}</h2>
         <details class="status-panel compact-panel" data-persist-details="waiting">
           <summary class="compact-summary">
             <span class="summary-signal">
               <img src="{{ url_for('static', filename='icons/state-yellow.svg') }}" alt="">
             </span>
-            <span class="summary-text">{{ waiting|length }} 批；{{ waiting|length }} 条等待中</span>
+            <span class="summary-text">{{ waiting_rows|length }} 条{{ '等待中' if waiting else '未继续处理' }}</span>
             <span class="panel-chevron">
               <img class="closed-chevron" src="{{ url_for('static', filename='icons/chevron-up.svg') }}" alt="">
               <img class="open-chevron" src="{{ url_for('static', filename='icons/chevron-down.svg') }}" alt="">
             </span>
           </summary>
           <div class="operation-rows">
-            {% for item in waiting %}
+            {% for item in waiting_rows %}
               <p class="operation-row waiting-row">
                 <span>1 条</span>
                 <span title="{{ item.title }}">{{ item.title }}</span>
@@ -157,7 +155,7 @@
       </section>
     {% endif %}
 
-    {% if todo or pending_captures %}
+    {% if todo or pending_captures or preparing_members %}
       <section class="section" data-sync-key="todo" data-live-status>
         <h2>待处理</h2>
         {% set failed_count = todo | selectattr('state', 'equalto', 'failed') | list | length %}
@@ -224,6 +222,7 @@
                 {% set cards.index = cards.index + 1 %}
                 {% set key = item.id|string ~ '-' ~ (concern.concern_uid|default(concern.audio_name)) %}
                 {% set error = confirmation_error if confirmation_error and confirmation_error.id == item.id and confirmation_error.concern_id == concern.audio_name else none %}
+                {% set empty_error = error and error.message == '请输入正确文字' and not error.value|trim %}
                 {% if item.confirmation.kind|default('') == 'image' %}
                   {% include 'image_confirmation.html' %}
                 {% else %}
@@ -233,7 +232,7 @@
                     <div class="todo-content">
                       <div class="confirmation-head">
                         {% if item.confirmation.english_assistance %}
-                        <p class="source-fragment" data-context-before="{{ item.confirmation.snapshot[:concern.start] }}" data-context-after="{{ item.confirmation.snapshot[concern.end:] }}"><span data-context-leading></span><mark>{{ concern.text }}</mark><span data-context-trailing></span></p>
+                        <p class="source-fragment">{{ concern.display.sentence if concern.display else '' }}</p>
                         {% else %}
                         {% set display = concern.display %}
                         <p class="source-fragment">{% if display.start > 12 %}…{% endif %}{{ item.confirmation.snapshot[[0, display.start-12]|max:display.start] }}<mark>{{ display.text }}</mark>{{ item.confirmation.snapshot[display.end:display.end+12] }}{% if display.end+12 < item.confirmation.snapshot|length %}…{% endif %}</p>
@@ -255,43 +254,38 @@
                         {% else %}<span class="manual-hint">请回听填写</span>{% endif %}
                       </div>
                       <div id="actions-{{ key }}" class="confirmation-actions" {% if not error %}hidden{% endif %}>
-                        {% set explanations = concern.candidate_explanations|default({}) %}
-                        {% if item.confirmation.english_assistance and concern.candidates %}
+                        {% if item.confirmation.english_assistance and concern.display %}
                         <div class="candidate-actions" aria-label="疑点 {{ loop.index }} 候选选项">
-                          {% for choice in concern.candidates %}
-                          <form id="candidate-{{ key }}-{{ loop.index }}" class="candidate-row" action="{{ url_for('confirm', item_id=item.id) }}" method="post">
+                          {% for choice in concern.display.candidates %}
+                          <form id="candidate-{{ key }}-{{ choice.key }}" class="candidate-row" action="{{ url_for('confirm', item_id=item.id) }}" method="post">
                             <input type="hidden" name="token" value="{{ item.confirmation.token }}">
                             <input type="hidden" name="concern_id" value="{{ concern.audio_name }}">
                             <input type="hidden" name="concern_revision" value="{{ concern.revision }}">
                             <input type="hidden" name="action" value="candidate">
-                            <button class="outline-choice candidate-option" name="value" value="{{ choice }}"><span class="candidate-text">{{ choice }}</span></button>
-                            {% if explanations.get(choice) %}<p class="candidate-explanation">{{ explanations.get(choice) }}</p>{% endif %}
+                            <div class="candidate-description">
+                              <p class="candidate-text">{{ choice.text }}</p>
+                              <p class="candidate-explanation">{{ choice.meaning }}</p>
+                              <details id="basis-{{ key }}-{{ choice.key }}" class="candidate-basis" data-persist-details="basis-{{ key }}-{{ choice.key }}">
+                                <summary>判断依据</summary>
+                                <p>{{ choice.basis }}</p>
+                              </details>
+                            </div>
+                            <button class="outline-choice candidate-option" name="value" value="{{ choice.value }}">{{ '保留原文' if choice.value == concern.text else '采用' }}</button>
                           </form>
                           {% endfor %}
                         </div>
+                        <p class="concern-reason">{{ concern.reason }}</p>
                         {% endif %}
-                        {% if item.confirmation.english_assistance and (not concern.candidates or explanations|length < concern.candidates|length) %}
-                        <form class="suggest-candidates" action="/items/{{ item.id }}/suggestions" method="post" data-suggest-candidates>
-                          <input type="hidden" name="token" value="{{ item.confirmation.token }}">
-                          <input type="hidden" name="concern_id" value="{{ concern.audio_name }}">
-                            <input type="hidden" name="concern_revision" value="{{ concern.revision }}">
-                          <button type="submit" class="secondary-small" data-suggest-candidates>结合上下文补充候选</button>
-                        </form>
+                        {% if item.confirmation.english_assistance %}
+                        <div id="operations-{{ key }}" class="confirmation-operations">
                         {% endif %}
                         <audio data-audio-identity="{{ key }}" data-audio-revision="{{ concern.audio_revision|default(concern.audio_name) }}" controls preload="metadata" aria-label="疑点 {{ loop.index }} 原音" src="{{ url_for('confirmation_audio', item_id=item.id, concern_id=concern.audio_name) }}"></audio>
-                        {% if concern.audio_recovery_required|default(false) %}
-                        <form action="{{ url_for('recover_confirmation_audio', item_id=item.id) }}" method="post" data-recover-audio>
-                          <input type="hidden" name="token" value="{{ item.confirmation.token }}">
-                          <input type="hidden" name="concern_id" value="{{ concern.audio_name }}">
-                          <button type="submit" class="secondary-small">重试局部原音恢复</button>
-                        </form>
-                        {% endif %}
                         <span class="source-actions">
                           <form action="{{ url_for('rerecognize', item_id=item.id) }}" method="post" data-rerecognize>
                             <input type="hidden" name="token" value="{{ item.confirmation.token }}">
                             <button class="text-action" type="submit">重新识别</button>
                           </form>
-                          <a href="{{ item.canonical_url }}" target="_blank" rel="noreferrer"><img class="source-action-icon" src="{{ url_for('static', filename='icons/external-link.svg') }}" alt="">查看来源</a>
+                          <a href="{{ item.canonical_url }}" target="_blank" rel="noreferrer">查看来源</a>
                         </span>
                         <div class="manual-entry">
                           <form id="manual-{{ key }}" class="manual-confirmation" action="{{ url_for('confirm', item_id=item.id) }}" method="post">
@@ -300,7 +294,7 @@
                             <input type="hidden" name="concern_revision" value="{{ concern.revision }}">
                           <input type="hidden" name="action" value="manual">
                           {% if not item.confirmation.english_assistance %}<input type="hidden" name="local_edit" value="1"><input type="hidden" name="local_prefix" value="{{ concern.display.prefix }}"><input type="hidden" name="local_suffix" value="{{ concern.display.suffix }}">{% endif %}
-                          <input name="value" value="{{ error.value if error else '' }}" placeholder="{{ error.message if error else ('自定义（可选）' if item.confirmation.english_assistance else '自定义输入…') }}" aria-label="疑点 {{ loop.index }} 正确文字" aria-invalid="{{ 'true' if error else 'false' }}">
+                          <input name="value" value="{{ error.value if error else '' }}" placeholder="{{ '请输入确认文字' if empty_error else (error.message if error else ('自定义（可选）' if item.confirmation.english_assistance else '自定义输入…')) }}" data-default-placeholder="{{ '自定义（可选）' if item.confirmation.english_assistance else '自定义输入…' }}" data-empty-error="empty-error-{{ key }}" aria-label="疑点 {{ loop.index }} 正确文字" aria-invalid="{{ 'true' if error else 'false' }}"{% if empty_error %} data-empty-confirmation aria-describedby="empty-error-{{ key }}"{% endif %}>
                         </form>
                         </div>
                         <span class="confirmation-buttons">
@@ -312,6 +306,8 @@
                           </form>
                           <button class="primary-small" type="submit" form="manual-{{ key }}">提交</button>
                         </span>
+                        {% if item.confirmation.english_assistance %}</div>{% endif %}
+                        <p id="empty-error-{{ key }}" class="confirmation-empty-error" role="alert"{% if not empty_error %} hidden{% endif %}>请输入确认文字后再提交；也可以选择候选或回听原音。</p>
                       </div>
                     </div>
                     <button type="button" class="card-chevron" data-card-toggle aria-label="展开或收起疑点 {{ loop.index }}" aria-controls="actions-{{ key }}" aria-expanded="{{ 'true' if error else 'false' }}"><img src="{{ url_for('static', filename='icons/chevron-up.svg') }}" alt=""></button>
@@ -368,7 +364,7 @@
               <span class="knowledge-heading">
                 <span class="knowledge-title-group">
                   <strong>{{ item.title }}</strong>
-                  <small class="knowledge-subtitle">{{ item.subtitle }}</small>
+                  <small class="knowledge-subtitle">{{ '原始资料已保存，等待整理' if item.raw_saved|default(false) else item.subtitle }}</small>
                   {% if item.review_notice %}<small class="knowledge-subtitle">{{ item.review_notice }}</small>{% endif %}
                 </span>
                 <small class="knowledge-meta">
@@ -391,7 +387,7 @@
             </summary>
             <div class="knowledge-body">
               {% if item.source_scope %}<p class="knowledge-meta">来源范围：{{ item.source_scope }}</p>{% endif %}
-              <p class="knowledge-abstract">{{ item.summary }}</p>
+              <p class="knowledge-abstract">{{ '原始资料已保存，等待整理；尚未生成知识内容。' if item.raw_saved|default(false) else item.summary }}</p>
               {% if item.core_points %}
               <div class="knowledge-points core-points">
                 {% for point in item.core_points %}
@@ -419,6 +415,7 @@
                 </div>
               {% endif %}
               <footer class="knowledge-actions">
+                {% if item.hide_operation is defined %}<form action="{{ url_for('collection_visibility',operation=item.hide_operation,action='hide') }}" method="post"><button class="source-link" title="隐藏这项同题任务的{{ item.hide_total }}份投递；不删除原始资料，也不改变停止状态">隐藏此任务</button></form>{% endif %}
                 {% if not item.local_source %}
                 <a
                   class="source-link"
@@ -456,10 +453,23 @@
         {% endfor %}
       </section>
     {% endif %}
-      {% if organization_status.pending and not organization_status.error %}
-      <section class="section organization-section" {% if organization_status.running %}data-live-status{% endif %}>
-        <span class="organization-description"><span class="organization-icon"><img src="{{ url_for('static', filename='icons/organize.svg') }}" alt=""></span>新增 {{ organization_status.pending }} 条知识待整理</span>
-        <form method="post" action="{{ url_for('organize') }}"><button type="submit" class="primary-button" {% if organization_status.running %}disabled{% endif %}>{{ '正在整理' if organization_status.running else '开始整理' }}</button></form>
+      {% include '_hidden_tasks.html' %}
+      {% if wiki_status.visible %}
+      <section class="section organization-section" data-sync-key="organization" {% if wiki_status.running %}data-live-status{% endif %} {% if wiki_status.tone %}data-tone="{{ wiki_status.tone }}"{% endif %}>
+        <span class="organization-description">
+          <span class="organization-icon"><img src="{{ url_for('static', filename='icons/organize.svg') }}" alt=""></span>
+          <span class="organization-copy"><strong>{{ wiki_status.title }}</strong><small>{{ wiki_status.detail }}</small></span>
+        </span>
+        <span class="organization-actions">
+          {% if wiki_status.action == 'submit' %}<form id="wiki-submit" method="post" action="{{ url_for('organize') }}"><button type="submit" class="primary-button">开始整理</button></form>
+          {% elif wiki_status.action == 'retry' %}<form id="wiki-retry" method="post" action="{{ url_for('retry_organization', task_id=wiki_status.task_id) }}"><button type="submit" class="secondary-button">继续整理</button></form>
+          {% elif wiki_status.action == 'settings' %}<a class="outline-button" href="{{ url_for('settings.page', return_to='/') }}">打开设置</a>
+          {% elif wiki_status.state == 'succeeded' %}
+            {% if wiki_status.show_pending %}{% if wiki_status.pending_url %}<a href="{{ wiki_status.pending_url }}">查看待确认</a>{% else %}<span class="is-disabled" aria-disabled="true" title="请先在 Obsidian 中打开当前知识库">查看待确认</span>{% endif %}{% endif %}
+            {% if wiki_status.show_index %}{% if wiki_status.index_url %}<a href="{{ wiki_status.index_url }}">打开知识库</a>{% else %}<span class="is-disabled" aria-disabled="true" title="请先在 Obsidian 中打开当前知识库">打开知识库</span>{% endif %}{% endif %}
+          {% elif wiki_status.button_label %}<button type="button" class="secondary-button" disabled>{{ wiki_status.button_label }}</button>
+          {% endif %}
+        </span>
       </section>
       {% endif %}
     </div>

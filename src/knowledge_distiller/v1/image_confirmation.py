@@ -4,7 +4,8 @@ from io import BytesIO
 import math
 
 from .domain import SourceFact
-from .ocr import decode_image
+from .ocr import decode_image, OcrError
+from .ocr_review_policy import relocate_ocr, _primary_sha
 
 
 def pending_review(fact, lineage):
@@ -35,37 +36,40 @@ def resolve_review(store, row, pending, action, value, concern_id, *, decision=N
     else:
         raise ValueError('请对照原图确认当前文字，或填写正确文字。')
     start, end = concern['start'], concern['end']
-    if pending['snapshot'][start:end] != concern['text']:
+    try:
+        _primary_sha(pending['snapshot'], pending['lineage'])
+    except OcrError as error:
+        raise ValueError('来源确认已更新，请刷新后再操作。') from error
+    if (type(start) is not int or type(end) is not int or not 0 <= start < end <= len(pending['snapshot'])
+            or pending['snapshot'][start:end] != concern['text']):
         raise ValueError('来源确认已更新，请刷新后再操作。')
     updated = deepcopy(pending)
-    updated['snapshot'] = pending['snapshot'][:start] + replacement + pending['snapshot'][end:]
     if row['source_fact_id'] is not None:
-        if updated['snapshot'] != row['snapshot']:
+        if pending['snapshot'][:start] + replacement + pending['snapshot'][end:] != row['snapshot']:
             raise ValueError('来源已由另一次确认成立，不能覆盖原事实。')
         return store.resolve_confirmation(row['item_id'], row['confirmation_json'])
-    delta = len(replacement) - (end-start)
-    def shift(entry):
-        if entry.get('start', -1) >= end:
-            entry['start'] += delta
-            entry['end'] += delta
-    updated['concerns'].pop(index)
-    for c in updated['concerns']:
-        shift(c)
-    updated['uncertainties'] = [u for u in updated['uncertainties']
-                               if not (u.get('by') == 'ocr' and u.get('start') == start and u.get('end') == end)]
-    for u in updated['uncertainties']:
-        shift(u)
-    for image in updated['lineage']['image_ocr']:
-        if image.get('source_start', -1) >= end:
-            image['source_start'] += delta
-            image['source_end'] += delta
-        for line in image['lines']:
-            if line['start'] == start and line['end'] == end:
-                line.update(original_text=line['text'], text=replacement, end=start+len(replacement), confirmed_by='human')
-            else:
-                shift(line)
+    edits = [] if replacement == concern['text'] else [{
+        'start': start, 'end': end, 'text': concern['text'], 'replacement': replacement,
+        'member_id': concern['member_id'], 'by': 'human', 'action': action,
+        'concern_uid': concern.get('concern_uid'), 'source_version_id': concern.get('source_version_id'),
+        'original_span': concern.get('original_span', [start, end])}]
+    remaining = [u for u in pending['uncertainties'] if not (
+        u.get('by') == 'ocr' and u.get('member_id') == concern['member_id']
+        and u.get('start') == start and u.get('end') == end)]
+    try:
+        updated['snapshot'], updated['lineage'], updated['uncertainties'], updated['concerns'], updated['resolved'] = relocate_ocr(
+            pending['snapshot'], pending['lineage'], remaining, edits,
+            concerns=pending['concerns'][:index] + pending['concerns'][index+1:], resolved=pending['resolved'])
+    except OcrError as error:
+        raise ValueError('来源确认已更新，请刷新后再操作。') from error
+    final_start = start
+    final_end = start + len(replacement)
     updated['resolved'].append({'by': 'human', 'member_id': concern['member_id'],
-                                'text': concern['text'], 'replacement': replacement})
+        'text': concern['text'], 'replacement': replacement, 'action': action,
+        'start': final_start, 'end': final_end, 'confirmed_span': [start, end],
+        'original_span': deepcopy(concern.get('original_span', [start, end])),
+        **{key: deepcopy(concern[key]) for key in ('concern_uid', 'source_version_id',
+            'review_round_id', 'original_review_hash', 'reason', 'evidence') if key in concern}})
     if updated['concerns']:
         return store.resolve_confirmation(row['item_id'], row['confirmation_json'], decision=decision, next_confirmation=updated)
     return store.resolve_confirmation(row['item_id'], row['confirmation_json'], decision=decision,

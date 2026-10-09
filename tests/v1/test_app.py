@@ -1,4 +1,5 @@
 import time
+import stat
 from pathlib import Path
 
 from knowledge_distiller.v1.app import AppPaths, create_application
@@ -15,6 +16,62 @@ class Chrome:
     def cookies(self):
         self.calls += 1
         raise AssertionError("unconfigured source must not read browser cookies")
+
+
+def test_application_prepares_private_wiki_runtime_before_worker_start(tmp_path):
+    paths = AppPaths(tmp_path / "app-data")
+    assert not paths.runtime.exists()
+    app = create_application(paths, chrome=Chrome(), start_workers=False)
+    try:
+        assert paths.runtime.is_dir()
+        assert stat.S_IMODE(paths.runtime.stat().st_mode) == 0o700
+        assert app.config["KNOWLEDGE_DISTILLER_WIKI_WORKER"].runtime_root == paths.runtime
+    finally:
+        assert app.config["KNOWLEDGE_DISTILLER_WORKERS"].stop()
+        app.config["KNOWLEDGE_DISTILLER_CLOSE_BROWSERS"]()
+
+
+def test_fresh_application_runs_synthetic_wiki_task_without_precreated_runtime(tmp_path):
+    from .test_wiki_worker import FakeRunner, _install, _raw
+
+    paths = AppPaths(tmp_path / "fresh-data")
+    vault = tmp_path / "synthetic-vault"
+    vault.mkdir()
+    _install(vault)
+    raw = _raw(vault, 1)
+    before = raw.read_bytes()
+    assert not paths.runtime.exists()
+
+    app = create_application(paths, chrome=Chrome(), start_workers=False)
+    wiki_worker = app.config["KNOWLEDGE_DISTILLER_WIKI_WORKER"]
+    production_runner = wiki_worker.runner
+    try:
+        app.config["KNOWLEDGE_DISTILLER_STORE"].set_settings({
+            "vault_path": str(vault),
+            "llm_provider": "codex",
+            "llm_model": "gpt-test",
+            "llm_effort": "high",
+            "llm_state": "configured",
+        })
+        wiki_worker.runner = FakeRunner()
+        submitted = app.extensions["wiki_workflow"].submit_all()
+        result = wiki_worker.run_one()
+        finished = wiki_worker.store.get(submitted["task_id"])
+        wiki_worker.request_observation(vault, force=True)
+        assert wiki_worker._refresh_observation() is True
+        completed = app.extensions["wiki_workflow"].snapshot()
+
+        assert submitted["state"] == "queued"
+        assert result is not None and result.error_code is None
+        assert finished.state == "succeeded"
+        assert completed["state"] == "succeeded"
+        assert completed["completed_batch_count"] == completed["batch_count"] == 1
+        assert paths.runtime.is_dir()
+        assert raw.read_bytes() == before
+    finally:
+        wiki_worker.runner = production_runner
+        assert app.config["KNOWLEDGE_DISTILLER_WORKERS"].stop()
+        app.config["KNOWLEDGE_DISTILLER_CLOSE_BROWSERS"]()
 
 
 def test_application_boots_clean_v1_home_and_settings(tmp_path: Path) -> None:
@@ -34,7 +91,7 @@ def test_application_boots_clean_v1_home_and_settings(tmp_path: Path) -> None:
         assert (tmp_path / "app-data" / "knowledge.sqlite3").is_file()
         assert chrome.calls == 0
     finally:
-        app.config["KNOWLEDGE_DISTILLER_WORKER"].stop()
+        assert app.config["KNOWLEDGE_DISTILLER_WORKERS"].stop()
 
 
 def test_unconfigured_submission_fails_at_exact_first_missing_boundary(
@@ -65,7 +122,7 @@ def test_unconfigured_submission_fails_at_exact_first_missing_boundary(
         assert row["material_id"] is None
         assert chrome.calls == 0
     finally:
-        app.config["KNOWLEDGE_DISTILLER_WORKER"].stop()
+        assert app.config["KNOWLEDGE_DISTILLER_WORKERS"].stop()
 
 
 def test_pending_update_blocks_writes_until_acceptance(tmp_path):

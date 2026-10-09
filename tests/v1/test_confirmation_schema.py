@@ -1,10 +1,17 @@
 """V1.3 K01: identity and queue invariants from frozen specification §§6–7."""
 import json
+import sqlite3
 
 import pytest
 
 from knowledge_distiller.v1.database import connect, initialize
 from knowledge_distiller.v1.store import Store
+
+
+def _drop_schema_22_wiki_tables(connection: sqlite3.Connection) -> None:
+    """Remove V3 tables when a latest-schema fixture is rewound to schema 18."""
+    for table in ("wiki_observations", "wiki_task_raw", "wiki_task_batches", "wiki_tasks"):
+        connection.execute(f"DROP TABLE {table}")
 
 
 def pending(text='甲词乙词', names=('one.wav', 'two.wav')):
@@ -93,6 +100,7 @@ def test_legacy_migration_keeps_original_json_and_persistent_mapping(store):
         db.execute('DROP TABLE manual_cards')
         db.execute("DROP TABLE IF EXISTS group_decisions")
         db.execute("DROP TABLE IF EXISTS manual_cards")
+        _drop_schema_22_wiki_tables(db)
         db.execute('PRAGMA user_version=18')
         for item, created in [(a, ''), (b, '2025-01-01T00:00:00+00:00')]:
             db.execute("UPDATE distill_items SET state='waiting_user',confirmation_json=?,created_at=? WHERE item_id=?", (raw, created, item))
@@ -132,6 +140,7 @@ def test_migration_failure_rolls_back_tables_version_and_pending(store, monkeypa
     with connect(store.path) as db:
         db.execute('DROP TABLE group_decisions')
         db.execute('DROP TABLE manual_cards')
+        _drop_schema_22_wiki_tables(db)
         db.execute('PRAGMA user_version=18')
         db.execute("UPDATE distill_items SET state='waiting_user',confirmation_json=? WHERE item_id=?", (raw,item))
     original = confirmation_schema.sync

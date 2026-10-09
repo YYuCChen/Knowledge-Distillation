@@ -1,25 +1,122 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
+import math
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Mapping
 from uuid import uuid4
 
-from .database import connect, initialize
+from .database import connect, initialize, INGESTION_CONTRACT
 from .confirmation_schema import sync as _sync_manual_cards
 from .domain import CapturedMaterial, Knowledge, SourceFact, knowledge_to_dict
 from .source_files import FILE_KINDS, copy_path, read_copy, retain_copy, open_copy, SourceCopyError
+from .source_files import read_bound_copy, retain_bound_copy
 
 
 class SourceReviewConflict(ValueError):
     """A newer source/user state superseded this asynchronous judgment."""
 
 
+def _ingestion_binding(contract, source_sha256, relation_sha256):
+    if contract == 'legacy' and source_sha256 is None and relation_sha256 is None:
+        return contract, None, None
+    if (contract != INGESTION_CONTRACT or any(
+            not isinstance(value, str) or re.fullmatch('[0-9a-f]{64}', value) is None
+            for value in (source_sha256, relation_sha256))):
+        raise ValueError('ingestion_binding_invalid')
+    return contract, source_sha256, relation_sha256
+
+
+def _same_ingestion_binding(db, item_id, binding):
+    row = db.execute('''SELECT ingestion_contract,source_binding_sha256,relation_binding_sha256
+        FROM distill_items WHERE item_id=?''', (item_id,)).fetchone()
+    if row is None or tuple(row) != binding:
+        raise ValueError('ingestion_binding_conflict')
+
+
+def _bound_json(value):
+    """Freeze finite JSON without silently coercing keys or invalid Unicode."""
+    def check(entry):
+        if entry is None or type(entry) in (bool, int):
+            return
+        if type(entry) is str:
+            if '\x00' in entry:
+                raise ValueError('local_source_result_invalid')
+            entry.encode('utf-8', errors='strict')
+        elif type(entry) is float:
+            if not math.isfinite(entry):
+                raise ValueError('local_source_result_invalid')
+        elif type(entry) in (list, tuple):
+            for child in entry:
+                check(child)
+        elif type(entry) is dict:
+            for key, child in entry.items():
+                if type(key) is not str:
+                    raise ValueError('local_source_result_invalid')
+                check(key)
+                check(child)
+        else:
+            raise ValueError('local_source_result_invalid')
+    check(value)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+
+
+def _bound_local_parsed(source, binding, parsed, review_result):
+    from .source_parsing import ParsedSource, ParsedMedia
+    from .file_sources import parse_submitted_source
+    if type(parsed) is not ParsedSource or type(parsed.snapshot) is not str or not parsed.snapshot.strip():
+        raise ValueError('local_source_result_invalid')
+    if type(parsed.media) is not tuple or type(parsed.uncertainties) is not tuple:
+        raise ValueError('local_source_result_invalid')
+    members = []
+    media = []
+    identifiers = set()
+    for member in parsed.media:
+        if (type(member) is not ParsedMedia or type(member.member_id) is not str or not member.member_id
+                or member.member_id in identifiers or type(member.mime_type) is not str or not member.mime_type
+                or type(member.content) is not bytes or not member.content):
+            raise ValueError('local_source_result_invalid')
+        identifiers.add(member.member_id)
+        members.append({'member_id': member.member_id, 'mime_type': member.mime_type,
+                        'byte_count': len(member.content), 'sha256': hashlib.sha256(member.content).hexdigest()})
+        media.append(ParsedMedia(member.member_id, member.mime_type, member.content))
+    payload = json.loads(_bound_json({'snapshot': parsed.snapshot, 'metadata': parsed.metadata,
+        'lineage': parsed.lineage, 'uncertainties': parsed.uncertainties, 'media': members}))
+    if type(payload['metadata']) is not dict or type(payload['lineage']) is not dict:
+        raise ValueError('local_source_result_invalid')
+    review = json.loads(_bound_json(review_result))
+    if (type(review) is not dict or type(review.get('schema')) is not int or review['schema'] != 1
+            or set(review) != {'schema', 'snapshot', 'uncertainties', 'lineage'}
+            or any(_bound_json(review[key]) != _bound_json(payload[key])
+                   for key in ('snapshot', 'uncertainties', 'lineage'))):
+        raise ValueError('completed_review_required')
+    # No existing document producer records its actual conversion recipe.
+    # Do not manufacture one from defaults or accept a caller's invented trace.
+    if source.source_kind in {'pdf', 'epub'}:
+        raise ValueError('local_parse_trace_required')
+    if source.source_kind not in {'direct_text', 'markdown'}:
+        raise ValueError('local_source_result_invalid')
+    actual = parse_submitted_source(source)
+    actual_payload = {'snapshot': actual.snapshot, 'metadata': actual.metadata,
+                      'lineage': actual.lineage, 'uncertainties': actual.uncertainties, 'media': []}
+    if actual.media or _bound_json(payload) != _bound_json(actual_payload):
+        raise ValueError('local_source_parse_mismatch')
+    frozen = ParsedSource(payload['snapshot'], payload['metadata'], payload['lineage'],
+                          tuple(media), tuple(payload['uncertainties']))
+    recipe = {'reader': 'file_sources.parse_submitted_source', 'mode': source.source_kind,
+              'verification': 'store-local-pure-parse-v1',
+              'lineage_kind': actual.lineage['kind'], 'lineage_version': actual.lineage['version']}
+    return frozen, payload, recipe, review
+
+
 class Store:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, runtime_root: Path | None = None):
         self.path = path
+        self.preparation_runtime_root = Path(runtime_root) if runtime_root is not None else Path(path).parent / 'runtime'
 
     def initialize(self) -> None:
         initialize(self.path)
@@ -35,6 +132,8 @@ class Store:
                 WHERE m.source_kind IN ('douyin','youtube','xiaohongshu','x','zhihu','weibo','bilibili')
                 AND julianday(COALESCE(json_extract(m.metadata_json,'$.captured_at'),m.created_at)) < julianday(?)
                 AND NOT EXISTS (SELECT 1 FROM source_facts sf WHERE sf.material_id=m.material_id)
+                AND NOT EXISTS (SELECT 1 FROM distill_items owner WHERE owner.material_id=m.material_id
+                                AND owner.ingestion_contract!='legacy')
                 AND NOT EXISTS (SELECT 1 FROM distill_items i WHERE i.material_id=m.material_id
                                 AND (i.confirmation_json IS NOT NULL OR i.state='working'
                                      OR (i.dismissed_at IS NULL AND substr(COALESCE(i.error_code,''),-length('_input_unsupported')) != '_input_unsupported')))""",(cutoff,)).fetchall()
@@ -45,9 +144,12 @@ class Store:
     def _retain_available_files(self) -> None:
         # Upgrade only still-owned bytes, never reconstruct a file from SourceFact.
         with connect(self.path) as connection:
-            rows = connection.execute("SELECT * FROM submitted_sources WHERE input_kind IN ('markdown','pdf','epub') AND content IS NOT NULL").fetchall()
+            rows = connection.execute("""SELECT ss.*,i.ingestion_contract FROM submitted_sources ss
+                JOIN distill_items i USING(item_id)
+                WHERE input_kind IN ('markdown','pdf','epub') AND content IS NOT NULL
+                  AND i.ingestion_contract='legacy' AND ss.binding_scope='legacy'""").fetchall()
         for row in rows:
-            if row['retain_until'] is not None and row['retain_until'] <= _now():
+            if row['ingestion_contract'] == 'legacy' and row['retain_until'] is not None and row['retain_until'] <= _now():
                 continue
             target = copy_path(self.path.parent, row['input_kind'], row['input_key'], row['input_label'])
             if not target.exists():
@@ -60,19 +162,24 @@ class Store:
             raise SourceCopyError('这条来源没有上传文件副本。')
         open_copy(self.path.parent, row['input_kind'], row['input_key'], row['input_label'])
 
-    def submit_source(self, source, *, receipt_key=None) -> int:
+    def submit_source(self, source, *, receipt_key=None, ingestion_contract='legacy',
+                      source_binding_sha256=None, relation_binding_sha256=None) -> int:
         """Persist exact intake and FIFO item together; replay never refreshes it."""
         now = _now()
+        binding = _ingestion_binding(ingestion_contract, source_binding_sha256, relation_binding_sha256)
         with connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             from .feishu_inbox import prior_item, bind_item
             prior = prior_item(connection, receipt_key)
             if prior is not None:
+                _same_ingestion_binding(connection, prior, binding)
                 return prior
             existing = connection.execute(
-                "SELECT item_id, input_label FROM submitted_sources WHERE input_kind = ? AND input_key = ?",
+                "SELECT item_id, input_label FROM submitted_sources WHERE input_kind = ? AND input_key = ? AND binding_scope='legacy'",
                 (source.source_kind, source.source_key),
             ).fetchone()
+            if existing is not None:
+                _same_ingestion_binding(connection, existing['item_id'], binding)
             if source.source_kind in FILE_KINDS:
                 label = existing['input_label'] if existing is not None else source.label
                 retain_copy(self.path.parent, source.source_kind, source.source_key, label, source.content)
@@ -81,9 +188,10 @@ class Store:
                 return int(existing["item_id"])
             cursor = connection.execute(
                 """INSERT INTO distill_items
-                   (submitted_url, state, phase, queued_at, created_at, updated_at)
-                   VALUES (?, 'queued', 'collecting', ?, ?, ?)""",
-                (source.label, now, now, now),
+                   (submitted_url, state, phase, queued_at, created_at, updated_at,
+                    ingestion_contract,source_binding_sha256,relation_binding_sha256)
+                   VALUES (?, 'queued', 'collecting', ?, ?, ?, ?, ?, ?)""",
+                (source.label, now, now, now, *binding),
             )
             item_id = int(cursor.lastrowid)
             connection.execute(
@@ -94,6 +202,138 @@ class Store:
                  _json(source.metadata), source.content),
             )
             bind_item(connection, receipt_key, item_id)
+            return item_id
+
+    @staticmethod
+    def _local_scope(binding):
+        from .intake_binding import ENVELOPE_CONTRACT
+        value = _json([binding.source_binding_sha256, binding.relation_binding_sha256])
+        return ENVELOPE_CONTRACT + ':' + hashlib.sha256(value.encode('utf-8')).hexdigest()
+
+    def _local_source(self, db, item_id, *, envelope_json):
+        from .file_sources import SubmittedSource
+        from .intake_binding import IntakeBindingError, validate_local_binding
+        row = db.execute('SELECT * FROM submitted_sources WHERE item_id=?', (item_id,)).fetchone()
+        owner = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+        if (row is None or owner is None or row['binding_scope'] == 'legacy'
+                or owner['ingestion_contract'] != INGESTION_CONTRACT
+                or row['input_kind'] not in {'markdown', 'pdf', 'epub', 'direct_text'}
+                or type(row['content']) is not bytes):
+            raise IntakeBindingError('intake_binding_mismatch')
+        try:
+            metadata = json.loads(row['input_metadata'])
+            if _json(metadata) != row['input_metadata']:
+                raise ValueError('noncanonical metadata')
+        except (ValueError, TypeError, UnicodeError):
+            raise IntakeBindingError() from None
+        content = row['content']
+        stored = SubmittedSource(row['input_kind'], row['input_key'], row['input_label'], content, metadata)
+        binding = validate_local_binding(stored, envelope_json)
+        expected_bytes = json.loads(binding.source_json)['input']['content_byte_count']
+        if row['input_kind'] in FILE_KINDS:
+            content = read_bound_copy(self.path.parent, row['input_kind'], row['input_key'], row['input_label'],
+                                      expected_bytes=expected_bytes)
+            if content != row['content']:
+                raise IntakeBindingError('intake_binding_mismatch')
+        return SubmittedSource(row['input_kind'], row['input_key'], row['input_label'], content, metadata), row, owner
+
+    def _local_intake_binding(self, db, item_id):
+        """Same-connection helper: no legacy envelope reconstruction or raw proof."""
+        from .intake_binding import validate_local_binding, IntakeBindingError
+        events = db.execute("""SELECT * FROM ingestion_events WHERE item_id=?
+            AND kind='raw_pending' AND json_extract(detail_json,'$.code')='intake_frozen'""", (item_id,)).fetchall()
+        if len(events) != 1:
+            raise IntakeBindingError('intake_binding_mismatch')
+        event = events[0]
+        try:
+            detail = json.loads(event['detail_json'])
+            envelope = detail['manifest']['intake_envelope_json']
+        except (ValueError, TypeError, KeyError):
+            raise IntakeBindingError() from None
+        source, row, owner = self._local_source(db, item_id, envelope_json=envelope)
+        binding = validate_local_binding(source, envelope)
+        if (envelope != binding.envelope_json or row['binding_scope'] != self._local_scope(binding)
+                or owner['submitted_url'] != source.label
+                or owner['source_binding_sha256'] != binding.source_binding_sha256
+                or owner['relation_binding_sha256'] != binding.relation_binding_sha256):
+            raise IntakeBindingError('intake_binding_mismatch')
+        expected = self._local_event(item_id, binding)
+        actual = tuple(event[k] for k in ('event_key','contract','subject_kind','subject_id',
+                                         'item_id','binding_sha256','detail_json'))
+        if actual != expected:
+            raise IntakeBindingError('intake_binding_mismatch')
+        return source, binding
+
+    @staticmethod
+    def _local_event(item_id, binding):
+        detail = _json({'code': 'intake_frozen', 'manifest': {'intake_envelope_json': binding.envelope_json},
+                       'source_binding_sha256': binding.source_binding_sha256,
+                       'relation_binding_sha256': binding.relation_binding_sha256})
+        digest = hashlib.sha256(detail.encode('utf-8')).hexdigest()
+        key = hashlib.sha256(_json([INGESTION_CONTRACT, item_id, 'raw_pending', digest]).encode('utf-8')).hexdigest()
+        return key, INGESTION_CONTRACT, 'item', item_id, item_id, digest, detail
+
+    def local_intake_binding(self, item_id):
+        """Return (real SubmittedSource, validated LocalIntakeBinding), read-only."""
+        if type(item_id) is not int or item_id <= 0:
+            from .intake_binding import IntakeBindingError
+            raise IntakeBindingError()
+        with connect(self.path) as db:
+            db.execute('BEGIN')
+            return self._local_intake_binding(db, item_id)
+
+    def submit_local_bound_source(self, source, *, envelope_json):
+        from .intake_binding import validate_local_binding, IntakeBindingError
+        from .file_sources import SubmittedSource
+        # Validate first, then freeze the caller's mutable metadata through the
+        # validated descriptor; never retain the caller's Mapping by reference.
+        binding = validate_local_binding(source, envelope_json)
+        value = json.loads(binding.source_json)['input']
+        frozen = SubmittedSource(value['input_kind'], value['input_key'], value['input_label'],
+                                 source.content, value['metadata'])
+        binding = validate_local_binding(frozen, binding.envelope_json)
+        scope = self._local_scope(binding)
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            existing = db.execute('''SELECT item_id FROM submitted_sources
+                WHERE input_kind=? AND input_key=? AND binding_scope=?''',
+                (frozen.source_kind, frozen.source_key, scope)).fetchone()
+            if existing:
+                actual, saved = self._local_intake_binding(db, existing['item_id'])
+                if saved != binding or actual != frozen:
+                    raise IntakeBindingError('intake_binding_mismatch')
+                return existing['item_id']
+            if frozen.source_kind in FILE_KINDS:
+                retain_bound_copy(self.path.parent, frozen.source_kind, frozen.source_key, frozen.label, frozen.content)
+            now = _now()
+            item_id = db.execute('''INSERT INTO distill_items(submitted_url,state,phase,queued_at,
+                created_at,updated_at,ingestion_contract,source_binding_sha256,relation_binding_sha256)
+                VALUES (?,'queued','collecting',?,?,?,?,?,?)''',
+                (frozen.label, now, now, now, INGESTION_CONTRACT,
+                 binding.source_binding_sha256, binding.relation_binding_sha256)).lastrowid
+            values = (item_id, scope, frozen.source_kind, frozen.source_key, frozen.label,
+                      _json(frozen.metadata), frozen.content)
+            db.create_function('local_intake_insert', 7, lambda *args: int(args == values and db.in_transaction))
+            try:
+                db.execute('''INSERT INTO submitted_sources(item_id,binding_scope,input_kind,input_key,
+                    input_label,input_metadata,content) VALUES (?,?,?,?,?,?,?)''', values)
+            finally:
+                db.create_function('local_intake_insert', 7, lambda *_: 0)
+            actual, row, owner = self._local_source(db, item_id, envelope_json=binding.envelope_json)
+            verified = validate_local_binding(actual, binding.envelope_json)
+            if verified != binding or row['binding_scope'] != scope or (
+                    owner['source_binding_sha256'], owner['relation_binding_sha256']) != (
+                    binding.source_binding_sha256, binding.relation_binding_sha256):
+                raise IntakeBindingError('intake_binding_mismatch')
+            event = self._local_event(item_id, binding)
+            db.create_function('local_intake_event', 7, lambda *args: int(args == event and db.in_transaction))
+            try:
+                db.execute('''INSERT INTO ingestion_events(event_key,contract,subject_kind,subject_id,
+                    item_id,binding_sha256,detail_json,kind,created_at) VALUES (?,?,?,?,?,?,?,'raw_pending',?)''',
+                    (*event, now))
+            finally:
+                db.create_function('local_intake_event', 7, lambda *_: 0)
+            self._local_intake_binding(db, item_id)
             return item_id
 
     def submitted_source(self, item_id: int):
@@ -110,8 +350,18 @@ class Store:
                                content, json.loads(row["input_metadata"]))
 
     def establish_submitted_fact(self, item_id: int, source, parsed, *, expected_revision=None,
-                                 review_result=None) -> int:
+                                 review_result=None) -> int | None:
         """Commit full fact and locator before relinquishing the temporary input."""
+        # Dispatch under ownership lock; the legacy implementation below stays
+        # unchanged. Missing/bad bound scopes never reach that implementation.
+        with connect(self.path) as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            row = connection.execute('''SELECT i.*,s.binding_scope FROM distill_items i
+                LEFT JOIN submitted_sources s USING(item_id) WHERE i.item_id=?''', (item_id,)).fetchone()
+            if row is not None and (row['ingestion_contract'] != 'legacy'
+                                    or row['binding_scope'] not in (None, 'legacy')):
+                return self._establish_bound_local_fact(connection, row, source, parsed,
+                    expected_revision=expected_revision, review_result=review_result)
         fact = SourceFact(parsed.snapshot, parsed.uncertainties)
         with connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -146,33 +396,129 @@ class Store:
             else:
                 fact_id = _establish_source_fact(connection, material_id, fact, lineage=parsed.lineage)
             connection.execute("UPDATE distill_items SET material_id = ? WHERE item_id = ?", (material_id, item_id))
-            connection.execute("UPDATE submitted_sources SET content = NULL, input_metadata = '{}', retain_until = NULL WHERE item_id = ?", (item_id,))
+            connection.execute("""UPDATE submitted_sources SET content = NULL, input_metadata = '{}', retain_until = NULL
+                WHERE item_id = ? AND EXISTS (SELECT 1 FROM distill_items i
+                    WHERE i.item_id=submitted_sources.item_id AND i.ingestion_contract='legacy')""", (item_id,))
             _sync_manual_cards(connection, item_id)
             return fact_id
+
+    def _establish_bound_local_fact(self, db, owner, source, parsed, *, expected_revision, review_result):
+        item_id = owner['item_id']
+        if (type(expected_revision) is not int or expected_revision < 0
+                or owner['review_revision'] != expected_revision or owner['state'] != 'working'
+                or owner['phase'] not in {'collecting', 'reviewing'}
+                or owner['material_id'] is not None or owner['confirmation_json'] is not None
+                or owner['dismissed_at'] is not None or owner['error_code'] is not None
+                or owner['rejection_reason'] is not None):
+            raise SourceReviewConflict('source_review_revision_conflict')
+        for table in ('confirmation_decisions', 'group_decisions'):
+            if db.execute(f'SELECT 1 FROM {table} WHERE item_id=? LIMIT 1', (item_id,)).fetchone():
+                raise SourceReviewConflict('source_review_revision_conflict')
+        actual, binding = self._local_intake_binding(db, item_id)
+        from .file_sources import SubmittedSource
+        if (type(source) is not SubmittedSource or type(source.content) is not bytes or source.content != actual.content
+                or (source.source_kind, source.source_key, source.label) !=
+                   (actual.source_kind, actual.source_key, actual.label)
+                or _bound_json(source.metadata) != _bound_json(actual.metadata)):
+            raise ValueError('local_source_binding_mismatch')
+        frozen, payload, recipe, review = _bound_local_parsed(actual, binding, parsed, review_result)
+        scope = self._local_scope(binding)
+        parse_input = {'protocol': 'local-source-parse-input-v1', 'binding_scope': scope,
+                       'input': json.loads(binding.source_json)['input'], 'recipe': recipe}
+        parse_hash = hashlib.sha256(_bound_json(parse_input).encode('utf-8')).hexdigest()
+        snapshot_key = 'local-source-fact-v1:' + parse_hash
+        result = {**review, 'local_parse_binding': {'parse_input': parse_input,
+            'parse_input_sha256': parse_hash,
+            'parsed_output_sha256': hashlib.sha256(_bound_json(payload).encode('utf-8')).hexdigest()}}
+        now = _now()
+        material_id = db.execute('''INSERT INTO materials(source_kind,source_key,submitted_url,
+            canonical_url,metadata_json,created_at,snapshot_key) VALUES (?,?,?,'',?,?,?)''',
+            (actual.source_kind, actual.source_key, actual.label, _json(frozen.metadata), now, snapshot_key)).lastrowid
+        expected_media = []
+        for position, member in enumerate(frozen.media):
+            values = (material_id, member.member_id, position, member.mime_type,
+                      hashlib.sha256(member.content).hexdigest(), member.content)
+            db.execute('INSERT INTO source_media VALUES (?,?,?,?,?,?)', values)
+            expected_media.append(values)
+        result_json = _json(result)
+        db.execute('INSERT INTO source_review_results VALUES (?,?,?,?,?,?)',
+                   (item_id, expected_revision, actual.source_key, 'complete', result_json, now))
+        from .image_confirmation import pending_review
+        fact = SourceFact(frozen.snapshot, frozen.uncertainties)
+        pending = pending_review(fact, frozen.lineage)
+        confirmation = _confirmation_json(pending, db, item_id) if pending else None
+        fact_id = None if pending else _establish_source_fact(db, material_id, fact, lineage=frozen.lineage)
+        changed = db.execute('''UPDATE distill_items SET material_id=?,state=?,phase=?,confirmation_json=?,updated_at=?
+            WHERE item_id=? AND review_revision=? AND state='working' AND material_id IS NULL
+              AND confirmation_json IS NULL AND dismissed_at IS NULL''',
+            (material_id, 'waiting_user' if pending else 'working', 'reviewing', confirmation,
+             now, item_id, expected_revision)).rowcount
+        if changed != 1:
+            raise SourceReviewConflict('source_review_revision_conflict')
+        _sync_manual_cards(db, item_id)
+        material = dict(db.execute('SELECT * FROM materials WHERE material_id=?', (material_id,)).fetchone())
+        if material != dict(material_id=material_id, source_kind=actual.source_kind, source_key=actual.source_key,
+                            submitted_url=actual.label, canonical_url='', metadata_json=_json(frozen.metadata),
+                            created_at=now, snapshot_key=snapshot_key):
+            raise ValueError('local_source_readback_mismatch')
+        if [tuple(r) for r in db.execute('SELECT * FROM source_media WHERE material_id=? ORDER BY position',
+                                        (material_id,))] != expected_media:
+            raise ValueError('local_source_readback_mismatch')
+        if tuple(db.execute('SELECT * FROM source_review_results WHERE item_id=? AND revision=?',
+                            (item_id, expected_revision)).fetchone()) != (
+                item_id, expected_revision, actual.source_key, 'complete', result_json, now):
+            raise ValueError('local_source_readback_mismatch')
+        facts = db.execute('SELECT * FROM source_facts WHERE material_id=?', (material_id,)).fetchall()
+        if pending:
+            if facts:
+                raise ValueError('local_source_readback_mismatch')
+        elif len(facts) != 1 or (facts[0]['source_fact_id'], facts[0]['material_id'], facts[0]['snapshot'],
+                                facts[0]['uncertainties_json'], facts[0]['lineage_json']) != (
+                fact_id, material_id, frozen.snapshot, _json(list(frozen.uncertainties)), _json(frozen.lineage)):
+            raise ValueError('local_source_readback_mismatch')
+        final = dict(db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone())
+        expected_owner = {k:v for k,v in dict(owner).items() if k != 'binding_scope'}
+        expected_owner.update(material_id=material_id, state='waiting_user' if pending else 'working',
+                              phase='reviewing', confirmation_json=confirmation,
+                              updated_at=now, review_revision=expected_revision+1)
+        if final != expected_owner:
+            raise ValueError('local_source_readback_mismatch')
+        readback_source, readback_binding = self._local_intake_binding(db, item_id)
+        if readback_source != actual or readback_binding != binding:
+            raise ValueError('local_source_binding_mismatch')
+        return fact_id
 
     def expire_submitted_sources(self) -> None:
         with connect(self.path) as connection:
             connection.execute(
                 """UPDATE submitted_sources SET content = NULL, input_metadata = '{}'
-                   WHERE retain_until IS NOT NULL AND retain_until <= ?""", (_now(),)
+                   WHERE retain_until IS NOT NULL AND retain_until <= ?
+                     AND EXISTS (SELECT 1 FROM distill_items i WHERE i.item_id=submitted_sources.item_id
+                                 AND i.ingestion_contract='legacy')""", (_now(),)
             )
 
     def reject_submitted_source(self, item_id: int, code: str) -> None:
         with connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("UPDATE distill_items SET state = 'failed', error_code = ?, updated_at = ? WHERE item_id = ?", (code, _now(), item_id))
-            connection.execute("UPDATE submitted_sources SET retryable = 0, content = NULL, input_metadata = '{}', retain_until = NULL WHERE item_id = ?", (item_id,))
+            connection.execute("""UPDATE submitted_sources SET retryable=0 WHERE item_id=?""", (item_id,))
+            connection.execute("""UPDATE submitted_sources SET content=NULL,input_metadata='{}',retain_until=NULL
+                WHERE item_id=? AND EXISTS (SELECT 1 FROM distill_items i
+                    WHERE i.item_id=submitted_sources.item_id AND i.ingestion_contract='legacy')""", (item_id,))
 
-    def create_item(self, submitted_url: str, *, title: str = '', expected_authority=None, receipt_key=None) -> int:
+    def create_item(self, submitted_url: str, *, title: str = '', expected_authority=None, receipt_key=None,
+                    ingestion_contract='legacy', source_binding_sha256=None, relation_binding_sha256=None) -> int:
         submitted_url = submitted_url.strip()
         if not submitted_url:
             raise ValueError("submission is empty")
         now = _now()
+        binding = _ingestion_binding(ingestion_contract, source_binding_sha256, relation_binding_sha256)
         with connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             from .feishu_inbox import prior_item, bind_item
             prior = prior_item(connection, receipt_key)
             if prior is not None:
+                _same_ingestion_binding(connection, prior, binding)
                 return prior
             authority = {}
             from .youtube import youtube_identity, connection_authority
@@ -225,36 +571,242 @@ class Store:
             cursor = connection.execute(
                 """
                 INSERT INTO distill_items (
-                    submitted_url, state, phase, queued_at, created_at, updated_at, platform_authority_json, submitted_title
-                ) VALUES (?, 'queued', 'collecting', ?, ?, ?, ?, ?)
+                    submitted_url, state, phase, queued_at, created_at, updated_at, platform_authority_json, submitted_title,
+                    ingestion_contract,source_binding_sha256,relation_binding_sha256
+                ) VALUES (?, 'queued', 'collecting', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (submitted_url, now, now, now, _json(authority), title),
+                (submitted_url, now, now, now, _json(authority), title, *binding),
             )
             item_id = int(cursor.lastrowid)
             bind_item(connection, receipt_key, item_id)
             return item_id
 
-    def claim_next_work(self):
+    def append_ingestion_event(self, item_id: int, *, kind: str, code: str) -> int:
+        """Persist only derived process observations, never a caller's proof.
+
+        A1 deliberately provides no raw_verified/release API or manifest input.
+        A2 must supply a reviewed read-only filesystem verifier before any such
+        event or bytes release can become available.
+        """
+        codes = {'source_ready': {'source_fact_ready'},
+                 'raw_pending': {'context_pending', 'readback_pending', 'writer_pending'}}
+        if (type(item_id) is not int or item_id <= 0 or not isinstance(kind, str)
+                or kind not in codes or not isinstance(code, str) or code not in codes[kind]):
+            raise ValueError('ingestion_event_invalid')
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('''SELECT i.*,sf.source_fact_id,sf.snapshot FROM distill_items i
+                LEFT JOIN source_facts sf USING(material_id) WHERE i.item_id=?''', (item_id,)).fetchone()
+            if row is None or row['ingestion_contract'] != INGESTION_CONTRACT:
+                raise ValueError('ingestion_contract_required')
+            if kind == 'source_ready' and row['source_fact_id'] is None:
+                raise ValueError('source_fact_required')
+            manifest = {'source_fact_id': row['source_fact_id'],
+                        'snapshot_sha256': hashlib.sha256(row['snapshot'].encode('utf-8')).hexdigest()
+                        if row['snapshot'] is not None else None}
+            detail = {'code': code, 'manifest': manifest,
+                      'source_binding_sha256': row['source_binding_sha256'],
+                      'relation_binding_sha256': row['relation_binding_sha256']}
+            serialized = _json(detail)
+            binding_hash = hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+            key = hashlib.sha256(_json([INGESTION_CONTRACT, item_id, kind, binding_hash]).encode('utf-8')).hexdigest()
+            db.execute('''INSERT INTO ingestion_events
+                (event_key,contract,subject_kind,subject_id,item_id,kind,binding_sha256,detail_json,created_at)
+                VALUES (?,?,'item',?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING''',
+                (key, INGESTION_CONTRACT, item_id, item_id, kind, binding_hash, serialized, _now()))
+            saved = db.execute('SELECT * FROM ingestion_events WHERE event_key=?', (key,)).fetchone()
+            if (saved['subject_id'], saved['item_id'], saved['kind'], saved['binding_sha256'], saved['detail_json']) != (
+                    item_id, item_id, kind, binding_hash, serialized):
+                raise ValueError('ingestion_event_conflict')
+            return saved['event_id']
+
+    def ingestion_events(self, item_id: int):
+        with connect(self.path) as db:
+            return tuple(db.execute('SELECT * FROM ingestion_events WHERE item_id=? ORDER BY event_id', (item_id,)))
+
+    def presentation_context(self, item_id, pending=None, *, new_review=None):
+        """Read current source and normalize identities before building evidence.
+
+        new_review=(expected_revision, identity, result) is for a new source
+        commit, not an established SourceFact. It does not write/prepare audio.
+        """
+        from .confirmation_schema import view
+        with connect(self.path) as db:
+            row = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+            if row is None:
+                raise SourceReviewConflict('source_review_revision_conflict')
+            if pending is None:
+                pending = view(db, row)
+            else:
+                pending = dict(pending)
+                pending.setdefault('review_identity', uuid4().hex)
+                pending = _prepared_confirmation(pending, db, item_id)
+            return {'pending': pending, 'source_descriptor': _preparation_source(db, row, new_review),
+                    'item_runtime_root': self.preparation_runtime_root / 'items' / str(item_id)}
+
+    def discover_pending_presentations(self, *, after_item_id=0, limit=8, item_id=None):
+        """Bounded current-pending discovery; no model, files written or history scan."""
+        from .confirmation_preparation import PROTOCOL, required, input_binding, presentation_state, PreparationError
+        from .confirmation_schema import view
+        if type(limit) is not int or not 1 <= limit <= 64 or type(after_item_id) is not int or after_item_id < 0:
+            raise ValueError('preparation_page_invalid')
+        if item_id is not None and (type(item_id) is not int or item_id <= 0):
+            raise ValueError('preparation_item_invalid')
+        enqueued = []
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute('''SELECT * FROM distill_items i WHERE item_id>? AND (? IS NULL OR item_id=?) AND state='waiting_user'
+                AND dismissed_at IS NULL AND confirmation_json IS NOT NULL
+                AND NOT EXISTS(SELECT 1 FROM source_facts sf WHERE sf.material_id=i.material_id)
+                ORDER BY item_id LIMIT ?''', (after_item_id, item_id, item_id, limit)).fetchall()
+            for row in rows:
+                pending = view(db, row)
+                source = _preparation_source(db, row)
+                if not required(pending, source):
+                    continue
+                try:
+                    binding = input_binding(pending, source_descriptor=source)
+                except PreparationError:
+                    # Unrepresentable current source cannot become a normal card.
+                    _save_preparation(db, row, pending, 'failed', 'review_incomplete',
+                                      {'protocol': PROTOCOL, 'input_binding': None, 'attempt': 1,
+                                       'outcome': 'failed', 'code': 'review_incomplete'})
+                    continue
+                prior = pending.get('presentation_preparation', {})
+                same = isinstance(prior, dict) and prior.get('protocol') == PROTOCOL and prior.get('input_binding') == binding
+                if same and prior.get('outcome') == 'failed':
+                    continue
+                if same and prior.get('outcome') == 'prepared':
+                    observed = presentation_state(pending, self.preparation_runtime_root / 'items' / str(row['item_id']), source_descriptor=source)
+                    if observed['outcome'] == 'prepared':
+                        continue
+                    marker = {**prior, 'outcome': 'failed', 'code': observed['code'] or 'review_incomplete'}
+                    _save_preparation(db, row, pending, 'failed', marker['code'], marker)
+                    continue
+                marker = {'protocol': PROTOCOL, 'input_binding': binding, 'attempt': 1, 'outcome': 'queued'}
+                _save_preparation(db, row, pending, 'queued', None, marker)
+                enqueued.append(row['item_id'])
+        return {'enqueued': tuple(enqueued), 'after_item_id': rows[-1]['item_id'] if rows else 0}
+
+    def presentation_ownership(self, item_id):
+        from .confirmation_preparation import PROTOCOL, input_binding
+        with connect(self.path) as db:
+            row = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+            pending, marker = _presentation_owned(db, row)
+            if (marker.get('protocol') != PROTOCOL or marker.get('outcome') != 'running'
+                    or marker.get('input_binding') != input_binding(pending, source_descriptor=_preparation_source(db, row))):
+                raise SourceReviewConflict('presentation_ownership_conflict')
+            return {'item_id': item_id, 'review_revision': row['review_revision'],
+                    'expected_confirmation_json': row['confirmation_json'],
+                    'input_binding': marker['input_binding'], 'attempt': marker['attempt']}
+
+    def finish_pending_presentation(self, item_id, ownership, result):
+        """Commit only an owned result, with source and WAV readback in this CAS."""
+        from .confirmation_preparation import (PROTOCOL, FAILURE_CODES, validate_change,
+                                               input_binding, validate_evidence)
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+            pending, marker = _presentation_owned(db, row)
+            actual = {'item_id': item_id, 'review_revision': row['review_revision'],
+                      'expected_confirmation_json': row['confirmation_json'],
+                      'input_binding': marker.get('input_binding'), 'attempt': marker.get('attempt')}
+            source = _preparation_source(db, row)
+            if (not isinstance(ownership, dict) or any(type(ownership.get(k)) is not int
+                    for k in ('item_id', 'review_revision', 'attempt'))
+                    or ownership != actual or not isinstance(result, dict) or result.get('ownership') != actual
+                    or marker.get('protocol') != PROTOCOL or marker.get('outcome') != 'running'
+                    or marker.get('input_binding') != input_binding(pending, source_descriptor=source)):
+                raise SourceReviewConflict('presentation_ownership_conflict')
+            if result.get('status') == 'prepared' and result.get('code') is None:
+                from .confirmation_schema import prepare
+                from .confirmation_preparation import PreparationError
+                if not isinstance(result.get('pending'), dict):
+                    raise PreparationError()
+                updated = prepare(db, item_id, result.get('pending'))
+                validate_change(pending, updated)
+                validate_evidence(updated, result.get('evidence'),
+                    self.preparation_runtime_root / 'items' / str(item_id), source_descriptor=source)
+                next_marker = {**marker, 'outcome': 'prepared', 'evidence': result['evidence']}
+                next_marker.pop('code', None)
+                _save_preparation(db, row, updated, 'waiting_user', None, next_marker)
+            elif (result.get('status') == 'failed' and result.get('code') in FAILURE_CODES
+                    and result.get('pending') is None and result.get('evidence') is None):
+                _save_preparation(db, row, pending, 'failed', result['code'],
+                                  {**marker, 'outcome': 'failed', 'code': result['code']})
+            else:
+                raise ValueError('presentation_result_invalid')
+            return db.execute('SELECT state FROM distill_items WHERE item_id=?', (item_id,)).fetchone()[0]
+
+    def retry_pending_presentation(self, item_id):
+        from .confirmation_preparation import PROTOCOL, input_binding, required
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+            pending, marker = _presentation_owned(db, row, state='failed')
+            source = _preparation_source(db, row)
+            if marker.get('protocol') != PROTOCOL or marker.get('outcome') != 'failed' or not required(pending, source):
+                raise SourceReviewConflict('presentation_ownership_conflict')
+            marker = {'protocol': PROTOCOL, 'input_binding': input_binding(pending, source_descriptor=source),
+                      'attempt': marker['attempt'] + 1, 'outcome': 'queued'}
+            _save_preparation(db, row, pending, 'queued', None, marker)
+
+    def claim_next_work(self, *, item_guard=None, deferred_items=()):
+        from .raw import LegacySourceVeto
+        if item_guard is not None and not callable(item_guard):
+            raise TypeError('item_guard must be callable')
         with connect(self.path) as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("""SELECT * FROM (
+            rows = db.execute("""SELECT * FROM (
                 SELECT 'item' AS kind,item_id AS id,queued_at FROM distill_items i WHERE state='queued'
                   AND NOT EXISTS(SELECT 1 FROM collection_members cm WHERE cm.item_id=i.item_id)
+                  AND COALESCE(json_extract(confirmation_json,'$.presentation_preparation.outcome'),'')!='queued'
+                UNION ALL
+                SELECT 'presentation',item_id,queued_at FROM distill_items WHERE state='queued'
+                  AND json_extract(confirmation_json,'$.presentation_preparation.outcome')='queued'
                 UNION ALL
                 SELECT 'collection',operation_id,queued_at FROM collection_operations WHERE state='queued'
-                ) ORDER BY queued_at,id,kind LIMIT 1""").fetchone()
-            if row is None:
-                return None
-            table,key = ('distill_items','item_id') if row['kind']=='item' else ('collection_operations','operation_id')
-            db.execute(f"UPDATE {table} SET state='working',updated_at=? WHERE {key}=?",(_now(),row['id']))
-            return row['kind'],row['id']
+                ) ORDER BY queued_at,id,kind""")
+            for row in rows:
+                if row['kind'] == 'item' and row['id'] in deferred_items:
+                    continue
+                if row['kind'] == 'collection' and deferred_items:
+                    pending = [r[0] for r in db.execute('''SELECT i.item_id FROM distill_items i
+                        JOIN collection_members cm USING(item_id)
+                        WHERE cm.operation_id=? AND i.state='queued' ''', (row['id'],))]
+                    if pending and all(item in deferred_items for item in pending):
+                        continue
+                if row['kind'] == 'item' and item_guard is not None:
+                    try:
+                        item_guard(db, row['id'])
+                    except LegacySourceVeto as error:
+                        if error.args != ('local_source_qualification_pending',):
+                            raise
+                        continue
+                if row['kind'] == 'presentation':
+                    current = db.execute('SELECT * FROM distill_items WHERE item_id=?', (row['id'],)).fetchone()
+                    pending, marker = _presentation_owned(db, current, state='queued')
+                    from .confirmation_preparation import PROTOCOL, input_binding
+                    if (marker.get('protocol') != PROTOCOL or marker.get('input_binding') !=
+                            input_binding(pending, source_descriptor=_preparation_source(db, current))):
+                        _save_preparation(db, current, pending, 'failed', 'review_incomplete',
+                                          {**marker, 'outcome': 'failed', 'code': 'review_incomplete'})
+                        return None
+                    _save_preparation(db, current, pending, 'working', None, {**marker, 'outcome': 'running'})
+                else:
+                    table,key = ('distill_items','item_id') if row['kind']=='item' else ('collection_operations','operation_id')
+                    db.execute(f"UPDATE {table} SET state='working',updated_at=? WHERE {key}=?",(_now(),row['id']))
+                return row['kind'],row['id']
+            return None
 
     def claim_next_item(self) -> int | None:
         with connect(self.path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """SELECT item_id FROM distill_items
-                   WHERE state = 'queued' AND NOT EXISTS (
+                   WHERE state = 'queued'
+                   AND COALESCE(json_extract(confirmation_json,'$.presentation_preparation.outcome'),'')!='queued'
+                   AND NOT EXISTS (
                        SELECT 1 FROM collection_members cm WHERE cm.item_id=distill_items.item_id)
                    ORDER BY queued_at, item_id LIMIT 1"""
             ).fetchone()
@@ -276,13 +828,33 @@ class Store:
             connection.execute("""UPDATE collection_operations
                 SET state=CASE WHEN cancel_requested=1 THEN 'cancelled' ELSE 'queued' END,updated_at=?
                 WHERE state='working'""", (_now(),))
-            return connection.execute(
+            from .confirmation_preparation import PROTOCOL
+            # A durable running attempt may have made a model request. Reboot
+            # cannot prove it did not: preserve its cache, fail once, await retry.
+            presentations = connection.execute('''SELECT * FROM distill_items WHERE state='working'
+                AND json_extract(confirmation_json,'$.presentation_preparation.protocol')=?
+                AND json_extract(confirmation_json,'$.presentation_preparation.outcome')='running' ''', (PROTOCOL,)).fetchall()
+            for row in presentations:
+                pending = json.loads(row['confirmation_json'])
+                marker = pending['presentation_preparation']
+                _save_preparation(connection, row, pending, 'failed', 'review_incomplete',
+                                  {**marker, 'outcome': 'failed', 'code': 'review_incomplete'})
+            return len(presentations) + connection.execute(
                 """UPDATE distill_items SET state = 'queued', updated_at = ?
                    WHERE state = 'working'""",
                 (_now(),),
             ).rowcount
 
     def retry_item(self, item_id: int, replacement=None) -> None:
+        row = self.item_bundle(item_id)
+        if row is not None and row['confirmation_json']:
+            from .confirmation_preparation import PROTOCOL
+            marker = json.loads(row['confirmation_json']).get('presentation_preparation', {})
+            if isinstance(marker, dict) and marker.get('protocol') == PROTOCOL and marker.get('outcome') == 'failed':
+                if replacement is not None:
+                    raise ValueError('presentation_source_replacement_forbidden')
+                self.retry_pending_presentation(item_id)
+                return
         self.expire_submitted_sources()
         self._enqueue_existing(item_id, expected_state="failed", replacement=replacement)
 
@@ -357,6 +929,14 @@ class Store:
             if row["state"] != "waiting_user" or row["confirmation_json"] != expected_json:
                 from .confirmation_revision import ConfirmationConflict
                 raise ConfirmationConflict("来源确认已更新，请查看该疑点当前状态。")
+            # Fresh decisions, including unable/manual, require the real current
+            # presentation proof. An already committed group replay above is
+            # still idempotent and does not establish another fact.
+            from .confirmation_preparation import ready, PreparationError
+            pending = json.loads(row['confirmation_json'])
+            if row['source_fact_id'] is None and not ready(pending, self.preparation_runtime_root / 'items' / str(item_id),
+                         source_descriptor=_preparation_source(connection, row)):
+                raise PreparationError('review_incomplete')
             if group_decision is not None:
                 from .confirmation_schema import view
                 from .confirmation_revision import ConfirmationConflict
@@ -461,6 +1041,57 @@ class Store:
 
     def mark_succeeded(self, item_id: int) -> None:
         self._set_item(item_id, state="succeeded", phase="done", confirmation_json=None)
+
+    def complete_raw_item(self, item_id: int, vault=None, *, expected_revision=None):
+        """The raw writer owns proof and commit; callers cannot supply a receipt."""
+        from .raw import RawLedger
+        return RawLedger(self).complete_item(item_id, vault, expected_revision=expected_revision)
+
+    def retain_partial_source(self, item_id, expected_revision, expected_confirmation, fact):
+        """Consume only the exact legacy user-decided unknown-source revision."""
+        from .raw import _legacy_item_gate
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            _legacy_item_gate(db, item_id)
+            row = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
+            if (row is None or row['state'] != 'working' or row['review_revision'] != expected_revision
+                    or row['confirmation_json'] != expected_confirmation or expected_confirmation is None):
+                raise SourceReviewConflict('source_review_revision_conflict')
+            pending = json.loads(expected_confirmation)
+            if (pending.get('group_confirmation_contract') or pending.get('concerns')
+                    or not pending.get('deferred_concerns') or pending['snapshot'] != fact.snapshot):
+                raise SourceReviewConflict('source_review_revision_conflict')
+            _establish_source_fact(db, row['material_id'], fact)
+            db.execute('''UPDATE distill_items SET confirmation_json=NULL,review_revision=review_revision+1,
+                updated_at=? WHERE item_id=?''', (_now(), item_id))
+            _sync_manual_cards(db, item_id)
+
+    def defer_raw_item(self, item_id: int):
+        """Retain the acquired source while a different Vault writer is active."""
+        with connect(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            changed = db.execute('''UPDATE distill_items SET state='queued',queued_at=?,updated_at=?
+                WHERE item_id=? AND state='working' AND confirmation_json IS NULL
+                AND dismissed_at IS NULL AND EXISTS(SELECT 1 FROM source_facts sf
+                    WHERE sf.material_id=distill_items.material_id)''', (_now(), _now(), item_id)).rowcount
+            return changed == 1
+
+    def _finish_raw_item(self, db, item_id, owner):
+        from .database import RAW_OWNER_COLUMNS
+        from .raw import RawError
+        if not db.in_transaction or owner['item_id'] != item_id:
+            raise RawError('raw_terminal_stale')
+        if owner['state'] == 'raw_saved':
+            return  # Existing durable terminals must never be reopened.
+        if owner['state'] == 'succeeded' and owner['phase'] == 'done':
+            return  # Proof was refreshed; the existing terminal is unchanged.
+        predicate = ' AND '.join(f'"{k}" IS ?' for k in RAW_OWNER_COLUMNS)
+        changed = db.execute(f'''UPDATE distill_items SET state='succeeded',phase='done',
+            error_code=NULL,rejection_reason=NULL,confirmation_json=NULL,updated_at=?
+            WHERE {predicate}''', (_now(), *(owner[k] for k in RAW_OWNER_COLUMNS))).rowcount
+        if changed != 1:
+            raise RawError('raw_terminal_stale')
+        _sync_manual_cards(db, item_id)
 
     def attach_material(self, item_id: int, material: CapturedMaterial) -> int:
         from .source_versions import snapshot_key, SourceVersionError
@@ -589,6 +1220,13 @@ class Store:
                     raise ValueError('failed_review_cannot_establish_source')
             elif (fact is None) == (confirmation is None):
                 raise ValueError('completed_review_requires_one_outcome')
+            if confirmation is not None:
+                from .confirmation_preparation import ready, PreparationError
+                confirmation = _prepared_confirmation(confirmation, connection, item_id)
+                source = _preparation_source(connection, row, (expected_revision, identity, result))
+                if not ready(confirmation, self.preparation_runtime_root / 'items' / str(item_id),
+                             source_descriptor=source):
+                    raise PreparationError('review_incomplete')
             connection.execute('INSERT INTO source_review_results VALUES (?,?,?,?,?,?)',
                 (item_id, expected_revision, identity, 'failed' if failure else 'complete', _json(result), _now()))
             if fact is not None:
@@ -779,18 +1417,18 @@ class Store:
                     WITH completed AS (
                         SELECT item_id, updated_at,
                                ROW_NUMBER() OVER (PARTITION BY material_id ORDER BY updated_at, item_id) AS attempt
-                        FROM distill_items WHERE state='succeeded'
+                        FROM distill_items WHERE state IN ('succeeded','raw_saved')
                     )
                     SELECT i.*, ss.input_kind, ss.input_key, ss.input_label, ss.retryable, ss.content IS NOT NULL AS input_available, ss.retain_until, m.source_kind, m.canonical_url, m.metadata_json,
                            kr.knowledge_result_id, kr.payload_json,
-                           kr.published_path, kr.published_at, kr.published_vault, sf.lineage_json
+                           kr.published_path, kr.published_at, kr.published_vault, sf.source_fact_id, sf.lineage_json
                     FROM distill_items AS i
                     LEFT JOIN submitted_sources AS ss ON ss.item_id = i.item_id
                     LEFT JOIN materials AS m ON m.material_id = i.material_id
                     LEFT JOIN source_facts AS sf ON sf.material_id = m.material_id
                     LEFT JOIN knowledge_results AS kr
                       ON kr.source_fact_id = sf.source_fact_id
-                    WHERE (i.state!='succeeded' AND i.dismissed_at IS NULL AND NOT EXISTS(SELECT 1 FROM collection_members cm WHERE cm.item_id=i.item_id))
+                    WHERE (i.state NOT IN ('succeeded','raw_saved') AND i.dismissed_at IS NULL AND NOT EXISTS(SELECT 1 FROM collection_members cm WHERE cm.item_id=i.item_id))
                        OR i.item_id IN (SELECT item_id FROM completed WHERE attempt=1 ORDER BY updated_at DESC,item_id DESC LIMIT ?)
                     ORDER BY i.updated_at DESC, i.item_id DESC
                     """,
@@ -988,6 +1626,74 @@ class Store:
             _wake_collection(connection, item_id)
 
 
+def _preparation_source(db, row, new_review=None):
+    """Current DB source; stable source review differs from workflow CAS counter."""
+    from .confirmation_preparation import digest
+    material = db.execute('SELECT * FROM materials WHERE material_id=?', (row['material_id'],)).fetchone()
+    submitted = db.execute('SELECT * FROM submitted_sources WHERE item_id=?', (row['item_id'],)).fetchone()
+    if new_review is None:
+        review = db.execute('''SELECT revision,identity,result_json FROM source_review_results
+            WHERE item_id=? AND status='complete' ORDER BY revision DESC LIMIT 1''', (row['item_id'],)).fetchone()
+        review = dict(review) if review else None
+    else:
+        revision, identity, result = new_review
+        if row['state'] != 'working' or row['review_revision'] != revision:
+            raise SourceReviewConflict('source_review_revision_conflict')
+        review = {'revision': revision, 'identity': identity, 'result_json': _json(result)}
+    submitted_source = None
+    if submitted is not None:
+        submitted_source = {k: submitted[k] for k in ('input_kind', 'input_key', 'input_label', 'input_metadata')}
+        submitted_source['content_sha256'] = hashlib.sha256(submitted['content']).hexdigest() if submitted['content'] is not None else None
+    media = [dict(r) for r in db.execute('''SELECT member_id,position,mime_type,sha256
+        FROM source_media WHERE material_id=? ORDER BY position,member_id''', (row['material_id'],))]
+    text_kinds = {'direct_text', 'markdown', 'pdf', 'epub'}
+    kinds = [material['source_kind'] if material else None,
+             submitted['input_kind'] if submitted else None]
+    # Platform names alone cannot distinguish a video from an article.
+    modality = ('audio' if any(m['mime_type'].startswith(('audio/', 'video/')) for m in media)
+                or 'feishu_voice' in kinds else
+                'text' if all(k in text_kinds for k in kinds if k is not None)
+                and any(k in text_kinds for k in kinds) and not media else 'unknown')
+    return {'item_id': row['item_id'], 'material_id': row['material_id'],
+            'source_modality': modality,
+            'source_kind': material['source_kind'] if material else '',
+            'source_key': material['source_key'] if material else '',
+            'review_revision': review['revision'] if review else None,
+            'source_sha256': digest({'material': dict(material) if material else None,
+                'submitted': submitted_source, 'review': review, 'media': media,
+                'delivery': [row['submitted_url'], row['platform_authority_json'],
+                             row['ingestion_contract'], row['source_binding_sha256'], row['relation_binding_sha256']]})}
+
+
+def _presentation_owned(db, row, *, state='working'):
+    from .confirmation_preparation import PROTOCOL
+    if (row is None or row['state'] != state or row['dismissed_at'] is not None
+            or row['confirmation_json'] is None
+            or db.execute('SELECT 1 FROM source_facts WHERE material_id=?', (row['material_id'],)).fetchone()):
+        raise SourceReviewConflict('presentation_ownership_conflict')
+    pending = json.loads(row['confirmation_json'])
+    marker = pending.get('presentation_preparation')
+    if (not isinstance(marker, dict) or marker.get('protocol') != PROTOCOL
+            or type(marker.get('attempt')) is not int or marker['attempt'] <= 0):
+        raise SourceReviewConflict('presentation_ownership_conflict')
+    return pending, marker
+
+
+def _save_preparation(db, row, pending, state, code, marker):
+    """One owned transaction, retaining protected JSON and source copies."""
+    pending = {**pending, 'presentation_preparation': marker}
+    changed = db.execute('''UPDATE distill_items SET state=?,phase='reviewing',error_code=?,
+        confirmation_json=?,queued_at=CASE WHEN ?='queued' THEN ? ELSE queued_at END,updated_at=?
+        WHERE item_id=? AND review_revision=? AND confirmation_json IS ? AND state=?
+        AND dismissed_at IS NULL''',
+        (state, code, _confirmation_json(pending, db, row['item_id']), state, _now(), _now(),
+         row['item_id'], row['review_revision'], row['confirmation_json'], row['state'])).rowcount
+    if changed != 1:
+        raise SourceReviewConflict('presentation_ownership_conflict')
+    db.execute('UPDATE submitted_sources SET retain_until=NULL WHERE item_id=?', (row['item_id'],))
+    _sync_manual_cards(db, row['item_id'])
+
+
 def _group_payload(request):
     return {key: (sorted(request[key]) if key == 'selected_member_uids' else request[key])
             for key in ('group_id', 'group_revision', 'selected_member_uids', 'action', 'value')}
@@ -1073,12 +1779,18 @@ def _establish_source_fact(
     return int(cursor.lastrowid)
 
 
-def _confirmation_json(confirmation: Mapping[str, object], connection=None, item_id=None) -> str:
+def _prepared_confirmation(confirmation: Mapping[str, object], connection=None, item_id=None):
+    """The exact persisted body, before the deliberately unbound submit token."""
     if connection is not None:
         from .confirmation_schema import prepare
         confirmation = prepare(connection, item_id, confirmation)
     from .confirmation_display import concern_total
-    return _json({**confirmation, "review_identity": confirmation.get("review_identity", confirmation.get("token", uuid4().hex)), "concern_total": concern_total(confirmation), "token": uuid4().hex})
+    return {**confirmation, "review_identity": confirmation.get("review_identity", confirmation.get("token", uuid4().hex)),
+            "concern_total": concern_total(confirmation)}
+
+
+def _confirmation_json(confirmation: Mapping[str, object], connection=None, item_id=None) -> str:
+    return _json({**_prepared_confirmation(confirmation, connection, item_id), "token": uuid4().hex})
 
 
 def _json(value: object) -> str:
