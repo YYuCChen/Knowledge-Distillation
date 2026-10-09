@@ -5,7 +5,7 @@ from .chrome import ChromeSessionError
 from .database import connect
 from .douyin_collections import CollectionError
 from .file_sources import prepare_direct_text
-from .intake import needs_content_choice, links_in, platform_for_url, message_links, message_needs_content_choice
+from .intake import needs_content_choice, links_in, platform_for_url
 
 
 class FeishuIntake:
@@ -71,8 +71,7 @@ class FeishuIntake:
             self._state(key,'accepted')
             if self.wake:self.wake()
             return 'accepted'
-        text = row['text']
-        urls = message_links(text, message_type=message.message_type, content=message.content)
+        text, urls = row['text'], links_in(row['text'])
         if content_kind not in {None,'text','links'}:
             raise ValueError('请选择处理链接或完整文本。')
         if row['content_kind'] and content_kind and row['content_kind'] != content_kind:
@@ -80,8 +79,7 @@ class FeishuIntake:
         content_kind = row['content_kind'] or content_kind
         if row['same_topic'] and (len(urls)<2 or len({platform_for_url(url) for url in urls}) != 1 or not platform_for_url(urls[0])):
             return self._state(key,'rejected','同题处理需要至少两条同一平台的内容链接，不能跨平台。')
-        if message_needs_content_choice(text, message_type=message.message_type,
-                                        content=message.content) and content_kind is None:
+        if needs_content_choice(text) and content_kind is None:
             return self._state(key,'waiting_input')
         if row['same_topic'] and content_kind=='text':
             return self._state(key,'rejected','@ 同题与完整文本的意图冲突，请重新投递。')

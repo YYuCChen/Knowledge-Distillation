@@ -3,8 +3,7 @@ from __future__ import annotations
 import re
 import sys
 
-from flask import Blueprint, abort, current_app, g, redirect, render_template, request, url_for
-from urllib.parse import urlsplit
+from flask import Blueprint, abort, current_app, redirect, render_template, request, url_for
 
 from .chrome import ChromeSessionError
 from .settings import SettingsError, SettingsService
@@ -135,7 +134,6 @@ for _platform, _label in {'xiaohongshu': '小红书', 'zhihu': '知乎'}.items()
 
 def settings_blueprint(service: SettingsService) -> Blueprint:
     blueprint = Blueprint("settings", __name__)
-    _register_decision_settings(blueprint, service)
 
     @blueprint.get("/settings")
     def page():
@@ -524,144 +522,3 @@ def _back(message: str, group: str):
 
 def _return_to(value):
     return value if re.fullmatch(r"/(?:topics(?:/[0-9]+)?|insights)(?:\?[^\r\n\\]*)?", value) else "/"
-
-def _register_decision_settings(blueprint, service):
-    """U06: isolated form receipts, exact checked fields and activation CAS."""
-    from collections import OrderedDict
-    from copy import copy
-    import secrets
-    import threading
-    import time
-    from .settings import SettingsError
-    from .decision_client import JEV_ENDPOINT
-
-    rows, lock = OrderedDict(), threading.RLock()
-    cookie = 'kd-decision-form'
-
-    def current():
-        token = request.cookies.get(cookie, '')
-        now = time.monotonic()
-        for old in list(rows):
-            if now - rows[old]['touched'] > 3600:
-                del rows[old]
-        if token not in rows:
-            if request.method == 'POST':
-                abort(403)
-            token = secrets.token_urlsafe(32)
-            while len(rows) >= 256:
-                rows.popitem(last=False)
-            rows[token] = dict(provider='jev', model='jev-latest', endpoint=JEV_ENDPOINT,
-                candidate_id='', candidate_revision='0', form_nonce=secrets.token_urlsafe(32),
-                enable_allowed=False, check_message='尚未检查此方案。', checked=None, initialized=False)
-        row = rows[token]
-        row['touched'] = now
-        rows.move_to_end(token)
-        g.decision_cookie = token
-        return row
-
-    @blueprint.after_request
-    def decision_cookie(response):
-        if hasattr(g, 'decision_cookie'):
-            response.set_cookie(cookie, g.decision_cookie, httponly=True, samesite='Strict',
-                secure=request.is_secure, max_age=3600, path='/settings')
-            response.headers['Cache-Control'] = 'no-store'
-        return response
-
-    @blueprint.context_processor
-    def decision_context():
-        if request.endpoint != 'settings.page':
-            return {}
-        with lock:
-            row = current()
-            active = cloud = None
-            legacy = 'unconfigured'
-            try:
-                if sys.platform != 'win32' and hasattr(service, 'decision_state'):
-                    state = service.decision_state(include_cloud=True)
-                    active, cloud = state['active'], state['current_cloud']
-                legacy = service.jev_state() if hasattr(service, 'jev_state') else 'unconfigured'
-                saved = bool(cloud) or legacy != 'unconfigured'
-                if not row['initialized']:
-                    if active:
-                        row.update({k: active['profile'][k] for k in ('provider', 'model', 'endpoint')})
-                    row['initialized'] = True
-                status = 'configured' if active else legacy
-            except SettingsError:
-                saved, status = False, 'unavailable'
-                row.update(enable_allowed=False, checked=None, check_message='检查未通过；原方案保留。')
-            view = {k: v for k, v in row.items() if k not in {'checked', 'touched', 'initialized'}}
-            view.update(cloud_key_saved=saved,
-                active_provider_label=('TypeSafe' if active['profile']['provider'] == 'jev' else '本地 Clef') if active else ('TypeSafe' if legacy != 'unconfigured' else '-'),
-                active_model=active['profile']['model'] if active else ('jev-latest' if legacy != 'unconfigured' else ''),
-                state=status)
-            return {'decision': view}
-
-    def parsed(row):
-        origin = request.host_url.rstrip('/')
-        host = urlsplit(origin).hostname or ''
-        if (not (host in {'127.0.0.1', 'localhost', '::1'} or host.endswith('.localhost'))
-                or request.headers.get('Origin') != origin
-                or request.headers.get('Sec-Fetch-Site') == 'cross-site'):
-            abort(403)
-        if request.mimetype != 'application/x-www-form-urlencoded':
-            abort(415)
-        if request.content_length is None or request.content_length > 4096:
-            abort(413)
-        allowed = {'return_to', 'candidate_id', 'candidate_revision', 'form_nonce', 'provider', 'endpoint', 'model', 'api_key'}
-        if set(request.form) != allowed or any(len(request.form.getlist(k)) != 1 for k in request.form):
-            raise SettingsError('decision_profile_invalid')
-        if not secrets.compare_digest(request.form['form_nonce'], row['form_nonce']):
-            abort(403)
-        if not re.fullmatch(r'[0-9]{1,9}', request.form['candidate_revision']):
-            raise SettingsError('decision_profile_invalid')
-        fields = {k: request.form[k] for k in ('provider', 'endpoint', 'model')}
-        return fields, request.form['candidate_revision'], request.form['api_key']
-
-    def back(message):
-        # Keep the existing return navigation; never redirect to an external URL.
-        target = request.form.get('return_to', '/')
-        if not target.startswith('/') or target.startswith('//') or '\\' in target:
-            target = '/'
-        return redirect(url_for('settings.page', open='models', message=message, return_to=target), code=303)
-
-    def check():
-        with lock:
-            row = current()
-            try:
-                fields, revision, key = parsed(row)
-                row.update(enable_allowed=False, checked=None, candidate_id='')
-                row.update(fields, candidate_revision=revision)
-                # Only an explicit browser check supplies network transports.
-                # Copy avoids mutating shared service dependencies during a check.
-                backend = copy(service)
-                import httpx
-                backend._decision_post = service._decision_post or httpx.post
-                backend._decision_get = service._decision_get or httpx.get
-                receipt = backend.check_decision_candidate(fields, api_key=key or None)
-                row.update(candidate_id=receipt['draft_id'], checked=dict(fields=fields, revision=revision, receipt=receipt),
-                    enable_allowed=True, check_message='检查通过，尚未启用。')
-            except SettingsError:
-                row.update(enable_allowed=False, checked=None, candidate_id='', check_message='检查未通过；原方案保留。')
-            return back('jev_decision_check')
-
-    def enable():
-        with lock:
-            row = current()
-            try:
-                fields, revision, key = parsed(row)
-                checked = row['checked']
-                if (not row['enable_allowed'] or not checked or key
-                        or fields != checked['fields'] or revision != checked['revision']
-                        or request.form['candidate_id'] != row['candidate_id']):
-                    raise SettingsError('decision_profile_unvalidated')
-                receipt = checked['receipt']
-                service.activate_decision_candidate(receipt['draft_id'],
-                    expected_active_id=receipt['expected_active_id'],
-                    expected_current_cloud_profile_id=receipt['expected_current_cloud_profile_id'])
-                row.update(enable_allowed=False, checked=None, check_message='方案已启用。')
-            except SettingsError:
-                row.update(enable_allowed=False, checked=None, check_message='检查未通过；原方案保留。')
-            return back('jev_decision_enable')
-
-    blueprint.add_url_rule('/settings/decision/check', 'check_decision', check, methods=['POST'])
-    blueprint.add_url_rule('/settings/decision/enable', 'enable_decision', enable, methods=['POST'])

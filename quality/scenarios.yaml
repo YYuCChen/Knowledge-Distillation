@@ -32,56 +32,6 @@
       "always": true
     },
     {
-      "id": "SC-WIKI-WORKFLOW--synthetic",
-      "requirements": [
-        "V3-UNIFIED-WIKI"
-      ],
-      "components": [
-        "wiki"
-      ],
-      "gate": "module",
-      "level": "synthetic",
-      "platform": "host",
-      "runner": {
-        "adapter": "pytest",
-        "paths": [
-          "tests/v1/test_home_organization_state.py",
-          "tests/v1/test_wiki_kit.py",
-          "tests/v1/test_wiki_kit_install.py",
-          "tests/v1/test_wiki_kit_runtime.py",
-          "tests/v1/test_wiki_lock.py",
-          "tests/v1/test_wiki_publish.py",
-          "tests/v1/test_wiki_runner.py",
-          "tests/v1/test_wiki_schema.py",
-          "tests/v1/test_wiki_session_broker.py",
-          "tests/v1/test_wiki_settings.py",
-          "tests/v1/test_wiki_staging.py",
-          "tests/v1/test_wiki_style.py",
-          "tests/v1/test_wiki_tasks.py",
-          "tests/v1/test_wiki_worker.py",
-          "tests/v1/test_wiki_workflow.py",
-          "tests/v1/test_worker_lifecycle.py",
-          "tests/vault_kit/test_kb.py",
-          "tests/vault_kit/test_wiki_display.py",
-          "tests/vault_kit/test_wiki_protocol.py"
-        ]
-      },
-      "fixture": "quality/fixtures.json",
-      "assertions": [
-        "schema upgrades and task state recovery",
-        "Vault locking, staging isolation, and compare-and-swap publication",
-        "managed kit and style journaling, recovery, and drift refusal",
-        "workflow lifecycle, Web state, and Vault kit protocol behavior"
-      ],
-      "timeout": 600,
-      "not_proven": [
-        "frozen macOS application helper execution",
-        "real Codex model, account, and network behavior",
-        "Obsidian visual rendering",
-        "remote release asset availability"
-      ]
-    },
-    {
       "id": "SC-JSON-ENVELOPE--synthetic",
       "requirements": [
         "BUG-20260914-04"
@@ -136,9 +86,6 @@
           "tests/v1/test_confirmation_groups.py",
           "tests/v1/test_group_confirmation_pipeline.py",
           "tests/v1/test_pipeline.py"
-        ],
-        "deselect": [
-          "tests/v1/test_pipeline.py::test_browser_confirmation_keeps_other_drafts_and_does_not_reload"
         ]
       },
       "fixture": "quality/fixtures.json",
@@ -152,32 +99,7 @@
       "not_proven": [
         "native Windows/macOS",
         "real model",
-        "the excluded real-browser group mutation, draft retention, and no-reload flow",
         "visual or remote availability"
-      ]
-    },
-    {
-      "id": "SC-GROUP-ATOMIC--browser-contract",
-      "requirements": [
-        "BUG-20260914-07"
-      ],
-      "components": [
-        "confirmation"
-      ],
-      "gate": "contract",
-      "level": "integration",
-      "platform": "host",
-      "runner": null,
-      "fixture": "quality/fixtures.json",
-      "assertions": [
-        "resolving one confirmation card does not reload the page",
-        "the unresolved card keeps its draft and expanded state",
-        "replacement choices remain within the card width"
-      ],
-      "timeout": 300,
-      "not_proven": [
-        "no permitted dedicated browser runner is registered",
-        "SC-MANUAL-RECONCILER--browser explicitly does not prove an actual mutation"
       ]
     },
     {
@@ -203,9 +125,7 @@
           "tests/v1/test_topics.py",
           "tests/v1/test_xiaohongshu.py",
           "tests/v1/test_youtube.py",
-          "tests/v1/test_media_lifecycle.py",
-          "tests/v1/test_raw.py",
-          "tests/v1/test_data_upgrade_probe.py"
+          "tests/v1/test_media_lifecycle.py"
         ],
         "deselect": [
           "tests/v1/test_submitted_sources.py::test_document_uses_same_durable_worker_and_locator_without_audio[pdf]",
@@ -588,8 +508,7 @@
           "tests/test_release_sizes.py",
           "tests/test_dual_build.py",
           "tests/test_build_job.py",
-          "tests/test_installer_packaging.py",
-          "tests/test_verify_candidate.py"
+          "tests/test_installer_packaging.py"
         ],
         "deselect": [
           "tests/test_build_job.py::test_windows_killed_worker_terminates_owned_child",

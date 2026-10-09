@@ -17,7 +17,6 @@ import logging
 import os
 from pathlib import Path
 import re
-import sqlite3
 import tempfile
 from urllib.parse import urlsplit
 
@@ -37,96 +36,11 @@ CHANNELS = {
 }
 EXTENSIONS = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif',
               'image/bmp': '.bmp', 'image/tiff': '.tiff', 'image/heic': '.heic'}
-ORIGINAL_EXTENSIONS = {'text/html': '.html', 'application/xhtml+xml': '.xhtml',
-    'text/markdown': '.md', 'application/xml': '.xml', 'text/xml': '.xml',
-    'application/octet-stream': '.bin'}
 MIGRATION_ACQUISITION = 'V1 数据库存量导出'
 
 
 class RawError(RuntimeError):
     pass
-
-
-class LegacySourceVeto(RawError):
-    """Fixed internal qualification/schema refusal; never an FS retry result."""
-
-
-def _source_inventory(db):
-    from .database import source_schema_inventory
-    try:
-        _, gaps = source_schema_inventory(db)
-    except (ValueError, sqlite3.DatabaseError):
-        raise LegacySourceVeto('candidate_schema_rebuild_required') from None
-    if gaps:
-        raise LegacySourceVeto('candidate_schema_rebuild_required')
-
-
-def _legacy_source_gate(db, kind, subject_id, *, item_id=None, referenced_raw_ids=()):
-    from .ingestion import IngestionError, require_legacy_sources
-    _source_inventory(db)
-    if type(kind) is not str or kind not in {'material', 'capture'} or type(subject_id) is not int or subject_id <= 0:
-        raise LegacySourceVeto('local_source_qualification_pending')
-    table, column = ('materials', 'material_id') if kind == 'material' else ('captures', 'capture_id')
-    if db.execute('SELECT 1 FROM ' + table + ' WHERE ' + column + '=?', (subject_id,)).fetchone() is None:
-        raise LegacySourceVeto('local_source_qualification_pending')
-    try:
-        require_legacy_sources(db, kind, subject_id, item_id=item_id, referenced_raw_ids=referenced_raw_ids)
-    except IngestionError as error:
-        code = 'candidate_schema_rebuild_required' if error.args == ('candidate_schema_rebuild_required',) else 'local_source_qualification_pending'
-        raise LegacySourceVeto(code) from None
-    except sqlite3.DatabaseError:
-        raise LegacySourceVeto('candidate_schema_rebuild_required') from None
-    except (ValueError, TypeError, KeyError, IndexError, AttributeError):
-        raise LegacySourceVeto('local_source_qualification_pending') from None
-
-
-def _legacy_item_gate(db, item_id):
-    from .ingestion import IngestionError, require_legacy_item_sources
-    _source_inventory(db)
-    try:
-        require_legacy_item_sources(db, item_id)
-    except IngestionError as error:
-        code = 'candidate_schema_rebuild_required' if error.args == ('candidate_schema_rebuild_required',) else 'local_source_qualification_pending'
-        raise LegacySourceVeto(code) from None
-    row = db.execute('SELECT material_id FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
-    if row is None:
-        raise LegacySourceVeto('local_source_qualification_pending')
-    if row[0] is not None:
-        _legacy_source_gate(db, 'material', row[0], item_id=item_id)
-    for capture in db.execute('SELECT capture_id FROM capture_state WHERE item_id=?', (item_id,)):
-        _legacy_source_gate(db, 'capture', capture[0], item_id=item_id)
-
-
-def _reference_ids(adjacency=(), target=None, supersedes=None):
-    if adjacency is None:
-        adjacency = ()
-    if type(adjacency) not in (tuple, list):
-        raise LegacySourceVeto('local_source_qualification_pending')
-    refs = []
-    for link in adjacency:
-        if not isinstance(link, dict) or '编号' not in link:
-            raise LegacySourceVeto('local_source_qualification_pending')
-        refs.append(link['编号'])
-    for ref in (target, supersedes):
-        if ref is not None:
-            refs.append(ref)
-    return tuple(refs)
-
-
-def _document_reference_ids(content, supersedes):
-    # Envelope links are lookup keys, never a qualification or identity claim.
-    try:
-        from .ingestion import envelope_fields
-        fields = envelope_fields(content.encode('utf-8'))
-    except (ValueError, AttributeError, UnicodeError):
-        raise LegacySourceVeto('local_source_qualification_pending') from None
-    if fields.get('取代') != supersedes:
-        raise LegacySourceVeto('local_source_qualification_pending')
-    return _reference_ids(fields.get('邻接', ()), fields.get('附言对象'), supersedes)
-
-
-_IMMUTABLE_RECORD_COLUMNS = ('raw_id', 'subject_kind', 'subject_id', 'identity', 'relative_path',
-    'content', 'content_sha256', 'attachments_json', 'supersedes', 'origin', 'created_at')
 
 
 @dataclass(frozen=True)
@@ -258,18 +172,6 @@ def body(snapshot: str, lineage, raw_id: str, members) -> tuple[list[str], tuple
     for member in members:
         if member.startswith('image-') and member not in placed:
             image(member)
-        elif member not in placed:
-            # Original non-image members use the same immutable attachment
-            # manifest and byte readback. Never render HTML as raw Markdown.
-            media = members[member]
-            if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', member) is None:
-                raise RawError('raw_path_unsafe')
-            if not media['content_available']:
-                missing.append(member)
-                continue
-            suffix = ORIGINAL_EXTENSIONS.get(media['mime_type'],
-                                             EXTENSIONS.get(media['mime_type'], '.bin'))
-            attachments.append(Attachment(member, member + suffix, media['sha256'], media['mime_type']))
     return lines, tuple(attachments), missing
 
 
@@ -508,38 +410,6 @@ def app_version() -> str:
         return '未记录'
 
 
-def _item_ingestion(store):
-    """Reuse canonical proof for old owners without rewriting their contract."""
-    from .ingestion import Ingestion, IngestionError
-
-    class LegacyItemIngestion(Ingestion):
-        def _owner(self, material_id, item_id=None):
-            if item_id is None:
-                return super()._owner(material_id, item_id)
-            item = self.store.item_bundle(item_id)
-            if item is None or item['ingestion_contract'] != 'legacy':
-                return super()._owner(material_id, item_id)
-            with connect(self.path) as db:
-                self._require_writer_sources(db, 'material', material_id, item_id)
-            if (item['material_id'] != material_id or item['confirmation_json'] is not None
-                    or item['dismissed_at'] is not None or item['state'] == 'failed'):
-                raise IngestionError('source_not_ready')
-            return item_id
-
-        def _material_body(self, db, record, vault, adjacency):
-            if record['origin'] != 'migration':
-                return super()._material_body(db, record, vault, adjacency)
-            # Adoption validates the exact reviewed migration projection and
-            # retained bytes, not an app-rendered replacement of the old raw.
-            from .raw_migration import _render, _existing
-            if adjacency:
-                raise IngestionError('capture_adjacency_mismatch')
-            document = _render(db, record['subject_id'], record['raw_id'])
-            _existing(db, vault, record['subject_id'], record['raw_id'], document, record)
-
-    return LegacyItemIngestion(store)
-
-
 class RawLedger:
     def __init__(self, store, *, version: str | None = None):
         self.store = store
@@ -560,93 +430,8 @@ class RawLedger:
                 AND NOT EXISTS (SELECT 1 FROM raw_records n WHERE n.supersedes=r.raw_id)
                 ORDER BY raw_id DESC LIMIT 1''', (subject_kind, subject_id)).fetchone()
 
-    def heads(self, subject_kind, subject_id):
-        """Complete current set for explicit ingestion; legacy current is unchanged."""
-        with connect(self.store.path) as db:
-            return tuple(db.execute('''SELECT * FROM raw_records r WHERE subject_kind=? AND subject_id=?
-                AND NOT EXISTS(SELECT 1 FROM raw_records n WHERE n.supersedes=r.raw_id)
-                ORDER BY raw_id''', (subject_kind, subject_id)))
-
-    def _item_subject(self, db, item_id):
-        _legacy_item_gate(db, item_id)
-        item = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
-        if (item['material_id'] is None or item['confirmation_json'] is not None
-                or item['dismissed_at'] is not None or item['state'] == 'failed'
-                or db.execute('SELECT 1 FROM source_facts WHERE material_id=?',
-                              (item['material_id'],)).fetchone() is None):
-            raise RawError('source_not_ready')
-        captures = db.execute('''SELECT c.capture_id,e.result FROM capture_state s
-            JOIN captures c USING(capture_id)
-            LEFT JOIN capture_identity_events e ON e.capture_id=c.capture_id
-              AND e.event_id=(SELECT MAX(n.event_id) FROM capture_identity_events n
-                              WHERE n.capture_id=c.capture_id)
-            WHERE s.item_id=?''', (item_id,)).fetchall()
-        if len(captures) > 1:
-            raise RawError('raw_terminal_owner_ambiguous')
-        if captures:
-            if captures[0]['result'] in {'my_thought', 'annotation'}:
-                return 'capture', captures[0]['capture_id']
-            if captures[0]['result'] != 'third_party':
-                raise RawError('capture_identity_pending')
-        return 'material', item['material_id']
-
-    def read_item(self, db, item_id, vault):
-        """Fresh source/context/body/attachment proof; no writes or repair."""
-        if vault is None or not Path(vault).is_dir():
-            raise RawError('vault_unavailable')
-        ingestion = _item_ingestion(self.store)
-        kind, subject_id = self._item_subject(db, item_id)
-        ingestion._require_writer_sources(db, kind, subject_id, item_id)
-        state = ingestion._source_state(db, kind, subject_id)
-        record = db.execute('SELECT * FROM raw_records WHERE raw_id=?',
-                            (state['heads'][0]['raw_id'],)).fetchone()
-        binding = ingestion._binding(db, record, item_id)
-        ingestion._validate_context(record, Path(vault), item_id)
-        # This result is an observation, never a caller-supplied completion token.
-        return ingestion._readback(db, record, Path(vault), binding)
-
-    def complete_item(self, item_id, vault=None, *, expected_revision=None):
-        """Write/read back under the Vault lock, then atomically finish this owner."""
-        from .database import RAW_OWNER_COLUMNS
-        from .wiki_lock import VaultWriteLock
-        if (type(item_id) is not int or item_id <= 0 or (expected_revision is not None
-                and (type(expected_revision) is not int or expected_revision < 0))):
-            raise RawError('raw_terminal_input_invalid')
-        vault = vault or self.vault()
-        if vault is None or not Path(vault).is_dir():
-            raise RawError('vault_unavailable')
-        ingestion = _item_ingestion(self.store)
-        ingestion.initialize()
-        with VaultWriteLock.acquire(vault) as lock:
-            with connect(self.store.path) as db:
-                kind, subject_id = self._item_subject(db, item_id)
-                item = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
-                owner = {k: item[k] for k in RAW_OWNER_COLUMNS}
-                if (owner['state'] not in {'working', 'succeeded', 'raw_saved'}
-                        or (expected_revision is not None and owner['review_revision'] != expected_revision)):
-                    raise RawError('raw_terminal_stale')
-            if owner['state'] != 'raw_saved':
-                if kind == 'capture':
-                    ingestion._capture(subject_id, lock.vault, lock)
-                else:
-                    ingestion._material(subject_id, lock.vault, item_id=item_id, lock=lock)
-            with connect(self.store.path) as db:
-                db.execute('BEGIN IMMEDIATE')
-                current = db.execute('SELECT * FROM distill_items WHERE item_id=?', (item_id,)).fetchone()
-                if current is None or any(current[k] != owner[k] for k in RAW_OWNER_COLUMNS):
-                    raise RawError('raw_terminal_stale')
-                if self._item_subject(db, item_id) != (kind, subject_id):
-                    raise RawError('source_binding_changed')
-                state = ingestion._source_state(db, kind, subject_id)
-                record = db.execute('SELECT * FROM raw_records WHERE raw_id=?',
-                                    (state['heads'][0]['raw_id'],)).fetchone()
-                binding = ingestion._binding(db, record, item_id)
-                receipt = ingestion._insert_proven(db, record, item_id, 'raw_verified', binding, lock)
-                self.store._finish_raw_item(db, item_id, owner)
-            return receipt
-
     def ensure_material(self, material_id: int, *, adjacency=None, reserved=None, collected_ms=None,
-                        supersedes=None, check_source=None):
+                        supersedes=None):
         """Assign the material's raw once; a repeated delivery reuses it.
 
         A third-party quick note keeps the id reserved when it was captured and
@@ -654,10 +439,6 @@ class RawLedger:
         vault = self.vault()
         with connect(self.store.path) as db:
             db.execute('BEGIN IMMEDIATE')
-            _legacy_source_gate(db, 'material', material_id,
-                                referenced_raw_ids=_reference_ids(adjacency, supersedes=supersedes))
-            if check_source is not None:
-                check_source(db)  # Explicit ingestion only; legacy has no hook.
             existing = db.execute("SELECT raw_id FROM raw_records WHERE subject_kind='material' AND subject_id=? LIMIT 1",
                                   (material_id,)).fetchone()
             if existing is None:
@@ -677,7 +458,7 @@ class RawLedger:
                 insert(db, raw_id, 'material', material_id, '第三方', document, origin='app', supersedes=supersedes)
         return self.current('material', material_id)
 
-    def supersede(self, old_raw_id: str, document_for, *, identity: str, referenced_raw_ids=()):
+    def supersede(self, old_raw_id: str, document_for, *, identity: str):
         """Write a correction as a new file; the old file stays as it is."""
         vault = self.vault()
         with connect(self.store.path) as db:
@@ -685,66 +466,44 @@ class RawLedger:
             old = db.execute('SELECT * FROM raw_records WHERE raw_id=?', (old_raw_id,)).fetchone()
             if old is None:
                 raise RawError('raw_record_missing')
-            _legacy_source_gate(db, old['subject_kind'], old['subject_id'],
-                referenced_raw_ids=(old_raw_id, *_document_reference_ids(old['content'], old['supersedes'])))
-            _legacy_source_gate(db, old['subject_kind'], old['subject_id'], referenced_raw_ids=referenced_raw_ids)
             if db.execute('SELECT 1 FROM raw_records WHERE supersedes=?', (old_raw_id,)).fetchone():
                 raise RawError('raw_already_superseded')
             now = datetime.now().astimezone()
             raw_id = allocate(db, now.strftime('%Y%m%d'), vault if vault and vault.is_dir() else None)
             document = document_for(raw_id, now)
-            # A late-disclosed reference can only be vetoed after the callback.
-            # DB rollback restores the counter; it cannot undo callback FS work.
-            _legacy_source_gate(db, old['subject_kind'], old['subject_id'],
-                referenced_raw_ids=_document_reference_ids(document.content, old_raw_id))
             insert(db, raw_id, old['subject_kind'], old['subject_id'], identity, document,
                    origin='app', supersedes=old_raw_id)
         return self.record(raw_id)
 
     def write(self, record, vault: Path | None = None) -> str:
-        """Use the authoritative row; hold the DB writer lock over placement.
-
-        Files already placed cannot be rolled back if later placement/commit
-        fails. Exact-byte retries remain the original recovery mechanism.
-        """
+        """Place one record's attachments, then its file. Failures stay retryable."""
         vault = vault or self.vault()
-        with connect(self.store.path) as db:
-            db.execute('BEGIN IMMEDIATE')
-            try:
-                current = db.execute('SELECT * FROM raw_records WHERE raw_id=?', (record['raw_id'],)).fetchone()
-                if current is None or any(record[k] != current[k] for k in _IMMUTABLE_RECORD_COLUMNS):
-                    raise RawError('raw_record_changed')
-            except (KeyError, IndexError, TypeError):
-                raise RawError('raw_record_changed') from None
-            record = current
-            _legacy_source_gate(db, record['subject_kind'], record['subject_id'],
-                referenced_raw_ids=_document_reference_ids(record['content'], record['supersedes']))
-            state = 'unavailable'
-            try:
-                if vault is None or not vault.is_dir():
-                    raise RawError('vault_unavailable')
-                vault = vault.resolve(strict=True)
-                if _duplicate_id(vault, record['raw_id'], record['relative_path']):
-                    raise RawError('raw_id_collision')
-                for attachment in json.loads(record['attachments_json']):
-                    content = _attachment_bytes(self.store, record, attachment, db=db)
-                    if place(vault, f"附件/raw/{record['raw_id']}/{attachment['filename']}", content) == 'conflict':
-                        raise RawError('raw_attachment_conflict')
-                state = place(vault, record['relative_path'], record['content'].encode('utf-8'))
-                if state == 'conflict':
-                    raise RawError('raw_target_conflict')
-            except (RawError, OSError) as error:
-                codes = {'vault_unavailable', 'raw_id_collision', 'raw_attachment_conflict',
-                         'raw_target_conflict', 'raw_attachment_unavailable', 'raw_path_unsafe'}
-                code = error.args[0] if isinstance(error, RawError) and error.args and isinstance(error.args[0], str) and error.args[0] in codes else 'raw_write_failed'
+        state = 'unavailable'
+        try:
+            if vault is None or not vault.is_dir():
+                raise RawError('vault_unavailable')
+            vault = vault.resolve(strict=True)
+            if _duplicate_id(vault, record['raw_id'], record['relative_path']):
+                raise RawError('raw_id_collision')
+            for attachment in json.loads(record['attachments_json']):
+                content = _attachment_bytes(self.store, record, attachment)
+                if place(vault, f"附件/raw/{record['raw_id']}/{attachment['filename']}", content) == 'conflict':
+                    raise RawError('raw_attachment_conflict')
+            state = place(vault, record['relative_path'], record['content'].encode('utf-8'))
+            if state == 'conflict':
+                raise RawError('raw_target_conflict')
+        except (RawError, OSError) as error:
+            code = str(error) if isinstance(error, RawError) else 'raw_write_failed'
+            with connect(self.store.path) as db:
                 db.execute('UPDATE raw_records SET attempts=attempts+1, last_error=? WHERE raw_id=?',
                            (code, record['raw_id']))
-                logger.warning('raw %s not written (%s)', record['raw_id'], code)
-                return code
-            db.execute("""UPDATE raw_records SET written_at=?, written_vault=?, attempts=attempts+1, last_error=NULL
-                          WHERE raw_id=? AND written_at IS NULL""",
+            logger.warning('raw %s not written (%s)', record['raw_id'], code)
+            return code
+        with connect(self.store.path) as db:
+            db.execute('''UPDATE raw_records SET written_at=?, written_vault=?, attempts=attempts+1, last_error=NULL
+                          WHERE raw_id=? AND written_at IS NULL''',
                        (datetime.now(UTC).isoformat(), str(vault), record['raw_id']))
-            return state
+        return state
 
     def write_pending(self) -> dict:
         """Backfill after the vault comes back; each record keeps its exact bytes."""
@@ -752,28 +511,17 @@ class RawLedger:
         results = {}
         if vault is None or not vault.is_dir():
             return results
-        try:
-            self.sync(vault)
-        except LegacySourceVeto as error:
-            if error.args != ('local_source_qualification_pending',):
-                raise
+        self.sync(vault)
         with connect(self.store.path) as db:
             pending = db.execute('SELECT * FROM raw_records WHERE written_at IS NULL ORDER BY raw_id').fetchall()
         for record in pending:
-            try:
-                results[record['raw_id']] = self.write(record, vault)
-            except LegacySourceVeto as error:
-                if error.args != ('local_source_qualification_pending',):
-                    raise
-                results[record['raw_id']] = 'local_source_qualification_pending'
+            results[record['raw_id']] = self.write(record, vault)
         return results
 
     def sync(self, vault: Path):
         """Index app-owned raw files already in the vault (e.g. a migration run on V1.3)."""
         key = 'raw_synced_vault'
         resolved = str(vault.resolve())
-        with connect(self.store.path) as db:
-            _source_inventory(db)
         if self.store.setting(key) == resolved:
             return 0
         imported = sync_from_vault(self.store.path, vault)
@@ -788,21 +536,18 @@ def _duplicate_id(vault: Path, raw_id: str, relative: str) -> bool:
     return any(path.relative_to(vault).as_posix() != relative for path in root.rglob(raw_id + '.md'))
 
 
-def _attachment_bytes(store, record, attachment, *, db=None) -> bytes:
+def _attachment_bytes(store, record, attachment) -> bytes:
     if record['subject_kind'] != 'material':
         raise RawError('raw_attachment_unavailable')
-    if db is None:
-        with connect(store.path) as connection:
-            return _attachment_bytes(store, record, attachment, db=connection)
-    row = db.execute('SELECT content, sha256 FROM source_media WHERE material_id=? AND member_id=?',
-                     (record['subject_id'], attachment['member_id'])).fetchone()
+    with connect(store.path) as db:
+        row = db.execute('SELECT content, sha256 FROM source_media WHERE material_id=? AND member_id=?',
+                         (record['subject_id'], attachment['member_id'])).fetchone()
     if row is None or not row['content'] or hashlib.sha256(row['content']).hexdigest() != attachment['sha256']:
         raise RawError('raw_attachment_unavailable')
     return bytes(row['content'])
 
 
 def material_row(db, material_id):
-    _legacy_source_gate(db, 'material', material_id)
     row = db.execute('''SELECT m.material_id, m.source_kind, m.source_key, m.submitted_url, m.canonical_url,
             m.metadata_json, m.created_at, sf.source_fact_id, sf.snapshot, sf.lineage_json, sf.uncertainties_json,
             kr.knowledge_result_id, kr.published_path
@@ -825,10 +570,6 @@ def _asr_label(db):
 
 def insert(db, raw_id, subject_kind, subject_id, identity, document: RawDocument, *, origin,
            supersedes=None, written_at=None, written_vault=None):
-    if not db.in_transaction:
-        db.execute('BEGIN IMMEDIATE')
-    _legacy_source_gate(db, subject_kind, subject_id,
-                        referenced_raw_ids=_document_reference_ids(document.content, supersedes))
     db.execute('''INSERT INTO raw_records (raw_id, subject_kind, subject_id, identity, relative_path, content,
             content_sha256, attachments_json, supersedes, origin, created_at, written_at, written_vault)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
@@ -859,26 +600,14 @@ def sync_from_vault(database: Path, vault: Path) -> int:
     imported = 0
     with connect(database) as db:
         db.execute('BEGIN IMMEDIATE')
-        _source_inventory(db)
         known = {row['raw_id'] for row in db.execute('SELECT raw_id FROM raw_records')}
         for path in sorted(root.rglob('R-*.md')):
-            if not FILE_RE.fullmatch(path.name) or _unsafe(path, vault):
-                continue
-            if path.stem in known:
-                row = db.execute('SELECT * FROM raw_records WHERE raw_id=?', (path.stem,)).fetchone()
-                _legacy_source_gate(db, row['subject_kind'], row['subject_id'],
-                    referenced_raw_ids=_document_reference_ids(row['content'], row['supersedes']))
-                if path.relative_to(vault).as_posix() != row['relative_path']:
-                    raise RawError('raw_id_collision')
-                if path.read_bytes() != row['content'].encode('utf-8'):
-                    raise RawError('raw_target_conflict')
+            if not FILE_RE.fullmatch(path.name) or path.stem in known or _unsafe(path, vault):
                 continue
             text = path.read_text(encoding='utf-8')
             fields = parse_envelope(text)
             subject = _subject(fields)
             if fields.get('编号') != path.stem or subject is None or fields.get('身份') not in DIRECTORIES:
-                if '应用记录' in fields:
-                    raise LegacySourceVeto('local_source_qualification_pending')
                 continue  # Agent-written or foreign files stay outside the app's index.
             insert(db, path.stem, subject[0], subject[1], fields['身份'],
                    RawDocument(path.relative_to(vault).as_posix(), text), origin='vault',

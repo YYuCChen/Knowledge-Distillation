@@ -7,7 +7,6 @@
   <div class="topic-nav-space"></div>
   <header class="topic-heading"><h1>{{ topic.name }}</h1><p class="detail-scope">{{ topic.scope }}</p>
     <div class="topic-detail-note"><span>{{ points|length }} 条正式观点</span><time>{{ topic.date }}</time></div></header>
-  <p class="legacy-notice"><strong>历史内容只读保留</strong><span>新的整理结果进入 Obsidian 知识库；这里仍可搜索和阅读已有主题与新知。</span></p>
   <div class="topic-scroll" data-scroll-area>
     {% for point in points %}{% set point_number = loop.index %}{% include "topic_point.html" %}{% endfor %}
   </div>

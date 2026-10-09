@@ -1,10 +1,8 @@
 """TypeSafe Jev client and the quick-note identity judge on it (synthetic transport only)."""
 import httpx
-import hashlib
 import pytest
 
 from knowledge_distiller.v1.captures import JevIdentityJudge
-from knowledge_distiller.v1.capture_identity_context import CaptureSource, TargetCandidate
 from knowledge_distiller.v1.jev import ENDPOINT, JevClient, JevError
 
 
@@ -37,40 +35,17 @@ def client(*responses, key='test-key'):
     return JevClient(lambda: key, post=post, sleep=lambda seconds: calls.append(('sleep', seconds))), calls
 
 
-def identity_source(text):
-    data = text.encode('utf-8')
-    digest = hashlib.sha256(data).hexdigest()
-    return CaptureSource('synthetic-app', 'synthetic-message', 'capture-1', digest, data, digest)
-
-
-def identity_answer(author, relation, author_probability=.95, relation_probability=.95, *, target=None):
-    answers = {}
-    for key, choice, probability, options in (
-        ('author_identity', author, author_probability, ('self', 'third_party', 'mixed', 'unknown')),
-        ('relation_target', relation, relation_probability,
-         ('independent', 'unknown') + ((target.candidate_id,) if target else ())),
-    ):
-        answers[key] = {'type': 'choice', 'choice': choice,
-            'probabilities': {option: probability if option == choice else
-                             (1 - probability) / (len(options) - 1) for option in options},
-            'confidence': .99}
-    return Response(200, {'model': 'jev-1.13.0', 'answers': answers})
-
-
 def test_request_follows_the_documented_shape():
-    jev, calls = client(identity_answer('self', 'independent'))
-    source = identity_source('我觉得周会可以隔周开')
-    decided = JevIdentityJudge(jev).judge(source)
+    jev, calls = client(answer('my_thought', {'my_thought': 0.95, 'third_party': 0.03, 'unknown': 0.02}))
+    decided = JevIdentityJudge(jev).judge('我觉得周会可以隔周开', recent_delivery=None)
     url, kwargs = calls[0]
     assert url == ENDPOINT == 'https://api.typesafe.ai/v1/systemone'
     assert kwargs['headers']['Authorization'] == 'Bearer test-key'
     body = kwargs['json']
-    assert body['model'] == 'jev-latest' and body['state']['message'] == source.text()
-    assert body['state']['source']['sha256'] == source.sha256 and body['state']['targets'] == []
-    assert set(body['questions']) == {'author_identity', 'relation_target'}
-    question = body['questions']['author_identity']
-    assert question['type'] == 'choice' and set(question['criteria']) == {'self', 'third_party', 'mixed', 'unknown'}
-    assert set(body['questions']['relation_target']['criteria']) == {'independent', 'unknown'}
+    assert body['model'] == 'jev-latest' and body['state'] == {'message': '我觉得周会可以隔周开',
+                                                               'just_after_a_delivery': False}
+    question = body['questions']['answer']
+    assert question['type'] == 'choice' and set(question['criteria']) == {'my_thought', 'third_party', 'unknown'}
     assert decided == ('my_thought', 'Jev·jev-1.13.0', 0.95, None)
 
 
@@ -82,26 +57,20 @@ def test_request_follows_the_documented_shape():
     ('unknown', 0.99, 'om_link', None),               # Undecided never becomes anyone's words.
 ])
 def test_thresholds_use_the_calibrated_probability(choice, probability, target, expected):
-    candidate = (TargetCandidate('synthetic-app', target, 'part-1', 'target-v1',
-                                 'synthetic:receipt', item_id=1) if target else None)
-    author = {'my_thought': 'self', 'annotation': 'self', 'third_party': 'third_party'}.get(choice, 'unknown')
-    relation = candidate.candidate_id if choice == 'annotation' else 'independent'
-    jev, _ = client(identity_answer(author, relation, probability,
-                                    probability if choice == 'annotation' else .95, target=candidate))
-    decided = JevIdentityJudge(jev).judge(identity_source('这篇重点看后半段'),
-                                         targets=(candidate,) if candidate else ())
+    rest = round(1 - probability, 4)
+    jev, _ = client(answer(choice, {choice: probability, 'unknown' if choice != 'unknown' else 'my_thought': rest},
+                           confidence=0.99))
+    decided = JevIdentityJudge(jev).judge('这篇重点看后半段', recent_delivery=target)
     assert (decided[0] if decided else None) == expected
     if expected == 'annotation':
         assert decided[3] == 'om_link'
 
 
 def test_annotation_is_offered_only_right_after_a_delivery():
-    unoffered = TargetCandidate('synthetic-app', 'other-message', 'part-1', 'target-v1',
-                               'synthetic:receipt', item_id=1)
-    jev, calls = client(identity_answer('self', unoffered.candidate_id, target=unoffered))
-    with pytest.raises(JevError, match='decision_response_invalid'):  # Not a stable offered target.
-        JevIdentityJudge(jev).judge(identity_source('重点看后半段'))
-    assert set(calls[0][1]['json']['questions']['relation_target']['criteria']) == {'independent', 'unknown'}
+    jev, calls = client(answer('annotation', {'annotation': 0.9, 'unknown': 0.1}))
+    with pytest.raises(JevError, match='jev_response_invalid'):  # Not an offered option.
+        JevIdentityJudge(jev).judge('重点看后半段', recent_delivery=None)
+    assert 'annotation' not in calls[0][1]['json']['questions']['answer']['criteria']
 
 
 @pytest.mark.parametrize('status,code', [(401, 'jev_unauthorized'), (403, 'jev_unauthorized'),
@@ -270,7 +239,7 @@ def test_a_rejected_key_at_run_time_marks_jev_unavailable(settings):
     assert service.jev_state() == 'configured'
 
 
-def test_settings_page_has_approved_decision_actions_on_one_line(settings, tmp_path):
+def test_settings_page_has_a_jev_row_with_key_and_button_on_one_line(settings):
     from pathlib import Path
     import threading
     from playwright.sync_api import sync_playwright
@@ -279,7 +248,7 @@ def test_settings_page_has_approved_decision_actions_on_one_line(settings, tmp_p
     service, _ = settings
     app = create_app(service.store, object(), service)
     page_html = app.test_client().get('/settings?open=models').get_data(as_text=True)
-    assert '决策模型' in page_html and 'Jev · 云端' in page_html and 'jev-latest' in page_html and '未配置' in page_html
+    assert 'Jev' in page_html and 'TypeSafe' in page_html and 'jev-latest' in page_html and '未配置' in page_html
     assert '随手记云端判断' not in page_html  # The old toggle is gone (user decision 2026-09-30).
     response = app.test_client().post('/settings/jev', data={'api_key': 'good-key'})
     assert response.status_code == 302 and 'jev_saved' in response.headers['Location']
@@ -294,21 +263,12 @@ def test_settings_page_has_approved_decision_actions_on_one_line(settings, tmp_p
             page = browser.new_page(viewport={'width': 1280, 'height': 900})
             page.goto(f'http://127.0.0.1:{server.server_port}/settings?open=models')
             row = page.locator('.jev-setting > summary')
-            assert '已配置' in row.inner_text() and '更换模型' in row.inner_text()
+            assert '已配置' in row.inner_text() and '更换密钥' in row.inner_text()
             row.click()
-            for width in (1280, 360):
-                page.set_viewport_size({'width': width, 'height': 900})
-                check = page.locator('#decision-check').bounding_box()
-                enable = page.locator('#decision-enable').bounding_box()
-                field = page.locator('#decision-key').bounding_box()
-                assert abs((check['y'] + check['height'] / 2) - (enable['y'] + enable['height'] / 2)) < 1
-                assert abs(enable['x'] + enable['width'] - field['x'] - field['width']) < 1
-                assert page.locator('[name="timeout_seconds"], [name="token_budget"]').count() == 0
-                assert page.locator('#decision-enable').is_disabled()
-                page.locator('.jev-setting').screenshot(path=str(tmp_path / f'decision-{width}.png'))
-            page.locator('#decision-provider').select_option('clef')
-            assert not page.locator('#decision-key').get_attribute('required')
-            assert page.locator('#decision-endpoint').input_value() == 'http://127.0.0.1:18765/v1/systemone'
+            field = page.locator('.jev-form input[name="api_key"]').bounding_box()
+            button = page.get_by_role('button', name='保存并启用').last.bounding_box()
+            assert button['x'] > field['x'] + field['width'] - 1  # Same line, to the right of the key.
+            assert abs((button['y'] + button['height'] / 2) - (field['y'] + field['height'] / 2)) < 16
             browser.close()
     finally:
         server.shutdown()

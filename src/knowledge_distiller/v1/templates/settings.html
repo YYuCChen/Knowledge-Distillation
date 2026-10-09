@@ -28,11 +28,8 @@
 
     <header class="settings-heading">
       <h1>设置</h1>
-      {% set page_message = phase4_message|default(None) or message %}
-      {% set phase4_error = phase4_message_error|default(None) %}
-      {% set page_message_error = message_error if phase4_error is none else phase4_error %}
-      <p class="settings-message {% if page_message_error %}is-error{% endif %}">
-        {{ page_message or "连接来源、模型与知识保存位置。" }}
+      <p class="settings-message {% if message_error %}is-error{% endif %}">
+        {{ message or "连接来源、模型与知识保存位置。" }}
       </p>
       {% if settings.cleanup_residue_count %}<p class="settings-message is-error">{{ settings.cleanup_residue_count }} 条临时素材尚未清理成功，程序会重试；已有来源和知识不受影响。</p>{% endif %}
     </header>
@@ -186,36 +183,20 @@
         <div id="doubao-credentials">{% include 'doubao_onboarding.html' %}</div>
       </details>
 
-      {% set jev = {'state': decision.state} %}
+      {% set jev = settings.jev|default({'state': 'unconfigured'}) %}
       <details class="jev-setting" {% if open_group == 'models' and request.args.get('message', '').startswith('jev_') %}open{% endif %}>
         <summary class="setting-row model-row">
           <span class="state-dot {{ jev.state }}" aria-hidden="true"></span>
-          <strong>决策模型</strong>
-          <span>{{ decision.active_provider_label }}</span>
-          <span class="model-name">{{ decision.active_model }}</span>
+          <strong>Jev</strong>
+          <span>TypeSafe</span>
+          <span class="model-name">jev-latest</span>
           <span class="status-text">{{ {'configured': '已配置', 'unavailable': '不可用', 'unconfigured': '未配置'}[jev.state] }}</span>
-          <span class="row-actions"><span class="secondary-button">{{ '配置模型' if jev.state == 'unconfigured' else '更换模型' }}</span></span>
+          <span class="row-actions"><span class="secondary-button">{{ '配置模型' if jev.state == 'unconfigured' else '更换密钥' }}</span></span>
         </summary>
-        <form id="decision-form" class="model-form" data-cloud-key-saved="{{ decision.cloud_key_saved|tojson }}" action="{{ url_for('settings.check_decision') }}" method="post">
+        <form class="model-form jev-form" action="{{ url_for('settings.save_jev') }}" method="post">
           <input type="hidden" name="return_to" value="{{ return_to }}">
-          <input type="hidden" name="candidate_id" value="{{ decision.candidate_id or '' }}">
-          <input type="hidden" name="candidate_revision" value="{{ decision.candidate_revision }}">
-          <input type="hidden" name="form_nonce" value="{{ decision.form_nonce }}">
-          <label class="model-provider">模型方案
-            <select name="provider" id="decision-provider">
-              <option value="jev" {% if decision.provider == 'jev' %}selected{% endif %}>Jev · 云端</option>
-              <option value="clef" {% if decision.provider == 'clef' %}selected{% endif %}>Clef · 本地</option>
-            </select>
-          </label>
-          <label>模型 ID<input name="model" id="decision-model" value="{{ decision.model }}" required autocomplete="off"></label>
-          <label class="model-base">接口地址<input type="url" name="endpoint" id="decision-endpoint" value="{{ decision.endpoint }}" {% if decision.provider == 'jev' %}readonly{% endif %} required></label>
-          <span class="model-key-status" id="decision-auth-status">{{ ('API Key 已保存；留空沿用，填写新密钥后须检查并明确启用。' if decision.cloud_key_saved else 'API Key 未保存；请填写后检查。') if decision.provider == 'jev' else '本地 API Key 可留空；不会清除云端密钥。' }}</span>
-          <label class="model-secret">API Key<input type="password" name="api_key" id="decision-key" autocomplete="new-password" placeholder="{{ '不会回显已保存的密钥；留空沿用' if decision.provider == 'jev' and decision.cloud_key_saved else '填写 API Key' if decision.provider == 'jev' else '本地服务无需认证时留空' }}" {% if decision.provider == 'jev' and not decision.cloud_key_saved %}required{% endif %}></label>
-          <span class="model-key-status" id="decision-check-status" role="status">{{ decision.check_message }}</span>
-          <div class="decision-actions">
-          <button class="outline-button" type="submit" id="decision-check">检查配置</button>
-          <button class="secondary-button" type="submit" id="decision-enable" formaction="{{ url_for('settings.enable_decision') }}" {% if not decision.enable_allowed %}disabled{% endif %}>启用此方案</button>
-          </div>
+          <label class="model-secret">API Key<input type="password" name="api_key" autocomplete="new-password" placeholder="不会回显已保存的密钥" required></label>
+          <button class="outline-button">保存并启用</button>
         </form>
       </details>
     </details>
@@ -272,27 +253,6 @@
         </span>
       </div>
       {% endif %}
-      <section class="phase4-control" aria-labelledby="kit-label">
-        <div class="setting-row vault-row">
-          <span class="state-dot {{ wiki_kit_status.dot }}" aria-hidden="true"></span>
-          <strong id="kit-label">知识库工具</strong>
-          <span class="vault-path" role="status">{{ wiki_kit_status.text }}</span>
-          <span class="row-actions">
-            {% if wiki_kit_status.action %}
-            <form action="{{ url_for('mutate_wiki_kit') }}" method="post">
-              <input type="hidden" name="action" value="{{ wiki_kit_status.action }}">
-              <button class="secondary-button">{{ wiki_kit_status.action_label }}</button>
-            </form>
-            {% else %}
-            <span class="phase4-stopped">{{ wiki_kit_status.stopped_label }}</span>
-            {% endif %}
-          </span>
-        </div>
-        <div class="phase4-detail">
-          <p>安装知识库运行所需的工具文件，不会改写知识页面、原始素材或你自己的技能。</p>
-          <p>如果目标位置已有无法确认身份的同名文件，安装会停止并保留现有内容。</p>
-        </div>
-      </section>
       <div class="reading-style-configuration">
         <form class="setting-row vault-row" action="{{ url_for('settings.reading_style') }}" method="post">
           <input type="hidden" name="action" value="{{ 'disable' if reading_style_state == 'enabled' else 'enable' }}">
@@ -302,27 +262,6 @@
           <span class="row-actions"><button class="secondary-button">{{ '关闭此排版' if reading_style_state == 'enabled' else '更新此排版' if reading_style_state == 'update_available' else '启用此排版' }}</button></span>
         </form>
       </div>
-      <section class="phase4-control" aria-labelledby="wiki-style-label">
-        <div class="setting-row vault-row">
-          <span class="state-dot {{ wiki_style_status.dot }}" aria-hidden="true"></span>
-          <strong id="wiki-style-label">知识库页面样式</strong>
-          <span class="vault-path" role="status">{{ wiki_style_status.text }}</span>
-          <span class="row-actions">
-            {% if wiki_style_status.action %}
-            <form action="{{ url_for('mutate_wiki_style') }}" method="post">
-              <input type="hidden" name="action" value="{{ wiki_style_status.action }}">
-              <button class="secondary-button">{{ wiki_style_status.action_label }}</button>
-            </form>
-            {% else %}
-            <span class="phase4-stopped">{{ wiki_style_status.stopped_label }}</span>
-            {% endif %}
-          </span>
-        </div>
-        <div class="phase4-detail">
-          <p>安装只放置知识库页面样式，不会自动启用。安装完成后，再由你明确启用。</p>
-          <p>样式可以随时关闭；关闭只改变显示，不改变正文、证据、链接或编号。</p>
-        </div>
-      </section>
       <details class="feishu-configuration" {% if open_group == 'paths' and (request.args.get('message', '').startswith('feishu_') or request.args.get('setup') == 'feishu') %}open{% endif %}>
         <summary class="setting-row vault-row">
           <span class="state-dot {{ 'configured' if feishu and feishu.state == 'connected' else 'unconfigured' }}" aria-hidden="true"></span>

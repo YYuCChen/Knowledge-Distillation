@@ -72,9 +72,6 @@ def as_v9(path):
     db=sqlite3.connect(path);db.execute('PRAGMA foreign_keys=OFF')
     try:
         db.execute('BEGIN IMMEDIATE')
-        # V9 predates the schema-22/23 wiki workflow domain entirely.
-        for table in ('wiki_observations','wiki_task_raw','wiki_task_batches','wiki_tasks'):
-            db.execute('DROP TABLE '+table)
         for table in ('media_lifecycle','feishu_parts','feishu_receipts','feishu_binding','collection_previews','collection_confirmations','collection_events','collection_results','collection_members','collection_operations'):
             db.execute('DROP TABLE '+table)
         db.execute('DROP TRIGGER source_media_no_update')

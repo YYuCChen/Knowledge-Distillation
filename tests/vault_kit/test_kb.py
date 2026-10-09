@@ -2,36 +2,26 @@
 import datetime as dt
 import json
 import runpy
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-KIT = Path(__file__).resolve().parents[2] / 'vault-kit'
+KB = Path(__file__).resolve().parents[2] / 'vault-kit' / 'tools' / 'kb.py'
 
 
 @pytest.fixture
 def vault(tmp_path):
     root = tmp_path / 'vault'
-    root.mkdir()
-    manifest = json.loads((KIT / 'kit-manifest.json').read_text(encoding='utf-8'))
-    for item in manifest['files']:
-        target = root / item['install_path']
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(KIT / item['source_path'], target)
+    (root / 'tools').mkdir(parents=True)
+    (root / 'tools' / 'kb.py').write_bytes(KB.read_bytes())
     run(root, 'init')
     return root
 
 
 def run(root, *args):
-    command = [sys.executable, str(root / 'tools' / 'kb.py'), *args]
-    read_only = 'raw-id' in args or 'protocol-scan' in args or '--dry-run' in args
-    if not read_only:
-        command = [sys.executable, str(root / 'tools' / 'wiki_session.py'),
-                   '--root', str(root), '--', *command]
-    result = subprocess.run(command,
+    result = subprocess.run([sys.executable, str(root / 'tools' / 'kb.py'), *args],
                             capture_output=True, text=True, cwd=root)
     return result
 

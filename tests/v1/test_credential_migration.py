@@ -6,18 +6,10 @@ from knowledge_distiller.v1.credential_migration import accounts,migrate
 from knowledge_distiller.v1.keychain import KeychainError
 
 
-def _drop_schema_22_wiki_tables(connection: sqlite3.Connection) -> None:
-    """Remove V3 tables when a latest-schema fixture is rewound to schema 16."""
-    for table in ("wiki_observations", "wiki_task_raw", "wiki_task_batches", "wiki_tasks"):
-        connection.execute(f"DROP TABLE {table}")
-
-
 def test_dry_run_never_reads_keychain_or_changes_old_database(tmp_path):
     store=Store(tmp_path/'old.sqlite3');store.initialize()
     store.set_setting('llm_secret_account','saved-model')
-    with sqlite3.connect(store.path) as db:
-        _drop_schema_22_wiki_tables(db)
-        db.execute('PRAGMA user_version=16')
+    with sqlite3.connect(store.path) as db:db.execute('PRAGMA user_version=16')
     before=store.path.read_bytes()
     result=migrate(store.path,tmp_path/'credentials',legacy_factory=lambda _:pytest.fail('Keychain read'))
     assert result=={'planned':1,'imported':0,'already_local':0,'failed':0,'executed':False}

@@ -44,18 +44,12 @@ def qualify_epub(content: bytes) -> None:
         raise SourceReadError("epub_protection_unknown") from error
 
 
-def parse_epub(content: bytes, label: str, source_key: str, *, converter=None, ocr=None, _collector=None) -> ParsedSource:
+def parse_epub(content: bytes, label: str, source_key: str, *, converter=None, ocr=None) -> ParsedSource:
     if hashlib.sha256(content).hexdigest() != source_key:
         raise SourceReadError("file_snapshot_mismatch")
     qualify_epub(content)
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
-            if _collector is not None:
-                _collector.inventory = [{'name': entry.filename, 'crc32': entry.CRC,
-                    'compression': entry.compress_type, 'compressed_size': entry.compress_size,
-                    'declared_size': entry.file_size, 'flag_bits': entry.flag_bits,
-                    'actual_size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
-                    for entry in archive.infolist() for raw in [archive.read(entry.filename)]]
             container = _xml(archive.read("META-INF/container.xml"))
             package_path = next(node.get("full-path") for node in container.iter() if _local(node.tag) == "rootfile")
             package = _xml(archive.read(package_path))
@@ -115,7 +109,7 @@ def parse_epub(content: bytes, label: str, source_key: str, *, converter=None, o
                     target = _resource(resource, parts.path) if parts.path else resource
                     if parts.scheme or parts.netloc or not parts.fragment or target not in document_ids or unquote(parts.fragment) not in document_ids[target]:
                         raise SourceReadError("epub_footnote_missing")
-            from .document_source import convert_document, compose_document, page_member_id
+            from .document_source import convert_document, compose_document
             from .ocr import default_ocr_runner
             ocr = ocr or default_ocr_runner()
             pieces, spans, media, images, uncertainties, chapters = [], [], [], [], [], []
@@ -124,46 +118,15 @@ def parse_epub(content: bytes, label: str, source_key: str, *, converter=None, o
                 body = document.find(f"{{{XHTML}}}body")
                 if body is None:
                     raise SourceReadError("epub_chapter_invalid")
-                chapter_content = _chapter_container(archive, package_path, package, ordinal, resource, document)
-                converted = convert_document(chapter_content, 'epub', converter)
-                context = {'spine': ordinal, 'resource': resource, 'linear': linear}
-                if _collector is not None:
-                    _collector.begin(chapter_content, 'epub', converted, context)
-                    _collector.current['declared_spine'] = dict(references[ordinal-1].attrib)
-                    _collector.current['declared_resource'] = dict(manifest[references[ordinal-1].get('idref')])
-                composed = compose_document(converted, context=context,
-                                            media_offset=len(media), ocr=ocr, _collector=_collector)
+                converted = convert_document(_chapter_container(archive, package_path, package, ordinal, resource, document), 'epub', converter)
+                composed = compose_document(converted, context={'spine': ordinal, 'resource': resource, 'linear': linear},
+                                            media_offset=len(media), ocr=ocr)
                 native_spans = _bind_occurrences(body, composed.snapshot, ordinal, resource, linear)
                 chapters.append({'spine': ordinal, 'resource': resource, 'linear': linear,
                                  'anchors': [node.get('id') for node in document.iter() if node.get('id')],
-                                 'links': [node.get('href') for node in document.iter() if _local(node.tag) == 'a' and node.get('href')],
-                                 'pages': [{'member_id': page_member_id(p.page, context=context),
-                                            'physical_page': p.page, 'width': p.width, 'height': p.height}
-                                           for p in converted.page_images]})
+                                 'links': [node.get('href') for node in document.iter() if _local(node.tag) == 'a' and node.get('href')]})
                 if pieces:
                     pieces.append("\n\n"); cursor += 2
-                if _collector is not None:
-                    # Independent DOM inventory, including whitespace and separators.
-                    # Legacy native_spans remain chapter-local and unchanged below.
-                    bound = {(row['element_path'], row['text_slot']): row for row in native_spans}
-                    compact = ''.join(c for c in composed.snapshot if not c.isspace())
-                    native_inventory = []
-                    for native_ordinal, (raw, path, slot) in enumerate(_text_occurrences(body)):
-                        match = bound.get((path, slot))
-                        value = ''.join(c for c in raw if not c.isspace())
-                        native_inventory.append({'element_path': path, 'text_slot': slot,
-                            'inventory_ordinal': native_ordinal,
-                            'inventory_occurrence': f'spine/{ordinal}/dom/{native_ordinal}',
-                            'native_text': raw, 'spine': ordinal, 'resource': resource, 'linear': linear,
-                            'occurrence': f'spine/{ordinal}/{path}/{slot}',
-                            'locator_capability': 'ordered_compacted_text' if match else 'whitespace_or_separator',
-                            'ambiguity': 'possible' if value and compact.count(value) > 1 else 'not_assessed',
-                            'local_start': match['start'] if match else None,
-                            'local_end': match['end'] if match else None,
-                            'global_start': cursor+match['start'] if match else None,
-                            'global_end': cursor+match['end'] if match else None,
-                            'matched_snapshot': composed.snapshot[match['start']:match['end']] if match else None})
-                    _collector.finish(composed, cursor, native=native_inventory)
                 pieces.append(composed.snapshot)
                 for span in composed.spans:
                     spans.append({**span, 'start': span['start']+cursor, 'end': span['end']+cursor,
@@ -187,7 +150,7 @@ def parse_epub(content: bytes, label: str, source_key: str, *, converter=None, o
                      "package_version": package.get("version"), "unique_identifier": package.get("unique-identifier"),
                      "parser": "docling", "parser_version": converted.runtime_version})
     return ParsedSource(snapshot, metadata,
-                        {"version": 3, "kind": "epub-spine", "source_key": source_key, "package": package_path,
+                        {"version": 2, "kind": "epub-spine", "source_key": source_key, "package": package_path,
                          "snapshot_sha256": hashlib.sha256(snapshot.encode()).hexdigest(), "spans": spans,
                          "image_ocr": images, "chapters": chapters, "parser": "docling", "parser_version": converted.runtime_version},
                         tuple(media), tuple(uncertainties))

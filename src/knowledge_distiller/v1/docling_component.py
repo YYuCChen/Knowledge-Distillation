@@ -38,7 +38,6 @@ def _ordinary(path, *, directory=False):
 
 class DoclingComponent:
     def __init__(self, components_root, *, manifest=None):
-        self._default_inventory = manifest is None
         self.manifest = trusted_manifest() if manifest is None else manifest
         self.files = self.manifest['files']
         # Git checkout newline conversion must not change shared archive identity.
@@ -56,7 +55,6 @@ class DoclingComponent:
                 raise DoclingComponentError('docling_component_invalid_inventory')
             seen.add(name.casefold())
         canonical = json.dumps(self.manifest, sort_keys=True, separators=(',', ':')).encode()
-        self._inventory_bytes = canonical
         self.identity = hashlib.sha256(canonical).hexdigest()
         self.root = filesystem_path(Path(components_root) / 'docling')
         self.active = self.root / self.identity
@@ -77,36 +75,6 @@ class DoclingComponent:
         except FileNotFoundError as error:
             raise DoclingComponentError('docling_component_missing') from error
         return root
-
-    def _trusted_description(self, root=None):
-        """Internal readback; injected inventories never authorize execution.
-
-        verify() keeps its public Path return. File identities here bind the
-        before/after checks, not an assertion that model mmap cannot race.
-        """
-        canonical = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
-        if (not self._default_inventory or canonical(trusted_manifest()) != self._inventory_bytes
-                or canonical(self.manifest) != self._inventory_bytes
-                or self.files != self.manifest['files']):
-            raise DoclingComponentError('docling_component_untrusted_inventory')
-        root = self.active if root is None else filesystem_path(root)
-        paths = [root, *(root / name for name in sorted(self.files))]
-
-        def identities():
-            values = []
-            for path in paths:
-                info = path.lstat()
-                values.append((info.st_dev, info.st_ino, info.st_size,
-                               info.st_mtime_ns, info.st_ctime_ns))
-            return tuple(values)
-
-        before = identities()
-        self.verify(root)
-        if identities() != before:
-            raise DoclingComponentError('docling_component_changed')
-        description = canonical({'inventory_identity': self.identity,
-            'files': [{'name': name, **self.files[name]} for name in sorted(self.files)]})
-        return root, description, before
 
     def import_existing(self, source):
         """Copy only known bytes; a crash leaves at most an unactivated staging dir."""

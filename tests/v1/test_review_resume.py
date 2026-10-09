@@ -31,8 +31,8 @@ def test_long_review_bounds_and_resumes_middle_failure(tmp_path):
 
 def test_successful_primary_cache_survives_new_recognizer(tmp_path):
     from knowledge_distiller.v1.primary_cache import recognize_cached
-    from tests.v1.test_pipeline import write_synthetic_wav
-    audio=StandardAudio(write_synthetic_wav(tmp_path/'audio.wav',10),10)
+    audio=StandardAudio(tmp_path/'audio.wav',10)
+    audio.path.write_bytes(b'fake-audio')
     calls=[]
     class Recognizer:
         def recognize(self,audio):
@@ -41,7 +41,7 @@ def test_successful_primary_cache_survives_new_recognizer(tmp_path):
     assert recognize_cached(Recognizer(),audio,tmp_path).recovery
     assert recognize_cached(Recognizer(),audio,tmp_path).recovery
     assert len(calls)==1
-    write_synthetic_wav(audio.path,10,phase=1)
+    audio.path.write_bytes(b'new-fake-audio')
     assert recognize_cached(Recognizer(),audio,tmp_path).recovery
     assert len(calls)==2
 
@@ -88,8 +88,8 @@ def test_clipper_reuses_one_full_alignment_for_all_concerns(tmp_path, monkeypatc
     import knowledge_distiller.v1.confirmation as module
     from knowledge_distiller.faithful_review import ReviewConcern
     from tests.v1.test_confirmation import Runner
-    from tests.v1.test_pipeline import write_synthetic_wav
-    audio=StandardAudio(write_synthetic_wav(tmp_path/'audio.wav',30),30)
+    audio=StandardAudio(tmp_path/'audio.wav',30)
+    audio.path.write_bytes(b'fake-audio')
     text='第一处文字。第二处文字。第三处文字。'
     recovery=PrimaryRecovery(text,'zh',(PrimaryChunk(text,0,30),))
     actual=module.alignment_blocks;calls=[]
@@ -123,8 +123,7 @@ def test_pipeline_review_retry_keeps_primary_and_source_lineage(tmp_path):
 
 def test_corrupt_primary_checkpoint_is_recomputed(tmp_path):
     from knowledge_distiller.v1.primary_cache import recognize_cached
-    from tests.v1.test_pipeline import write_synthetic_wav
-    audio=StandardAudio(write_synthetic_wav(tmp_path/'audio.wav',10),10)
+    audio=StandardAudio(tmp_path/'audio.wav',10);audio.path.write_bytes(b'fake')
     calls=[]
     class Recognizer:
         def recognize(self,audio):

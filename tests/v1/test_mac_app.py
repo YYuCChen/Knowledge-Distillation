@@ -2,100 +2,7 @@ from pathlib import Path
 import urllib.request
 
 from knowledge_distiller.v1.app import AppPaths
-from knowledge_distiller.v1.mac_app import (
-    DesktopTermination,
-    DesktopTerminationHandshake,
-    DesktopExitPreparation,
-    serve,
-    configure_bundled_runtime,
-)
-
-
-def test_desktop_termination_waits_before_allowing_exit_or_restart():
-    import threading
-    import time
-    release = threading.Event()
-    calls = []
-
-    def stop_workers():
-        calls.append('stop')
-        return release.is_set()
-
-    termination = DesktopTermination(stop_workers)
-    termination.request()
-    deadline = time.monotonic() + 2
-    while not calls:
-        assert time.monotonic() < deadline
-        time.sleep(.01)
-    assert termination.take_ready() is False
-    launched = []
-    release.set()
-    while not termination.take_ready():
-        assert time.monotonic() < deadline
-        time.sleep(.01)
-    launched.append('restart')
-    assert launched == ['restart']
-    assert termination.take_ready() is False
-
-
-def test_signal_waits_for_workers_then_requests_main_loop_termination_once():
-    import threading
-    import time
-    release = threading.Event()
-    termination = DesktopTermination(lambda: release.is_set())
-    handshake = DesktopTerminationHandshake(termination)
-    request = termination.request
-    requests = []
-    def counted_request():
-        requests.append('stop')
-        request()
-    termination.request = counted_request
-
-    handshake.request_signal()
-    handshake.request_signal()
-    assert requests == []
-    assert handshake.take_main_action() is None
-    assert requests == ['stop']
-    handshake.request_signal()
-    assert handshake.take_main_action() is None
-    assert requests == ['stop']
-    release.set()
-    deadline = time.monotonic() + 2
-    while (action := handshake.take_main_action()) is None:
-        assert time.monotonic() < deadline
-        time.sleep(.01)
-    assert action == 'terminate'
-    assert handshake.take_main_action() is None
-    assert handshake.should_terminate() is True
-    assert requests == ['stop']
-    assert handshake.take_main_action() is None
-
-
-def test_native_termination_replies_only_after_workers_stop_and_only_once():
-    import threading
-    import time
-    release = threading.Event()
-    termination = DesktopTermination(lambda: release.is_set())
-    handshake = DesktopTerminationHandshake(termination)
-
-    assert handshake.should_terminate() is False
-    assert handshake.take_main_action() is None
-    release.set()
-    deadline = time.monotonic() + 2
-    while (action := handshake.take_main_action()) is None:
-        assert time.monotonic() < deadline
-        time.sleep(.01)
-    assert action == 'reply'
-    assert handshake.take_main_action() is None
-
-
-def test_restart_preparation_relaunches_only_once():
-    relaunched = []
-    preparation = DesktopExitPreparation(lambda: relaunched.append('restart'))
-
-    preparation.prepare(True)
-    preparation.prepare(True)
-    assert relaunched == ['restart']
+from knowledge_distiller.v1.mac_app import serve,configure_bundled_runtime
 
 
 def test_desktop_server_uses_owned_data_and_assigned_port(tmp_path):
@@ -109,7 +16,7 @@ def test_desktop_server_uses_owned_data_and_assigned_port(tmp_path):
         assert app.config['KNOWLEDGE_DISTILLER_STORE'].path.parent==root
     finally:
         server.shutdown();server.server_close()
-        assert app.config['KNOWLEDGE_DISTILLER_WORKERS'].stop();thread.join(2)
+        app.config['KNOWLEDGE_DISTILLER_WORKER'].stop();thread.join(2)
     assert not thread.is_alive()
 
 
@@ -148,7 +55,7 @@ def test_application_shutdown_closes_owned_browser_sessions(tmp_path, monkeypatc
         app.config['KNOWLEDGE_DISTILLER_CLOSE_BROWSERS']()
         assert set(closed)=={'douyin','xiaohongshu','youtube','x','zhihu','weibo'}
     finally:
-        assert app.config['KNOWLEDGE_DISTILLER_WORKERS'].stop()
+        app.config['KNOWLEDGE_DISTILLER_WORKER'].stop()
 
 
 def test_dock_reopen_activates_browser_without_opening_another_page():

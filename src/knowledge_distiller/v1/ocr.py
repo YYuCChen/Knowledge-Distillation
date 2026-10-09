@@ -11,10 +11,7 @@ from io import BytesIO
 import math
 import sys
 from numbers import Real
-from typing import Callable, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .vision_ocr import ImageOcrReceipt
+from typing import Callable
 
 
 OCR_VERSION = "3.7.0"
@@ -62,7 +59,6 @@ class OcrResult:
     detection_model: str = DETECTION_MODEL
     recognition_model: str = RECOGNITION_MODEL
     framework_version: str = PADDLE_VERSION
-    receipt: ImageOcrReceipt | None = None
 
     @property
     def text(self) -> str:

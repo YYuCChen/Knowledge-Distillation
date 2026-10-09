@@ -195,7 +195,7 @@ class Collections:
                      now, now, now, _json({k:v for k,v in scope.authority.items() if k != 'platform'}), member.title)).lastrowid
                 if member.supported:
                     stable = db.execute("""SELECT m.material_id FROM materials m
-                        JOIN source_facts sf USING(material_id)
+                        JOIN source_facts sf USING(material_id) JOIN knowledge_results kr USING(source_fact_id)
                         WHERE m.source_kind=? AND m.source_key=? AND m.snapshot_key!='legacy'
                         AND json_extract(m.metadata_json,'$.native_content_version')=?
                         ORDER BY m.material_id DESC LIMIT 1""", (platform,member.item_id,member.version)).fetchone()
@@ -262,60 +262,61 @@ class Collections:
                 revision=revision+1,queued_at=?,updated_at=? WHERE operation_id=?''', (now, now, operation))
             _event(db, operation, 'resume', {'failures': failures, 'revision': revision})
 
-    def run(self, operation, distiller, *, deferred_items=()):
+    def run(self, operation, distiller):
         info = self.detail(operation)
         if info['cancel_requested']:
             self._reconcile(operation)
             return
-        member = next((m for m in info['members'] if m['state'] == 'queued'
-                       and m['item_id'] not in deferred_items), None)
+        member = next((m for m in info['members'] if m['state'] == 'queued'), None)
         if member is not None:
             item = member['item_id']
             self.store.mark_working(item, 'collecting')
             try:
                 distiller.run(item)
             except Exception as error:
-                if isinstance(error, BlockingIOError) and error.args == ('vault_busy',):
-                    if self.store.defer_raw_item(item):
-                        self._reconcile(operation, item)
-                        return item
-                    self._reconcile(operation, item)
-                    return
                 logger.error("Collection item %s failed (%s)",item,type(error).__name__)
                 row = self.store.item_bundle(item)
                 if row['state'] == 'working':
                     self.store.mark_failed(item, row['phase'], 'processing_unexpected_failure')
             self._reconcile(operation, item)
             return
-        self._reconcile(operation)
+        state = self._reconcile(operation, combining=True)
+        if state == 'ready_combined':
+            try:
+                from .collection_model import derive_combined, validate_combined
+                basis = self._basis(operation)
+                payload = derive_combined(distiller.knowledge_model, basis)
+                payload = validate_combined(payload, basis)
+                with connect(self.store.path) as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    row = db.execute('SELECT * FROM collection_operations WHERE operation_id=?', (operation,)).fetchone()
+                    if row['cancel_requested']:
+                        db.execute("UPDATE collection_operations SET state='cancelled',updated_at=? WHERE operation_id=?", (_now(),operation))
+                        return
+                    db.execute('INSERT INTO collection_results(operation_id,payload_json,lineage_json,created_at) VALUES (?,?,?,?)',
+                               (operation, _json(payload), _json(basis), _now()))
+                    db.execute("UPDATE collection_operations SET state='succeeded',error_code=NULL,updated_at=? WHERE operation_id=?", (_now(),operation))
+                    _event(db, operation, 'combined_created', {})
+            except Exception as error:
+                logger.error("Collection combined %s failed (%s)",operation,type(error).__name__)
+                code = str(error) if isinstance(error, CollectionError) else 'collection_combined_failed'
+                with connect(self.store.path) as db:
+                    db.execute("UPDATE collection_operations SET state=CASE WHEN cancel_requested=1 THEN 'cancelled' ELSE 'failed' END,error_code=?,updated_at=? WHERE operation_id=?", (code,_now(),operation))
+                    _event(db, operation, 'combined_failed', {'code': code})
 
     def _reconcile(self, operation, completed_item=None, *, combining=False):
         with connect(self.store.path) as db:
             db.execute('BEGIN IMMEDIATE')
-            rows = db.execute('''SELECT cm.*,i.state,i.error_code,i.confirmation_json,sf.source_fact_id AS sf
+            rows = db.execute('''SELECT cm.*,i.state,i.error_code,i.confirmation_json,sf.source_fact_id AS sf,kr.knowledge_result_id AS kr
                 FROM collection_members cm JOIN distill_items i USING(item_id)
                 LEFT JOIN source_facts sf ON sf.material_id=i.material_id
+                LEFT JOIN knowledge_results kr ON kr.source_fact_id=sf.source_fact_id
                 WHERE cm.operation_id=? ORDER BY ordinal''', (operation,)).fetchall()
-            op = db.execute('SELECT * FROM collection_operations WHERE operation_id=?', (operation,)).fetchone()
-            if op['state'] == 'succeeded' and completed_item is None:
-                return 'succeeded'  # Historical results remain read-only.
-            from .raw import RawLedger, RawError, LegacySourceVeto
-            from .ingestion import IngestionError
-            ledger = RawLedger(self.store)
-            collected = set()
             for row in rows:
-                db.execute('UPDATE collection_members SET source_fact_id=? WHERE item_id=?',
-                           (row['sf'],row['item_id']))
-                if row['state'] not in {'succeeded', 'raw_saved'} or row['confirmation_json'] is not None:
-                    continue
-                try:
-                    ledger.read_item(db, row['item_id'], ledger.vault())
-                except LegacySourceVeto:
-                    raise
-                except (RawError, IngestionError, OSError):
-                    continue
-                collected.add(row['item_id'])
-            complete = bool(rows) and len(collected) == len(rows)
+                db.execute('UPDATE collection_members SET source_fact_id=?,knowledge_result_id=? WHERE item_id=?',
+                           (row['sf'],row['kr'],row['item_id']))
+            op = db.execute('SELECT * FROM collection_operations WHERE operation_id=?', (operation,)).fetchone()
+            complete = all(r['state'] == 'succeeded' and r['kr'] is not None for r in rows)
             consequence = 'complete' if complete else None
             if op['cancel_requested']:
                 state = 'cancelled'
@@ -323,16 +324,15 @@ class Collections:
                 state = 'queued'
             elif any(r['state'] == 'waiting_user' or r['confirmation_json'] for r in rows):
                 state = 'waiting_user'
-            elif complete:
-                state = 'succeeded'
+            elif all(r['state'] == 'succeeded' and r['kr'] is not None for r in rows):
+                state = 'succeeded' if op['kind'] in {'bilibili_range','same_topic'} else 'ready_combined'
                 consequence = 'complete'
-            elif collected:
+            elif any(r['state'] == 'succeeded' for r in rows):
                 state = 'partial';consequence = 'partial'
             else:
                 state = 'failed';consequence = 'failed'
-            db.execute('''UPDATE collection_operations SET state=?,consequence=?,
-                error_code=CASE WHEN ?='succeeded' THEN NULL ELSE error_code END,
-                updated_at=? WHERE operation_id=?''', (state,consequence,state,_now(),operation))
+            db.execute('UPDATE collection_operations SET state=?,consequence=?,updated_at=? WHERE operation_id=?',
+                       (('working' if combining else 'queued') if state=='ready_combined' else state,consequence,_now(),operation))
             _event(db, operation, 'member_boundary', {'state':state,'members':[{'item':r['item_id'],'state':r['state'],'error':r['error_code']} for r in rows if r['item_id']==completed_item]})
             return state
 
