@@ -1,6 +1,6 @@
 # R14 raw→wiki 独立来源支持合同
 
-当前实现核对：2026-10-09，Asia/Taipei，源码业务基线 `e4283034f05778020d159742d1db0a1d904f97cc`。`wiki_support.py` 保持独立 Gate API，已由 `WikiWorker._run_typed_locked` 经 `_typed_candidate` 接入实际 typed 整理链；`app.py` 注入同库 source_store，`WikiWorkflow.submit_all` 创建 `r08-wiki-outcomes-v1` 任务。它不调用已淘汰的旧 SQL derive。已接线不等于真实验收：按主控当前证据，真实 fresh 整链尚未 passed，actual accepted 仍为 0，发布未完成；本次仅读源码维护文档，未查正式数据或重跑测试。
+当前实现与验收：2026-10-09，Asia/Taipei，源码 `55e9e3aa5d8b2bfda03a5f1ae629d5966665b403`。`WikiWorker._run_typed_locked` 经 `_typed_candidate` 接入独立支持 Gate；旧 SQL derive 不属于此链。原任务 `99043a5999a8440b91cd9a3601b7cbe1`（vxy）真实 `gpt-6.1-sol / medium` resume succeeded，1 条 accepted 含有知识／无知识各 1；15 个发布文件、两份 raw 及 prior 失败原件 hash 全匹配。未 reset，仅复用 repair 新增第 2 次 support；主控已读正文与支持收据。仅证明两份人工合成源；CLI／本地成品与线上升级验收见 [发行说明](../releases/v3.0/release-20261009.md)。
 
 历史证据（2026-10-08 独立模块阶段，不代表当前 HEAD 的整链验收）：主控已读完整初稿与修复差异，确认多跳引用经过变更页时重新核对、私有 checkpoint 及持有验证 fd 的锁边界。当时独立 Luna/max 修复回归为 95 passed、无失败／错误／跳过，pytest 退出 0；测试结束后的 zsh 包装命令因误用只读变量 status 退出 1，保留此包装失败，不重跑已通过测试。证据 `/tmp/kd-v3-wiki-support-fix-tests-20261008.md`，目录 `/private/tmp/kd-v3-wiki-support-fix-tests-20261008.ci0bQz`，JUnit SHA256 `b04a683eca5bf8671e60a881bb2e885de7f9ac3f9248f0e7026352bf65299d7b`。主控另读实际 JUnit 与 SHA；初次内部提交 `ce1cca0dd67c51c3c113eb8aed078ace8e59939f`。当时只确认合成候选支持合同，worker 接线尚未完成；当前接线状态以上段为准。旧 73 pass 同属历史 fake 控制链证据。现行主控为 gpt-6-astra/medium，全部子 Agent 为 gpt-6.1-sol/medium；旧 Luna/max 仅记录历史执行者。
 
@@ -60,7 +60,7 @@ generation／health 初始提示传入宿主 `host_context` 的活动日期与�
 
 `reserve_repair()` 必须在现有 runner 的外部修复调用之前执行，先持久占用预算，返回 `RepairReservation` 和完整父候选、失败字段、诊断及约束。默认最多两次额外 repair（0–10 可配置）；达到上限返回 `feedback.status=budget_exhausted` 和空 token，没有再调用授权。已有未消费 reservation 重启不能重新领取，因无法判定请求是否已发；调用方应保留原 reservation 和已收到候选，若没有可靠结果则报告中断。本模块不自行创建第二 WikiAgent，也不执行反馈里的任何指令。
 
-修复后再次 `build_registry(..., parent_registry=old, claim_mapping=...)`，映射必须是原 claim 顺序的 `ClaimMapping(original_claim_id,path,position)`。再 `new_gate.review(client,reservation=reserved)`。要求原 IDs／数量／顺序、路径、章节和块类型一致，不用行号重新猜对应；补引用或块内换行不改变 ID。缺映射、删旧块、增块、交换旧块文本或改成功字段均拒绝；失败范围外的文档 bytes 也必须精确保留。允许字段仅来自诊断，不允许通过撤回失败 claim 过关。引用-only 修复按引用出现位置比较，不全局删除地址子串；保留显示标签、无标签 wiki 名称及普通正文，不能制造文字未改的假等价（`d1ac29f`）。
+修复后再次 `build_registry(..., parent_registry=old, claim_mapping=...)`，映射必须是原 claim 顺序的 `ClaimMapping(original_claim_id,path,position)`。再 `new_gate.review(client,reservation=reserved)`。要求原 IDs／数量／顺序、路径、章节和块类型一致，不用行号重新猜对应；补引用或块内换行不改变 ID。缺映射、删旧块、增块、交换旧块文本或改成功字段均拒绝；失败范围外的文档 bytes 也必须精确保留。允许字段仅来自诊断，不允许通过撤回失败 claim 过关。引用-only 修复按引用出现位置比较，不全局删除地址子串；保留显示标签、无标签 wiki 名称及普通正文，不能制造文字未改的假等价（`d1ac29f`）。完全由已登记裸 raw 引用及分隔空白组成的成对括号组视为引用语法，避免仅补多个引用时残留“（；）”误拒绝；含正文、显示标签、未登记地址或含糊语法的组不整体剥离（`41bf8c5`）。
 
 已有候选跨日恢复时，`cached_generated` 只读该 Gate 最后候选的 GeneratedSection 证书；caller 先核 cached check／候选树，再重建 Registry 严格比较 binding hash、candidate hash 和 documents，正常 Gate review 仍重验状态。它不为新模型 bytes 签发证书；未消费 repair 的父候选不能冒作已检查子候选（`a096bdc`）。
 
