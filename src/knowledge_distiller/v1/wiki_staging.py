@@ -11,6 +11,8 @@ import shutil
 import stat
 from typing import Iterable
 import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from .wiki_kit import WikiKitError, read_receipt, verify_installed_kit, verify_source_kit
 from .wiki_kit_runtime import WikiKitRuntime
@@ -23,6 +25,23 @@ REGENERABLE_GRAPH = frozenset({
     ".graph/state.json",
     ".graph/检查结果.md",
 })
+
+
+def _phase_started_at():
+    return datetime.now(ZoneInfo('Asia/Taipei')).isoformat(timespec='microseconds')
+
+
+def _validate_phase_started_at(value):
+    try:
+        parsed = datetime.fromisoformat(value) if type(value) is str else None
+        if (parsed is None or parsed.tzinfo is None
+                or parsed.isoformat(timespec='microseconds') != value
+                or parsed.utcoffset() != parsed.astimezone(ZoneInfo('Asia/Taipei')).utcoffset()
+                or not value.endswith('+08:00')):
+            raise ValueError()
+    except (ValueError, TypeError, OverflowError):
+        raise WikiStagingError('checkpoint_binding_changed') from None
+    return parsed
 _TASK_ID = frozenset("0123456789abcdef")
 _SHA256 = frozenset("0123456789abcdef")
 
@@ -885,6 +904,7 @@ def reserve_generation(snapshot, runtime_root, *, task, batch_no, lock, source_p
         argv=list(argv), stdin_sha256=t.digest(stdin_bytes), schema_sha256=t.digest(schema_bytes),
         final_relative_path=relative, recording_call=str(recording_call),
         timeout_seconds=timeout_seconds)
+    record['started_at'] = _phase_started_at()
     if path.name != 'reservation.json':
         record['generation_attempt'] = number
     try:
@@ -949,6 +969,8 @@ def save_generation_result(permit, result, *, lock, source_proof):
 def _verify_generation_terminal(terminal, root, record, *, schema_definition='proposal',
                                 expected_error=None):
     from . import wiki_typed as t
+    if 'started_at' in record:
+        _validate_phase_started_at(record['started_at'])
     if (type(terminal) is not dict or terminal.get('contract') != 'g3-exec-recording-v1'
             or terminal.get('reserved') is not True or terminal.get('actual_spawned') is not True
             or type(terminal.get('pid')) is not int or terminal['pid'] <= 0

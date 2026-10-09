@@ -9,6 +9,34 @@ from knowledge_distiller.v1 import wiki_support as ws
 from .test_wiki_support import h, FakeClient, REF, PAGE, cited
 
 
+@pytest.mark.parametrize('value', ['2026-10-09', '2026-10-09T12:00:00.000001+00:00',
+                                 '2026-02-30T12:00:00.000001+08:00', None])
+def test_phase_time_rejects_noncanonical_or_non_taipei_metadata(value):
+    from knowledge_distiller.v1.wiki_staging import _validate_phase_started_at, WikiStagingError
+    with pytest.raises(WikiStagingError, match='checkpoint_binding_changed'):
+        _validate_phase_started_at(value)
+
+
+@pytest.mark.parametrize('damage', ['bool_count', 'missing_count', 'extra_phase_field', 'bad_time', 'future_start'])
+def test_current_observation_schema_is_strict(h, damage):
+    ordinary = h.make('当前管理状态。\n', path='wiki/log.md')
+    facts = dict(pages=[], pending={'外部': [], '自述': []},
+                 query_record={'exists': False, 'sha256': None},
+                 completed_phases=[dict(phase='generation', attempt=1, final_sha256='0'*64,
+                                       started_at='2026-10-09T12:00:00.000001+08:00')],
+                 issue_counts={'错误': 0, '提醒': 1, '信息': 2}, candidate_count=0,
+                 scan_observed_at='2026-10-09T12:00:00.000001+08:00')
+    if damage == 'bool_count': facts['issue_counts']['提醒'] = True
+    if damage == 'missing_count': del facts['candidate_count']
+    if damage == 'extra_phase_field': facts['completed_phases'][0]['completed_at'] = 'invented'
+    if damage == 'bad_time': facts['completed_phases'][0]['started_at'] = '2026-10-09'
+    if damage == 'future_start': facts['completed_phases'][0]['started_at'] = '2026-10-10T12:00:00.000001+08:00'
+    content = ws._json(facts).encode()
+    with pytest.raises(ws.WikiSupportError, match='input_invalid'):
+        ws.build_registry(h.stage, ordinary.changes, ordinary.raws,
+                          program_facts=content, program_facts_readback=lambda: content)
+
+
 def managed(h, text, *, path='wiki/log.md', parent=None):
     ordinary = h.make(text, path=path)
     facts = dict(pages=[], pending={'外部': [], '自述': []},

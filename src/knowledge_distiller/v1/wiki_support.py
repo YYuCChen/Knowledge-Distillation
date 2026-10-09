@@ -55,6 +55,13 @@ declared_topics只表示页面声明的主题归属，confirmed只表示确认�
 外部知识即使写在日志/报告/概览，也不能由program_facts支持；知识选raw，混合段选mixed，
 必须同时核验raw引文边界和语义，不能因管理部分正确而掩盖知识部分错配。
 deferred_diagnostics供判断引用用途；raw/mixed不能忽略这些原边界错误。
+结构活动日期只能是合法YYYY-MM-DD；当前计数和阶段日期以program_facts为准，
+issue_counts和candidate_count是该候选在scan_observed_at首次扫描的观测，不是跨日实时计数；
+没有started_at的旧阶段不代表已知日期。pending变化不证明程序执行了独立skip事件。
+纯管理事实、当前页面存在及可检查meta字段描述走program。
+对当前候选知识关系的独立语义核验，基于payload实际全文及有效raw依据链判断，
+无需先前semantic-audit事件；涉及外部知识真伪或关系仍走raw/mixed且本段须有明确raw anchor。
+此判断不是程序历史执行证明；未提供全库全文时不能声称全库无矛盾或已全面审查。
 日志与体检报告不是知识来源，不可递归自证。uncertain必须列出问题，不算通过。
 不返回额外字段、修复正文或操作指令。"""
 
@@ -634,11 +641,23 @@ def build_registry(staging_root: Path | str, changes: tuple[DocumentChange, ...]
                 or program_facts_readback() != program_facts):
             raise WikiSupportError('hash_mismatch')
         facts = _strict(program_facts.decode('utf-8'))
-        if (type(facts) is not dict or set(facts) != {'pages', 'pending', 'query_record', 'completed_phases'}
+        keys = {'pages', 'pending', 'query_record', 'completed_phases'}
+        if (type(facts) is not dict or set(facts) not in (keys, keys | {'issue_counts', 'candidate_count', 'scan_observed_at'})
                 or type(facts['pages']) is not list or type(facts['completed_phases']) is not list
                 or any(type(p) is not dict or set(p) != {'path', 'sha256', 'type', 'confirmed', 'declared_topics'}
                        or type(p['path']) is not str for p in facts['pages'])):
             raise WikiSupportError('input_invalid')
+        if 'issue_counts' in facts:
+            from .wiki_staging import _validate_phase_started_at, WikiStagingError
+            try:
+                _validate_phase_started_at(facts['scan_observed_at'])
+            except WikiStagingError:
+                raise WikiSupportError('input_invalid') from None
+            counts = facts['issue_counts']
+            if (type(counts) is not dict or set(counts) != {'错误', '提醒', '信息'}
+                    or any(type(v) is not int or v < 0 for v in counts.values())
+                    or type(facts['candidate_count']) is not int or facts['candidate_count'] < 0):
+                raise WikiSupportError('input_invalid')
         types = {'来源', '概念', '认知', '方法', '技能', '实践', '综合', '主题'}
         expected = {p for p in page_map if PurePosixPath(p).parent.name in types}
         if len(facts['pages']) != len(expected) or {p.get('path') for p in facts['pages']} != expected:
@@ -667,12 +686,23 @@ def build_registry(staging_root: Path | str, changes: tuple[DocumentChange, ...]
         if query != dict(exists=qpath.exists(), sha256=sha256(_read(qpath)) if qpath.exists() else None):
             raise WikiSupportError('binding_mismatch')
         for phase in facts['completed_phases']:
-            if (type(phase) is not dict or set(phase) != {'phase', 'attempt', 'final_sha256'}
+            if (type(phase) is not dict or set(phase) not in (
+                    {'phase', 'attempt', 'final_sha256'},
+                    {'phase', 'attempt', 'final_sha256', 'started_at'})
                     or type(phase['phase']) is not str
                     or phase['phase'] not in {'generation', 'check', 'final-check', 'health', 'repair-check'}
                     or type(phase['attempt']) is not int or phase['attempt'] < 1):
                 raise WikiSupportError('input_invalid')
             _digest(phase['final_sha256'])
+            if 'started_at' in phase:
+                from .wiki_staging import _validate_phase_started_at, WikiStagingError
+                try:
+                    started = _validate_phase_started_at(phase['started_at'])
+                    if ('scan_observed_at' in facts
+                            and started > _validate_phase_started_at(facts['scan_observed_at'])):
+                        raise WikiStagingError('checkpoint_binding_changed')
+                except WikiStagingError:
+                    raise WikiSupportError('input_invalid') from None
 
     def resolve(ref, trail):
         target, sep, anchor = ref.partition("#")

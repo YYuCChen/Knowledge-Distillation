@@ -133,7 +133,11 @@ def world(tmp_path, request):
     task = tasks.create_or_reuse(vault, request_kind='all', trigger_source='local_web',
         backend='codex_cli', model='fake', effort='medium', outcome_contract=t.CONTRACT)
     cli = root / 'controlled-cli'
-    cli.write_text('#!' + sys.executable + '\n' + CHILD); cli.chmod(0o700)
+    from datetime import date
+    today = date.today().isoformat()
+    child = CHILD.replace('创建: 2026-10-08\\n更新: 2026-10-08',
+                          f'创建: {today}\\n更新: {today}')
+    cli.write_text('#!' + sys.executable + '\n' + child); cli.chmod(0o700)
     (root / 'mode').write_text(getattr(request,'param','success'))
     runner = CodexWikiRunner(executable_resolver=lambda: str(cli), kit_runtime=tasks.runtime)
     # No installed CLI discovery, account or network model probe.
@@ -144,6 +148,133 @@ def world(tmp_path, request):
 def worker(world, **options):
     root, store, vault, runtime, tasks, task, runner = world
     return WikiWorker(tasks, runtime, runner, source_store=store, **options)
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_phase_dates_and_scan_observation_are_bound_and_not_recomputed(world, monkeypatch, legacy):
+    from knowledge_distiller.v1 import wiki_staging as staging
+    from knowledge_distiller.v1 import wiki_worker as workers
+    from dataclasses import replace
+    import datetime
+    import importlib.util
+    from types import SimpleNamespace
+    root, store, vault, runtime, tasks, task, runner = world
+    # Run the actual kit idle-threshold branch on an independent synthetic page.
+    # No kit edits and no dates injected into the production scan interface.
+    monkeypatch.syspath_prepend(str(KIT / 'tools'))
+    spec = importlib.util.spec_from_file_location('bounded_test_kb', KIT / 'tools/kb.py')
+    kb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(kb)
+    calendar_root = root / 'calendar-only'
+    skill = calendar_root / 'wiki/技能/人工技能.md'
+    skill.parent.mkdir(parents=True)
+    skill.write_text('---\n确认: 已确认\n---\n' + ''.join(
+        '\n## '+s.rstrip('*')+'\n合成内容\n' for s in kb.SECTIONS['技能']))
+    def idle_counts(day):
+        class Date(datetime.date):
+            @classmethod
+            def today(cls): return day
+        kb.dt = SimpleNamespace(date=Date, datetime=datetime.datetime, timedelta=datetime.timedelta)
+        checked = kb.Vault(calendar_root)
+        page = kb.Page(skill, calendar_root)
+        checked.pages = [page]
+        checked.by_title = {page.title: page}
+        checked.state = {page.title: {'最近实践': '2026-07-11'}}
+        checked.check()
+        return sum(kind == '长期不用的技能' for _, kind, _ in checked.issues)
+    assert idle_counts(datetime.date(2026, 10, 9)) == 0
+    delta = idle_counts(datetime.date(2026, 10, 10))
+    assert delta == 1  # 90 -> 91 days: real kit information count changes
+    captured = []
+    original = workers.scan_workflow_protocol
+    if legacy:
+        read = staging._checkpoint_read
+        def old_checkpoint(path):
+            value = read(path)
+            value.pop('started_at', None)
+            if type(value.get('record')) is dict:
+                value['record'].pop('started_at', None)
+            return value
+    later = [False]
+    def scan(*args, **kwargs):
+        value = original(*args, **kwargs)
+        # Simulate the kit calendar-dependent idle-warning threshold crossing.
+        if later[0]:
+                value = replace(value, issue_counts=tuple((k, v + (delta if k == '信息' else 0))
+                                                      for k, v in value.issue_counts))
+        captured.append(value)
+        return value
+    monkeypatch.setattr(workers, 'scan_workflow_protocol', scan)
+    monkeypatch.setattr(staging, '_phase_started_at', lambda: '2026-10-09T23:59:59.000001+08:00')
+    w = worker(world)
+    base = w._program_facts
+    snapshots = []
+    def facts(*args):
+        def read_frozen():
+            if not legacy:
+                return base(*args)
+            with monkeypatch.context() as context:
+                context.setattr(staging, '_checkpoint_read', old_checkpoint)
+                return base(*args)
+        result = read_frozen()
+        value = json.loads(result)
+        live = original(args[1].workspace, runtime=tasks.runtime)
+        assert value['issue_counts'] == dict(live.issue_counts)
+        assert value['candidate_count'] == live.candidate_count
+        later[0] = True
+        real_next_day = scan(args[1].workspace, runtime=tasks.runtime)
+        assert dict(real_next_day.issue_counts) != value['issue_counts']
+        monkeypatch.setattr(staging, '_phase_started_at', lambda: '2026-10-10T00:00:01.000001+08:00')
+        calls = len(captured)
+        assert read_frozen() == result
+        assert len(captured) == calls  # no calendar-dependent readback scan
+        later[0] = False
+        monkeypatch.setattr(staging, '_phase_started_at', lambda: '2026-10-09T23:59:59.000001+08:00')
+        snapshots[:] = [args, result]
+        return result
+    monkeypatch.setattr(w, '_program_facts', facts)
+    assert w.run_one().error_code is None
+    args, before = snapshots
+    value = json.loads(before)
+    assert value['completed_phases']
+    if legacy:
+        assert all('started_at' not in p for p in value['completed_phases'])
+    else:
+        assert all(p['started_at'] == '2026-10-09T23:59:59.000001+08:00'
+                   for p in value['completed_phases'])
+    assert len(list(runtime.rglob('program-scan-*.json'))) >= 1
+
+
+def test_generation_midnight_mismatch_keeps_reservation_but_never_spawns(world, monkeypatch):
+    from knowledge_distiller.v1 import wiki_staging as staging
+    root, store, vault, runtime, tasks, task, runner = world
+    times = iter(['2026-10-09T23:59:59.999999+08:00', '2026-10-10T00:00:00.000001+08:00'])
+    monkeypatch.setattr(staging, '_phase_started_at', lambda: next(times))
+    result = worker(world).run_one()
+    assert result.error_code is not None
+    assert not (root / 'calls').exists()
+    reservation = json.loads(next(runtime.rglob('reservation.json')).read_bytes())
+    assert reservation['started_at'] == '2026-10-10T00:00:00.000001+08:00'
+    assert not list(runtime.rglob('result.json'))
+
+
+def test_scan_observation_plan_tamper_rejects_before_support_spawn(world, monkeypatch):
+    from knowledge_distiller.v1 import wiki_staging as staging
+    root, store, vault, runtime, tasks, task, runner = world
+    w = worker(world)
+    original = w._program_facts
+    def facts(*args):
+        value = original(*args)
+        record_path = next(runtime.rglob('program-scan-*.json'))
+        record = json.loads(record_path.read_bytes())
+        record['binding']['plan_sha256'] = '0' * 64
+        record_path.write_bytes(t.encoded(record))
+        with pytest.raises(staging.WikiStagingError, match='checkpoint_binding_changed'):
+            original(*args)
+        return value
+    monkeypatch.setattr(w, '_program_facts', facts)
+    assert w.run_one().error_code == 'validation_failed'
+    assert 'support' not in (root / 'calls').read_text().splitlines()
 
 
 def test_real_typed_worker_commits_no_knowledge_and_formal_receipt(world):

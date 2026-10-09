@@ -376,7 +376,19 @@ class WikiWorker:
         evidence.mkdir(mode=0o700)
         permit = []
         records = []
+        prompt_context = []
+        def host_context():
+            from .wiki_staging import _phase_started_at
+            scan = scan_workflow_protocol(snapshot.workspace, runtime=self.store.runtime)
+            context = dict(activity_date=_phase_started_at()[:10],
+                           issue_counts=dict(scan.issue_counts), candidate_count=scan.candidate_count)
+            prompt_context[:] = [context]
+            return context
         def before_spawn(**actual):
+            from .wiki_staging import _phase_started_at
+            started_at = None if generation else _phase_started_at()
+            if not generation and prompt_context and prompt_context[0]['activity_date'] != started_at[:10]:
+                raise WikiStagingError('checkpoint_binding_changed')
             if generation:
                 binding = t.admit_input(actual['stdin_bytes'], t.PROPOSAL_SCHEMA, None,
                     input_policy=t.APPLICATION_UTF8_POLICY, schema_bytes=actual['schema_bytes'])
@@ -387,6 +399,8 @@ class WikiWorker:
                     recording_call=evidence / f"exec-{actual['call_id']:04d}", timeout_seconds=actual['timeout_seconds'],
                     allow_recovery=True)
                 permit.append(value)
+                if prompt_context and prompt_context[0]['activity_date'] != value.reservation['started_at'][:10]:
+                    raise WikiStagingError('checkpoint_binding_changed')
                 value.claim_spawn()
             else:
                 admission = t.admit_input(actual['stdin_bytes'], schema, None,
@@ -398,11 +412,13 @@ class WikiWorker:
                     'argv': list(actual['argv']), 'stdin_sha256': t.digest(actual['stdin_bytes']),
                     'schema_sha256': t.digest(actual['schema_bytes']), 'input_binding': asdict(admission),
                     'timeout_seconds': actual['timeout_seconds']}
+                record['started_at'] = started_at
                 _checkpoint_write(attempt_path, t.encoded(record))
                 records.append(record)
         previous = self.runner.recording
         recording = ExecRecordingV1(evidence, workspace_root=snapshot.workspace,
             runtime_root=self.runtime_root, before_spawn=before_spawn, max_attempts=1)
+        recording.host_context = host_context
         self.runner.recording = recording
         try:
             result = invoke()
@@ -650,8 +666,33 @@ class WikiWorker:
             final = Path(record['argv'][record['argv'].index('-o') + 1])
             if t.digest(t.read_final(final.parent, final.name)) != final_sha:
                 raise WikiStagingError('checkpoint_binding_changed')
-            phases.append(dict(phase=phase, attempt=attempt, final_sha256=final_sha))
+            item = dict(phase=phase, attempt=attempt, final_sha256=final_sha)
+            if 'started_at' in record:
+                item['started_at'] = record['started_at']
+            phases.append(item)
         facts['completed_phases'] = phases
+        # protocol-scan has calendar-dependent reminders. Freeze its actual
+        # observation for this complete tree and phase history, not today's
+        # reinterpretation of a previously checked candidate.
+        from .wiki_staging import _checkpoint_tree, _checkpoint_write
+        binding = dict(plan_sha256=task.plan_sha256, tree=_checkpoint_tree(snapshot), phases=phases)
+        observed = root / ('program-scan-' + t.digest(t.encoded(binding)) + '.json')
+        if observed.exists():
+            record = _checkpoint_read(observed)
+            if set(record) != {'binding', 'issue_counts', 'candidate_count', 'observed_at'} or record['binding'] != binding:
+                raise WikiStagingError('checkpoint_binding_changed')
+        else:
+            from .wiki_staging import _phase_started_at
+            observed_at = _phase_started_at()
+            scan = scan_workflow_protocol(snapshot.workspace, runtime=self.store.runtime)
+            record = dict(binding=binding, issue_counts=dict(scan.issue_counts), candidate_count=scan.candidate_count,
+                          observed_at=observed_at)
+            if _checkpoint_tree(snapshot) != binding['tree']:
+                raise WikiStagingError('checkpoint_binding_changed')
+            _checkpoint_write(observed, t.encoded(record))
+        facts['issue_counts'] = record['issue_counts']
+        facts['candidate_count'] = record['candidate_count']
+        facts['scan_observed_at'] = record['observed_at']
         return t.encoded(facts)
 
     def _managed_sections(self, snapshot, task):

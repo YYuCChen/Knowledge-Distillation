@@ -357,6 +357,7 @@ class CodexWikiRunner:
                        '知识判断仍须准确raw anchor，不能用日志、报告或整页链接自证。'
                        '不得写无独立程序记录的完整阅读自述、历史检查数值/次数或执行动作自述；'
                        '阶段成功或页面存在不能证明已完整阅读、历史检查值或具体更新动作。\n').encode('utf-8')
+            prompt += self._management_context()
             prompt += encoded({'binding': binding, 'input': payload})
             def verify_input():
                 current = freeze_input(task, snapshot, batch_no, source_proof,
@@ -439,6 +440,7 @@ class CodexWikiRunner:
                 prompt += ('\n仅按以下程序反馈修复失败字段；保留全部原主张、位置、成功字段、'
                            'raw、已记录处理事实与逐raw分类，不能删主张或追加重复日志。\n').encode('utf-8')
                 prompt += encoded(repair_feedback) + b'\n'
+            prompt += self._management_context()
             prompt += encoded({'binding': binding, 'input': payload})
             def verify_input():
                 current = freeze_input(task, snapshot, batch_no, source_proof, runtime_root=runtime_root)
@@ -861,6 +863,21 @@ class CodexWikiRunner:
             raise
         finally:
             self._recorded_cleanup_guard.release()
+
+    def _management_context(self):
+        from .wiki_typed import encoded
+        prompt = ('\n结构活动日期必须使用合法YYYY-MM-DD，不能追加“待核验”。'
+                  '仅在收到host_context时使用其当前管理计数和活动日期；缺记录不可推测。'
+                  '来源页标题/作者按所绑定raw信封逐字取值；缺作者或发布日期用应用规定“未知”，不得自行同义改写；原始文件绑定该raw。'
+                  '仅写必要日志；按该raw完整正文给出真实无知识原因，保留准确raw anchor；'
+                  '不能凭长度/体裁一刀切，不能用例子替代实际理由。'
+                  '不声称程序已跳过或已全面审查。'
+                  '可直接检查的当前meta字段描述与外部知识真假分开；'
+                  '可引用原文的当前内容判断不等于历史执行动作。\n').encode('utf-8')
+        factory = getattr(self.recording, 'host_context', None)
+        if callable(factory):
+            prompt += encoded({'host_context': factory()}) + b'\n'
+        return prompt
 
     def _prompt_commands(self, root: Path) -> dict[str, str]:
         if self.kit_runtime is None:

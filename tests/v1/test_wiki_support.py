@@ -246,7 +246,7 @@ def test_unchanged_multihop_claim_is_reviewed_and_can_fail_alone(h):
 
 
 @pytest.mark.parametrize("mode,category", [("cycle", "dependency_cycle"),
-                                           ("unresolved", "wiki_reference_ambiguous")])
+                                           ("unresolved", "wiki_not_frozen")])
 def test_unchanged_dependency_traversal_failure_cannot_skip_review(h, mode, category):
     path = "wiki/来源/B.md"
     text = "依赖[[来源：测试]]" if mode == "cycle" else "依赖[[未冻结]]"
