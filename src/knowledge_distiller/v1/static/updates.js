@@ -29,7 +29,9 @@
     pending = true;
     try {
       const response = await fetch(`/settings/updates/${name}`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Update-Token': state.token}, body: JSON.stringify(data)});
-      const result = await response.json();
+      let result;
+      try { result = await response.json(); }
+      catch (_) { throw new Error('操作未完成，请重试。'); }
       if (!response.ok) throw new Error(result.error || '操作未完成，请重试。');
       state = result; render();
     } catch (error) { text('[data-update-status]', error.message); }
@@ -55,7 +57,7 @@
     if (fallback) {
       fallback.hidden=!state.full_update_required;
       fallback.disabled=busy;
-      fallback.textContent=release ? `改用完整包（${size(release.full.size)}）` : '改用完整包';
+      fallback.textContent=release?.full ? `改用完整包（${size(release.full.size)}）` : '改用完整包';
       if (state.full_update_required) text('[data-update-status]', '差量更新未能应用，当前版本已保留。尚未下载完整包。');
     }
     text('[data-update-time]', state.checked_at ? `上次检查 ${new Date(state.checked_at * 1000).toLocaleString('zh-CN')}` : '');
