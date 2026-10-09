@@ -457,6 +457,50 @@ def test_citation_normalization_never_rescans_alias_or_changes_markdown_label():
     assert ws._citation_free('[[实验结果外推|含|糊]]', ('实验结果外推',)) == '[[实验结果外推|含|糊]]'
 
 
+def test_citation_only_actual_report_multi_raw_group(h):
+    paths = tuple(f'raw/外部/2026/10/R-20261009-000{i}.md' for i in (1, 2))
+    raws = tuple(h.add_raw(path, '第三方', '未知', '人工合成正文。\n\n^source-1\n')
+                 for path in paths)
+    refs = tuple(path + '#^source-1' for path in paths)
+    original = '- 当前仅有一份来源页，无可列出的相互矛盾论断。'
+    repaired = original + '（' + '；'.join(refs) + '）'
+    assert ws._citations(repaired) == refs
+    assert ws._citation_free(repaired, refs) == original
+    initial = h.make(original, raws=raws, path='wiki/体检报告.md')
+    gate = h.gate(initial)
+    assert gate.review(FakeClient()).status == 'source_boundary_failed'
+    reservation = gate.reserve_repair()
+    fixed = h.make(repaired, raws=raws, path='wiki/体检报告.md', parent=initial)
+    assert h.gate(fixed).review(FakeClient(), reservation=reservation).status == 'supported_candidate_not_published'
+
+
+@pytest.mark.parametrize('opening,closing,separator', [
+    ('（', '）', '；'), ('(', ')', '; '), ('（', '）', '，'), ('(', ')', ', '),
+    ('（', '）', ' '),
+])
+def test_citation_only_known_raw_group_separators(opening, closing, separator):
+    refs = (REF, RAW_PATH + '#^source-2')
+    group = opening + '  ' + separator.join(refs) + '  ' + closing
+    assert ws._citation_free('命题。' + group, refs) == '命题。'
+
+
+@pytest.mark.parametrize('interior', [
+    '实际结论；{a}；{b}',
+    '{a}；另一结论；{b}',
+    '{a}；raw/外部/2026/10/R-UNKNOWN.md#^source-1',
+    '[[{a}|显示命题]]；{b}',
+    '[显示命题]({a})；{b}',
+    '{a}；{b}；',
+])
+def test_citation_only_raw_group_keeps_prose_labels_unknown_and_ambiguous_syntax(interior):
+    refs = (REF, RAW_PATH + '#^source-2')
+    text = '命题。（' + interior.format(a=refs[0], b=refs[1]) + '）'
+    assert ws._citation_free(text, refs) != '命题。'
+    for label in ('实际结论', '另一结论', '显示命题', 'R-UNKNOWN'):
+        if label in text:
+            assert label in ws._citation_free(text, refs)
+
+
 def test_default_two_repairs_bound_to_baseline_not_current_claim(h):
     text = "- " + cited("甲。") + "\n- " + cited("乙。") + "\n- " + cited("丙。") + "\n"
     initial = h.make(text)

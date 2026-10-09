@@ -401,6 +401,17 @@ def _citation_free(text, citations):
             end = len(text) if end < 0 else end
             replacement = text[match.start():end]
         spans.append((match.start(), end, replacement))
+    # A paired group is citation syntax only if its entire interior consists
+    # of known bare raw references. Never absorb prose or visible link labels.
+    raw_refs = sorted((ref for ref in refs if ref.startswith('raw/')), key=len, reverse=True)
+    if raw_refs:
+        raw_item = '(?:' + '|'.join(re.escape(ref) for ref in raw_refs) + ')'
+        raw_group = re.compile(r'\s*' + raw_item + r'(?:[\s,，;；]+' + raw_item + r')*\s*')
+        for match in re.finditer(r'（[^（）()\n]*）|\([^（）()\n]*\)', text):
+            if any(start < match.end() and match.start() < end for start, end, _ in spans):
+                continue
+            if raw_group.fullmatch(match[0][1:-1]):
+                spans.append((match.start(), match.end(), ''))
     for match in re.finditer(r"raw/[^\s\]（），,；;。|<>`\"']+", text):
         if any(start <= match.start() < end for start, end, _ in spans):
             continue
