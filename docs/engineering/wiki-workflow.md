@@ -1,6 +1,6 @@
 # Wiki 独立任务与 Vault 写协议
 
-当前实现核对：2026-10-09，Asia/Taipei，源码 HEAD `962d0c6`。本文定义 V3 wiki 维护任务的持久边界、隔离 staging、typed runner、批次状态、共享写锁和 Vault 工具包所有权。`WikiWorkflow.submit_all`、`WikiWorker._run_typed_locked`、来源／四维／R14 支持检查、journal 发布及 `accept_published_batch` 已有实际应用调用链；旧 SQL derive 不是此链。阶段 1–4 的合成证据是历史记录，不能替代当前验收。按主控当前证据，真实 accepted 仍为 0，发布未完成；本次文档维护未读取正式数据、未运行重复测试。
+当前实现核对：2026-10-09，Asia/Taipei，源码业务基线 `e4283034f05778020d159742d1db0a1d904f97cc`。本文定义 V3 wiki 维护任务的持久边界、隔离 staging、typed runner、批次状态、共享写锁和 Vault 工具包所有权。`WikiWorkflow.submit_all`、`WikiWorker._run_typed_locked`、来源／四维／R14 支持检查、journal 发布及 `accept_published_batch` 已有实际应用调用链；旧 SQL derive 不是此链。阶段 1–4 的合成证据是历史记录，不能替代当前验收。按主控当前证据，真实 fresh 整链尚未 passed，actual accepted 仍为 0，发布未完成；本次文档维护未读取正式数据、未运行重复测试。
 
 ## 1. 任务边界
 
@@ -72,6 +72,10 @@ legacy 执行保留原新 attempt 规则。typed 执行首次建立 `execution/b
 
 每批 `execution/batch-N` 保留完整 baseline 和 before 字节、生成 reservation/result/proposal、检查／体检阶段收据、final-stage 与 validated receipt ID。生成在 spawn 前持久占额；正常结果复用已核验 checkpoint，未知结果允许消耗额度后有界再生，最多三次生成 reservation，不把未知完成当成功。支持修复使用原 Gate 的两次额外预算，跨重启保留。`validated.json` 已存在时严格比对同一 receipt_id，相同复用、不同拒绝，不覆盖文件；进入 publishing 后按 journal 恢复，不再次生成或发布。
 
+新 generation reservation 和 check／health 等阶段记录在 before_spawn 持久化 Asia/Taipei `started_at`，旧无时间记录不补造。generation／health 提示的 `host_context` 提供活动日期和当次扫描计数，spawn 跨日不匹配即拒绝。最终 program scan 将首次 `issue_counts/candidate_count/observed_at` 与完整候选树、plan SHA、已验证阶段记录绑定；同候选跨日读回既有观测，不按今日重算（`e428303`）。这些管理事实不能替代 raw 知识判断或证明完整阅读、独立 skip 及历史动作。
+
+已保存 final-stage、已发布及已成功批次的恢复使用 `_typed_validate(regenerate=False)`：只读核验受保护文件、kit 和候选，不重跑会改日期的 kb 派生写入。已有 Gate 候选证书经 cached check／树及 Registry 摘要严格匹配后复用，不能借缓存放行新候选；支持响应仍严格重验（`a096bdc`）。
+
 任务准备时复制任务开始可见的全部 raw，便于验证旧 wiki 引用；只有数据库冻结的 raw 能进入本任务批次。任务创建后到达的 raw 即使在 worker 准备前被复制，也必须保持 pending，不能被本批提前消费。每批校验要求 pending 集合恰好减少本批路径，raw 字节、工具包、未知文件和 `.graph` 中非白名单文件保持不变。允许发布的 `.graph` 文件仅为 `graph.json`、`state.json` 和 `检查结果.md`；例如可能含用户查询的 `queries.jsonl` 不是可再生白名单。
 
 最后一批 ingest 后，控制器重新读取结构化 `candidate_count` 和 health 字段。自动体检仅在素材与候选均清零，并且从未有效体检，或上次有效体检后发生 ingest/confirm 且已满七天时执行。体检使用独立 runner 调用；必须新增一条有效 lint 记录并改变体检报告，失败则整批不发布。晚到 raw 会使本轮不宣称清零，也不执行自动体检。
@@ -106,7 +110,7 @@ V2.0 正式标签 `v2026.09.30.4` 尚未写入收据，但其 `vault-kit/README.
 
 ## 9. 验证边界
 
-下面阶段记录均为历史验证范围，不是对 HEAD `962d0c6` 全部测试重新通过的声明。当前接线已有 `test_wiki_worker_typed.py` 等合成实际 API 路径，仍不能代替真实 CLI 语义、正式 accepted 或发布验收。本次只改两份文档，不运行模型、矩阵或重复测试。现行主控 gpt-6-astra/medium、全部子 Agent gpt-6.1-sol/medium；历史 Luna 等执行者不作为当前分工。用户已按展示候选批准四项 UI 接入，并同意 R11 Reddit／R12 pyannote 延期；本维护不实施 UI，也不把其他未验事项扩展为已完成。
+下面阶段记录均为历史验证范围，不是对业务基线 `e4283034f05778020d159742d1db0a1d904f97cc` 全部测试重新通过的声明。当前接线已有 `test_wiki_worker_typed.py` 等合成实际 API 路径，仍不能代替真实 CLI 语义、正式 accepted 或发布验收。本次只改两份文档，不运行模型、矩阵或重复测试。现行主控 gpt-6-astra/medium、全部子 Agent gpt-6.1-sol/medium；历史 Luna 等执行者不作为当前分工。用户已按展示候选批准四项 UI 接入，并同意 R11 Reddit／R12 pyannote 延期；本维护不实施 UI，也不把其他未验事项扩展为已完成。
 
 合成测试覆盖 schema 21 加法升级与事务回滚、未来 schema 拒绝、任务和批次非法转换、失败恢复与显式重试、重复提交、不同 Vault 的活跃任务、60 份以上 raw 的全覆盖分批、晚到 raw、进程重启读回、跨进程及手动会话冲突、launcher 异常退出、孙进程会话验证、工具包漂移和路径符号链接。
 
