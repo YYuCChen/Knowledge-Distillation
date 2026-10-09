@@ -1,6 +1,6 @@
 # Wiki 独立任务与 Vault 写协议
 
-当前实现核对：2026-10-09，Asia/Taipei，源码业务基线 `e4283034f05778020d159742d1db0a1d904f97cc`。本文定义 V3 wiki 维护任务的持久边界、隔离 staging、typed runner、批次状态、共享写锁和 Vault 工具包所有权。`WikiWorkflow.submit_all`、`WikiWorker._run_typed_locked`、来源／四维／R14 支持检查、journal 发布及 `accept_published_batch` 已有实际应用调用链；旧 SQL derive 不是此链。阶段 1–4 的合成证据是历史记录，不能替代当前验收。按主控当前证据，真实 fresh 整链尚未 passed，actual accepted 仍为 0，发布未完成；本次文档维护未读取正式数据、未运行重复测试。
+当前实现与验收：2026-10-09，Asia/Taipei，源码 `55e9e3aa5d8b2bfda03a5f1ae629d5966665b403`。typed 整理、支持检查、journal 发布与 `accept_published_batch` 已接入实际应用链；旧 SQL derive 不属于此链。原任务 `99043a5999a8440b91cd9a3601b7cbe1`（vxy）真实 `gpt-6.1-sol / medium` resume succeeded，1 条 accepted 含有知识／无知识各 1；15 个发布文件、两份 raw 及 prior 失败原件 hash 全匹配。未 reset，仅复用 repair 新增第 2 次 support；主控已读正文与支持收据。仅证明两份人工合成源；CLI／本地成品与线上升级验收见 [发行说明](../releases/v3.0/release-20261009.md)。
 
 ## 1. 任务边界
 
@@ -110,10 +110,10 @@ V2.0 正式标签 `v2026.09.30.4` 尚未写入收据，但其 `vault-kit/README.
 
 ## 9. 验证边界
 
-下面阶段记录均为历史验证范围，不是对业务基线 `e4283034f05778020d159742d1db0a1d904f97cc` 全部测试重新通过的声明。当前接线已有 `test_wiki_worker_typed.py` 等合成实际 API 路径，仍不能代替真实 CLI 语义、正式 accepted 或发布验收。本次只改两份文档，不运行模型、矩阵或重复测试。现行主控 gpt-6-astra/medium、全部子 Agent gpt-6.1-sol/medium；历史 Luna 等执行者不作为当前分工。用户已按展示候选批准四项 UI 接入，并同意 R11 Reddit／R12 pyannote 延期；本维护不实施 UI，也不把其他未验事项扩展为已完成。
+下面阶段记录均为历史验证范围，不是对冻结源码 `55e9e3aa5d8b2bfda03a5f1ae629d5966665b403` 全部测试重新通过的声明。当前接线已有 `test_wiki_worker_typed.py` 等合成实际 API 路径，仍不能代替真实 CLI 语义、正式 accepted 或发布验收。现行主控 gpt-6-astra/medium、全部子 Agent gpt-6.1-sol/medium；历史 Luna 等执行者不作为当前分工。用户已按展示候选批准四项 UI 接入，并同意 R11 Reddit／R12 pyannote 延期；本维护不实施 UI，也不把其他未验事项扩展为已完成。
 
 合成测试覆盖 schema 21 加法升级与事务回滚、未来 schema 拒绝、任务和批次非法转换、失败恢复与显式重试、重复提交、不同 Vault 的活跃任务、60 份以上 raw 的全覆盖分批、晚到 raw、进程重启读回、跨进程及手动会话冲突、launcher 异常退出、孙进程会话验证、工具包漂移和路径符号链接。
 
 阶段 2 另以合成 Vault 覆盖受保护工具被恶意修改而不得由控制器执行、任务冻结后到达的 raw、多 Vault 锁竞争、顽固孙进程超时、发布中断、journal 恢复、恢复后用户改写冲突和显式 retry。所有自动化测试使用显式可丢弃目录与合成正文。阶段 1–2 没有启动正式应用、没有读取或修改正式数据库和 Vault，也没有调用模型处理真实内容。真实 Codex CLI 沙箱探针只使用合成目录；其最终配置证据应单独记录，不能由单元测试替代。
 
-阶段 3 的源码测试验证了绝对 CPython 3.11、恶意环境隔离、清单资源、停止与取消竞态、双 worker reservation、轻量状态和 Schema 23 升级。`--wiki-kit` 冻结分派与资源定义已经进入源码，但 `console=False` 的候选 `.app` 是否能稳定把机器协议 JSON 接回 controller 仍须在阶段 6 用真实候选包验证；模拟 `sys.frozen` 或源码子进程不能代替该证据。
+阶段 3 的源码测试验证了绝对 CPython 3.11、恶意环境隔离、清单资源、停止与取消竞态、双 worker reservation、轻量状态和 Schema 23 升级。`--wiki-kit` 冻结分派与资源定义已经进入源码，历史阶段 3 尚未验证 `console=False` 候选 `.app` 是否能稳定把机器协议 JSON 接回 controller；最终构建 `2026.10.09.1` 的 candidate 与 managed 验证均 ok，实际冻结 helper 的 protocol-scan／display-plan、describe-generated／describe-state 已通过，合成 Vault 不变；证据摘要及线上边界见发行说明。模拟 `sys.frozen` 或源码子进程不能代替该证据。
