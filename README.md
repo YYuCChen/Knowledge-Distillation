@@ -30,8 +30,8 @@
 
 ### 下载与开始使用
 
-- **当前公开版：V3.0**（macOS 构建 `2026.10.09.1`）。[发行与验收说明](docs/releases/v3.0/release-20261009.md)。
-- **Mac**：[下载 Apple Silicon 安装器](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.10.09.1/KnowledgeDistillerInstaller-2026.10.09.1-Mac-arm64.zip)，要求 macOS 14+。解压并打开安装器，选择应用和数据目录；不支持 Intel Mac。V2.0 可通过应用内签名更新升级到 V3.0。
+- **当前公开版：V3.0.1**（macOS 构建 `2026.10.09.2`）。[发行与验收说明](docs/releases/v3.0/release-20261009-3.0.1.md)；固定标签资产回读和 Latest 核验均通过，在线 V2 隔离握手与升级已通过，上一正式版 [V3.0](docs/releases/v3.0/release-20261009.md) 保留历史记录。
+- **Mac**：[下载 Apple Silicon 安装器](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.10.09.2/KnowledgeDistillerInstaller-2026.10.09.2-Mac-arm64.zip)，要求 macOS 14+。解压并打开安装器，选择应用和数据目录；不支持 Intel Mac。受此缺陷影响的 V2.0／V3.0 更新页无法完成按钮流程；本次请下载独立安装器，由用户自行升级。
 - **Windows**：当前最后一个公开版仍是 [V1.3](https://github.com/YYuCChen/Knowledge-Distillation/releases/tag/v2026.09.15.6)。保留旧版下载和签名更新入口只为避免既有安装失效；本轮不开发或发布 Windows V3.0。
 - **首次安全提示**：Mac 当前未公证，Windows 未作发行者代码签名。请核对下载来源，按系统提示处理，不关闭整体安全防护；Mac 可参考 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。GitHub 的 `Source code` 压缩包不是应用安装包。
 - **首次配置**：在设置中选择已在 Obsidian 打开过的 Vault，配置模型连接，再用一段短文本试一次蒸馏。按所用功能准备 Chrome、Codex、Obsidian 及自己的账号，无需另搭 Python 环境。
@@ -52,14 +52,14 @@ V3 数据库为 Schema 27，任务冻结、恢复预算和接受收据持久保�
 
 云端 Jev／本地 Clef 决策配置用于既有身份与召回任务，检查和启用是不同操作；本地配置只连接已有服务，不安装、启动或下载模型。提供方的概率语义保持区别，接口检查不等于真实模型判断能力已验收，也不替代生成模型或 ASR。
 
-本轮发行仅面向 macOS Apple Silicon；Reddit 采集与 pyannote 说话人分离已同意延期，现有内部合同不代表能力已上线。不发布 Windows V3.0。构建 `2026.10.09.1` 的源码、产物和最终验证以 [V3.0 发行说明](docs/releases/v3.0/release-20261009.md)为准；发行范围不代表未验证的协议跳转或真实模型能力已完成。
+本轮发行仅面向 macOS Apple Silicon；Reddit 采集与 pyannote 说话人分离已同意延期，现有内部合同不代表能力已上线。不发布 Windows V3.0。当前补丁构建 `2026.10.09.2` 的源码、产物和实际发布状态以 [V3.0.1 发行说明](docs/releases/v3.0/release-20261009-3.0.1.md)为准；[V3.0 发行说明](docs/releases/v3.0/release-20261009.md)保留统一整理的历史验收；发行范围不代表未验证的协议跳转或真实模型能力已完成。
 
 ### 数据、费用与更新
 
 - **本地保存**：V3 的原始 raw 与新 Wiki 成果保存在 Obsidian Vault；本机 SQLite 保存来源身份、任务、恢复预算和接受收据。旧 SQL 知识、认可及个人判断保留历史只读，不作为新 Wiki 主链，也不与 Vault 双向同步。
 - **本地优先不等于全离线**：已有内容浏览与搜索在本机完成；获取网络材料、使用云模型或飞书需要联网。云端处理会将任务所需材料交给对应服务，账号、额度及费用由你自行管理。
 - **备份两处**：同时备份应用数据与 Vault。Mac 数据位于 `~/Library/Application Support/Knowledge Distiller/`，Windows 位于 `%LOCALAPPDATA%\Knowledge Distiller`；凭据迁移可能需要重新配置。
-- **升级**：V2.0 可在设置中通过签名更新升级到 V3.0；其他版本的迁移范围以发行说明为准。选择原程序与原数据目录，并同时备份应用数据与 Vault；V3.0 使用 Schema 27，升级后不能用 V2.0 打开新库，回退须恢复升级前备份。升级不自动重跑真实素材；不要同时运行两个版本。
+- **升级**：受此缺陷影响的 V2.0／V3.0 更新页无法完成按钮流程；本次请下载独立安装器，由用户自行升级到 V3.0.1。后端 HTTP 验收不代表旧更新页可用；其他版本的迁移范围以发行说明为准。选择原程序与原数据目录，并同时备份应用数据与 Vault；V3.0 使用 Schema 27，升级后不能用 V2.0 打开新库，回退须恢复升级前备份。升级不自动重跑真实素材；不要同时运行两个版本。
 
 ### 关于项目
 
