@@ -30,9 +30,9 @@
 
 ### 下载与开始使用
 
-- **当前公开版：V1.3**（构建 `2026.09.15.6`）。[发行与验收说明](docs/releases/v1.3/release-20260915.md)。
-- **Mac**：[下载 Apple Silicon 安装器](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.15.6/KnowledgeDistillerInstaller-macos-arm64.zip)，约 33 MB，要求 macOS 14+。解压并打开安装器，选择应用和数据目录；不支持 Intel Mac。
-- **Windows**：[下载 x64 安装器](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.15.6/KnowledgeDistillerInstaller-windows-x86_64.exe)，约 46 MB。运行安装器并选择可写的程序与数据目录。已验证 Windows 10 22H2，Windows 11 与 ARM64 尚未验证。
+- **当前公开版：V2.0.1**（构建 `2026.10.10.1`，macOS）。[发行与验收说明](docs/releases/v2.0.1.md)。
+- **Mac**：[下载 Apple Silicon 安装器](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.10.10.1/KnowledgeDistillerInstaller-2026.10.10.1-Mac-arm64.zip)，约 33 MB，要求 macOS 14+。解压并打开安装器，选择应用和数据目录；不支持 Intel Mac。
+- **Windows（保留 V1.3）**：[下载 x64 安装器](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.15.6/KnowledgeDistillerInstaller-windows-x86_64.exe)，约 46 MB。运行安装器并选择可写的程序与数据目录。已验证 Windows 10 22H2，Windows 11 与 ARM64 尚未验证。
 - **首次安全提示**：Mac 当前未公证，Windows 未作发行者代码签名。请核对下载来源，按系统提示处理，不关闭整体安全防护；Mac 可参考 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。GitHub 的 `Source code` 压缩包不是应用安装包。
 - **首次配置**：在设置中选择已在 Obsidian 打开过的 Vault，配置模型连接，再用一段短文本试一次蒸馏。按所用功能准备 Chrome、Codex、Obsidian 及自己的账号，无需另搭 Python 环境。
 - **按需启用**：处理有声内容前配置语音识别，可选本地 Qwen 或云端豆包；Qwen 需主动下载安装并保存启用。内容平台连接、飞书机器人按需配置。

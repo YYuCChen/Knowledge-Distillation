@@ -78,16 +78,26 @@ def _allowances(left, right, budget):
     return a, b
 
 
-def context_window(snapshot, concern, *, full_context_ref=''):
+def context_window(snapshot, concern, *, full_context_ref='', _cache=None):
     """Shared full marked context for Local Web and Feishu; never edits choices."""
     import hashlib
+    from bisect import bisect_left, bisect_right
     start, end = concern['start'], concern['end']
     if not isinstance(start, int) or not isinstance(end, int) or not 0 <= start <= end <= len(snapshot):
         raise ValueError('invalid concern span')
     if snapshot[start:end] != concern['text']:
         raise ValueError('concern does not match source span')
-    clusters = _clusters(snapshot)
-    boundaries = {0, len(snapshot), *(a for a, _ in clusters), *(b for _, b in clusters)}
+    index = _cache.get(snapshot) if _cache is not None else None
+    if index is None:
+        clusters = _clusters(snapshot)
+        starts = [a for a, _ in clusters]
+        ends = [b for _, b in clusters]
+        boundaries = {0, len(snapshot), *starts, *ends}
+        source_hash = hashlib.sha256(snapshot.encode('utf-8')).hexdigest()
+        index = clusters, starts, ends, boundaries, source_hash
+        if _cache is not None:
+            _cache[snapshot] = index
+    clusters, starts, ends, boundaries, source_hash = index
     if start not in boundaries or end not in boundaries:
         raise ValueError('concern span splits a display cluster')
     before, after = snapshot[:start], snapshot[end:]
@@ -108,13 +118,13 @@ def context_window(snapshot, concern, *, full_context_ref=''):
             if a < right < b:
                 right = b
     else:
-        left_clusters = [(a, b) for a, b in clusters if b <= start]
-        right_clusters = [(a, b) for a, b in clusters if a >= end]
-        left_n, right_n = _allowances(len(left_clusters), len(right_clusters), 48)
-        left = left_clusters[-left_n][0] if left_n else start
-        right = right_clusters[right_n - 1][1] if right_n else end
+        left_count = bisect_right(ends, start)
+        right_offset = bisect_left(starts, end)
+        left_n, right_n = _allowances(left_count, len(clusters) - right_offset, 48)
+        left = starts[left_count - left_n] if left_n else start
+        right = ends[right_offset + right_n - 1] if right_n else end
     return {
-        'source_hash': hashlib.sha256(snapshot.encode('utf-8')).hexdigest(),
+        'source_hash': source_hash,
         'concern_uid': concern.get('concern_uid', ''),
         'before': snapshot[left:start], 'marked': snapshot[start:end],
         'after': snapshot[end:right], 'span': [start, end],

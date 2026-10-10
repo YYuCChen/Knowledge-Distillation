@@ -152,9 +152,20 @@ class Store:
 
     def expire_submitted_sources(self) -> None:
         with connect(self.path) as connection:
+            now = _now()
+            # A polling GET must stay read-only when there is nothing to clear.
+            # Even an UPDATE matching zero rows takes SQLite's writer lock.
+            if connection.execute(
+                """SELECT 1 FROM submitted_sources
+                   WHERE retain_until IS NOT NULL AND retain_until <= ?
+                     AND (content IS NOT NULL OR input_metadata != '{}') LIMIT 1""",
+                (now,),
+            ).fetchone() is None:
+                return
             connection.execute(
                 """UPDATE submitted_sources SET content = NULL, input_metadata = '{}'
-                   WHERE retain_until IS NOT NULL AND retain_until <= ?""", (_now(),)
+                   WHERE retain_until IS NOT NULL AND retain_until <= ?
+                     AND (content IS NOT NULL OR input_metadata != '{}')""", (now,)
             )
 
     def reject_submitted_source(self, item_id: int, code: str) -> None:

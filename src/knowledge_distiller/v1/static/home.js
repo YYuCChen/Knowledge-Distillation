@@ -2,6 +2,10 @@ let updating = false;
 let polling = false;
 let actionGeneration = 0;
 const drafts = new Map();
+const actionQueue = [];
+const pendingScopes = new Set();
+const pendingButtons = new WeakMap();
+let drainingActions = false;
 let lastServerHTML = document.querySelector('#home-results')?.innerHTML;
 // The organization event this tab saw when it loaded. A failure recorded before
 // then is history, not feedback for this page (BUG-20260916-02); a refresh or a
@@ -75,7 +79,13 @@ function reconcile(current, next) {
     return;
   }
   if (current.matches('audio')) {
-    if (current.dataset.audioRevision !== next.dataset.audioRevision || current.getAttribute('src') !== next.getAttribute('src')) {
+    const nextSource = audioSource(next);
+    if (current.dataset.audioRevision !== next.dataset.audioRevision || audioSource(current) !== nextSource) {
+      if (!current.getAttribute('src')) {
+        current.dataset.audioSrc = nextSource;
+        current.dataset.audioRevision = next.dataset.audioRevision || '';
+        return;
+      }
       let choice = current.nextElementSibling;
       if (!choice?.hasAttribute('data-audio-switch')) {
         choice = document.createElement('button');
@@ -85,12 +95,16 @@ function reconcile(current, next) {
       }
       choice.textContent = '原音已更新，切换回听';
       choice.onclick = () => {
-        current.pause(); current.src = next.getAttribute('src');
+        current.pause(); current.dataset.audioSrc = nextSource; current.src = nextSource;
         current.dataset.audioRevision = next.dataset.audioRevision || '';
         current.load(); choice.remove();
       };
     }
     return;
+  }
+  const pendingAction = pendingButtons.get(current);
+  if (pendingAction) {
+    pendingAction.serverDisabled = next.hasAttribute('disabled');
   }
   const editing = current.matches('input:not([type="hidden"]), textarea');
   for (const attribute of Array.from(current.attributes)) {
@@ -178,6 +192,8 @@ function applyPage(html, submittedForm, submittedCard) {
     target?.focus({preventScroll: true});
   }
   observeFragments();
+  loadVisibleAudio(current);
+  refreshPendingButtons();
   if (anchor?.isConnected) window.scrollBy(0, anchor.getBoundingClientRect().top - anchorTop);
 }
 
@@ -187,7 +203,80 @@ document.addEventListener('click', event => {
   const open = button.getAttribute('aria-expanded') !== 'true';
   button.setAttribute('aria-expanded', String(open));
   document.getElementById(button.getAttribute('aria-controls')).hidden = !open;
+  if (open) loadVisibleAudio(document.getElementById(button.getAttribute('aria-controls')));
 });
+
+function audioSource(audio) {
+  return audio.dataset.audioSrc || audio.getAttribute('src') || '';
+}
+
+function loadVisibleAudio(root = document) {
+  for (const audio of root.querySelectorAll('audio[data-audio-src]')) {
+    if (audio.getAttribute('src') || audio.closest('[hidden], details:not([open])')) continue;
+    audio.preload = 'metadata';
+    audio.src = audio.dataset.audioSrc;
+    audio.load();
+  }
+}
+
+function refreshPendingButtons() {
+  for (const action of pendingScopes) {
+    if (!action.button) continue;
+    action.button.disabled = true;
+    // Keep the established button copy. Only the existing suggestion/recovery
+    // actions have progress labels; ordinary confirmations get no new UI.
+    if (action.running && action.runningLabel) action.button.textContent = action.runningLabel;
+  }
+}
+
+async function drainActions() {
+  if (drainingActions) return;
+  drainingActions = true;
+  try {
+    while (actionQueue.length) {
+      const action = actionQueue.shift();
+      const {form, button, data} = action;
+      let accepted = false;
+      action.running = true;
+      refreshPendingButtons();
+      try {
+        if (form.isConnected === false || form.closest('[data-stale-confirmation]')) {
+          throw new Error('该疑点已处理或更新，请核对当前状态；输入已保留。');
+        }
+        if (form.matches('[data-rerecognize]') && !await window.kdDialog('重新识别会重做本素材的转写与审阅，当前判断将重新开始。确定继续吗？', {confirm: true})) continue;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 120000);
+        try {
+          const response = await fetch(action.url, {method: 'POST', body: data, signal: controller.signal});
+          const html = await response.text();
+          if (response.status >= 500) throw new Error(response.headers.get('Content-Type')?.startsWith('text/plain') ? html : '处理暂时失败，已保留输入，请稍后再试。');
+          if (!response.ok && !html.includes('id="home-results"')) throw new Error(html);
+          applyPage(html, response.ok ? form.id : null,
+            response.ok ? form.closest('.todo-card-shell')?.dataset.syncKey : null);
+          accepted = response.ok;
+        } finally {
+          clearTimeout(timeout);
+        }
+      } catch (error) {
+        await window.kdDialog(error.name === 'AbortError'
+          ? '等待响应超时，保存结果尚未确认。输入已保留，请先核对当前状态再重试。'
+          : error.message);
+      } finally {
+        pendingScopes.delete(action);
+        if (button) {
+          pendingButtons.delete(button);
+          button.disabled = Boolean(form.closest('[data-stale-confirmation]')) ||
+            (accepted ? action.serverDisabled ?? action.originalDisabled : action.originalDisabled);
+          if (action.runningLabel) button.textContent = action.originalLabel;
+        }
+        action.done();
+      }
+    }
+  } finally {
+    drainingActions = false;
+    updating = false;
+  }
+}
 
 document.addEventListener('input', event => {
   if (event.target.matches('.manual-confirmation input[name="value"]')) {
@@ -252,7 +341,10 @@ document.addEventListener('submit', async event => {
   if (!form.closest('#home-results')) return;
   event.preventDefault();
   if (form.closest('[data-stale-confirmation]')) return;
-  if (updating) return;
+  const scope = form.closest('.todo-card-shell') || form;
+  if (Array.from(pendingScopes).some(action => action.scope === scope)) {
+    return;
+  }
   if ((form.matches('.manual-confirmation') || (form.matches('[data-group-confirmation]') && event.submitter?.value === 'manual')) && !form.elements.value.value.trim()) {
     const input = form.elements.value;
     input.value = '';
@@ -263,40 +355,23 @@ document.addEventListener('submit', async event => {
   }
   updating = true;
   actionGeneration += 1;
-  if (form.matches('[data-rerecognize]') && !await window.kdDialog('重新识别会重做本素材的转写与审阅，当前判断将重新开始。确定继续吗？', {confirm: true})) { updating = false; return; }
   const button = event.submitter;
   const data = new FormData(form);
   if (button?.name) data.append(button.name, button.value);
   const suggesting = form.matches('[data-suggest-candidates]');
   const recovering = form.matches('[data-recover-audio]');
-  const buttonLabel = suggesting || recovering ? button?.textContent : null;
-  if (button) {
-    button.disabled = true;
-    if (suggesting) button.textContent = '正在结合上下文生成候选…';
-    if (recovering) button.textContent = '正在恢复局部原音…';
-  }
-  let accepted = false;
-  try {
-    const response = await fetch(button?.getAttribute('formaction') || form.getAttribute('action'), { method: 'POST', body: data });
-    const html = await response.text();
-    if (response.status >= 500) throw new Error(response.headers.get('Content-Type')?.startsWith('text/plain') ? html : '处理暂时失败，已保留输入，请稍后再试。');
-    if (!response.ok && !html.includes('id="home-results"')) throw new Error(html);
-    applyPage(html, response.ok ? form.id : null,
-      response.ok ? form.closest('.todo-card-shell')?.dataset.syncKey : null);
-    accepted = response.ok;
-  } catch (error) {
-    await window.kdDialog(error.message);
-  } finally {
-    updating = false;
-    if (button) {
-      // An accepted response already gave this button the server's state, e.g.
-      // 整理 stays disabled while running (BUG-20260916-01). Only a request
-      // that was not accepted restores the local in-flight state.
-      if (!accepted || button.closest('[data-stale-confirmation]'))
-        button.disabled = Boolean(button.closest('[data-stale-confirmation]'));
-      if (suggesting || recovering) button.textContent = buttonLabel;
-    }
-  }
+  return new Promise(done => {
+    const url = button?.getAttribute('formaction') || form.getAttribute('action');
+    const action = {form, button, data, scope, url, done,
+      originalDisabled: Boolean(button?.disabled), originalLabel: button?.textContent,
+      runningLabel: suggesting ? '正在结合上下文生成候选…' : recovering ? '正在恢复局部原音…'
+        : null};
+    pendingScopes.add(action);
+    if (button) pendingButtons.set(button, action);
+    actionQueue.push(action);
+    refreshPendingButtons();
+    drainActions();
+  });
 });
 
 // Redacted local diagnostics (BUG-20260917-01): report only that a concern's
@@ -345,7 +420,9 @@ document.querySelectorAll('[data-persist-details]').forEach(d => {
 document.addEventListener('toggle', event => {
   const d = event.target;
   if (d.matches('details[data-persist-details]')) localStorage.setItem(`knowledge-distiller:home:${d.dataset.persistDetails}`, d.open ? 'open' : 'closed');
+  if (d.matches('details') && d.open) loadVisibleAudio(d);
 }, true);
+loadVisibleAudio();
 
 // Fit context to rendered space, so Latin text is not limited by a CJK character count.
 function fitFragment(fragment) {

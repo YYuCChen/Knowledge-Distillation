@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import threading
 from pathlib import Path
 
@@ -67,6 +68,51 @@ def test_home_starts_as_a_plain_submission_surface(web) -> None:
     assert "粘贴链接" in response.text
     assert "最近整理" not in response.text
     assert "Settings 正在接入" not in response.text
+
+
+@pytest.mark.parametrize('selected', [False, True])
+def test_long_review_reuses_preparation_without_caching_across_requests(web, monkeypatch, selected):
+    from knowledge_distiller.v1 import confirmation_display
+    client, store, _ = web
+    item = store.create_item('https://example.test/synthetic-long-review')
+    text = '这是合成验收素材，保持每个疑点的独立坐标。' * 2400
+    pending = {'snapshot': text, 'token': 'synthetic-review', 'review_required': False,
+        'concerns': [{'start': n * 500, 'end': n * 500 + 1,
+                      'text': text[n * 500:n * 500 + 1], 'audio_name': str(n),
+                      'candidates': ['合成']} for n in range(84)]}
+    store.mark_waiting(item, pending)
+    counts = {'review': 0, 'clusters': 0}
+    read = store.confirmation_view
+    clusters = confirmation_display._clusters
+    def counted_read(item_id):
+        counts['review'] += 1
+        return read(item_id)
+    def counted_clusters(snapshot):
+        counts['clusters'] += 1
+        return clusters(snapshot)
+    monkeypatch.setattr(store, 'confirmation_view', counted_read)
+    monkeypatch.setattr(confirmation_display, '_clusters', counted_clusters)
+    url = f'/?item={item}' if selected else '/'
+    first = client.get(url)
+    assert first.status_code == 200
+    assert first.text.count('data-confirmation-card=') == 84
+    assert counts == {'review': 1, 'clusters': 1}
+    pending['concerns'] = pending['concerns'][:-1]
+    store.mark_waiting(item, pending)
+    second = client.get(url)
+    assert second.status_code == 200
+    assert second.text.count('data-confirmation-card=') == 83
+    assert counts == {'review': 2, 'clusters': 2}
+
+
+def test_home_does_not_take_writer_lock_without_expired_content(web):
+    client, store, _ = web
+    with sqlite3.connect(store.path) as writer:
+        writer.execute('BEGIN IMMEDIATE')
+        # A concurrent answer save can hold the writer lock while the homepage
+        # reads. Empty retention cleanup must not turn that GET into a writer.
+        response = client.get('/')
+        assert response.status_code == 200
 
 
 def test_legacy_unconfirmed_item_requires_explicit_rerecognition(web) -> None:
