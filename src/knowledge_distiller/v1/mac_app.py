@@ -304,8 +304,12 @@ def main(argv=None):
                                        'no_open':args.no_open}))
             helper = updates.root/'update-helper'
             shutil.copy2(Path(updates.info['bundle'])/'Contents/MacOS/update-helper', helper)
-            process = subprocess.Popen([str(helper), *(['--component'] if updates.info.get('component_updates') else []), str(plan)],
-                                       start_new_session=True, stdout=output, stderr=output)
+            if updates.info.get('component_updates'):
+                from .mac_update_launch import launch
+                process = launch(helper, plan, log_path)
+            else:
+                process = subprocess.Popen([str(helper), str(plan)],
+                                           start_new_session=True, stdout=output, stderr=output)
         except Exception:
             worker.release_update()
             raise
