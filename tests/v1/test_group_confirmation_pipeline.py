@@ -28,6 +28,54 @@ def args(store,item,*,selection=None,request='request-1'):
                 selected_member_uids=selection or group['member_uids'])
 
 
+def test_long_review_real_submission_preserves_replay_after_edits_and_restart(setup, monkeypatch):
+    from dataclasses import asdict
+    from knowledge_distiller.primary import PrimaryChunk
+    from knowledge_distiller.v1.web import create_app
+    from knowledge_distiller.v1 import confirmation as module
+    from .test_confirmation import long_chinese_transcript
+    store, item, service = setup
+    paragraphs, original, candidate = long_chinese_transcript()
+    concerns = []
+    for index in (10, 200, 800):
+        start = sum(map(len, paragraphs[:index])) + paragraphs[index].index('原词')
+        concerns.append(dict(start=start, end=start+2, text='原词', reason='合成回听',
+            candidates=['原词', '订正词语'], audio_name=f'concern-{index}.wav', member_id='primary-audio'))
+    chunks = [asdict(PrimaryChunk(p, i*30, (i+1)*30)) for i,p in enumerate(paragraphs)]
+    pending = form_groups(dict(snapshot=candidate, concerns=concerns, uncertainties=[],
+        resolved=[], review_required=False, review_identity='synthetic-long-review',
+        audio_timeline=dict(text=original, chunks=chunks, timeline_status='unverified',
+                            duration_seconds=30000)), item)
+    store.mark_waiting(item, pending)
+    audio = service.runtime_root/'items'/str(item)/'audio/standard.wav'
+    audio.parent.mkdir(parents=True)
+    audio.write_bytes(b'synthetic audio; locator only checks existence')
+    module._cached_alignment_blocks.cache_clear()
+    real = module.SequenceMatcher
+    def bounded(junk, a, b, **kwargs):
+        assert max(len(a), len(b)) <= 512, 'full comparison on submission'
+        return real(junk, a, b, **kwargs)
+    monkeypatch.setattr(module, 'SequenceMatcher', bounded)
+    client = create_app(store, service).test_client()
+    for index in range(2):
+        before = store.confirmation_view(item)
+        member = before['concerns'][0]
+        location = service.transcript_location(item, token=before['token'],
+            start=member['start'], end=member['end'])
+        # Explicit expected chapter: repeated reading must not map elsewhere.
+        assert (10, 200)[index]*30 <= location[0] < (10, 200)[index]*30 + 30
+        result = client.post(f'/items/{item}/confirm', data=dict(action='manual', value='订正词语',
+            token=before['token'], concern_id=member['audio_name']), follow_redirects=True)
+        assert result.status_code == 200
+        after = store.confirmation_view(item)
+        assert len(after['concerns']) == 2-index
+        saved = after['correction_locations'][-1]
+        service.store = Store(store.path)  # persisted evidence survives restart
+        assert service.transcript_location(item, token=after['token'],
+            start=saved['start'], end=saved['end']) == location
+    assert store.item_bundle(item)['source_fact_id'] is None
+
+
 def test_eight_once_one_fact_one_ledger_and_replay(setup):
     store,item,service=setup;request=args(store,item)
     assert service.resolve_group(item,'candidate','识神',**request).state=='queued'
