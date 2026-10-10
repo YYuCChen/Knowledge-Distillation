@@ -1,3 +1,5 @@
+import pytest
+
 from knowledge_distiller.v1.confirmation_display import local_choices
 from knowledge_distiller.v1.reviewer import ReviewBinding
 
@@ -80,3 +82,18 @@ def test_context_does_not_modify_candidate_callback_values():
     original = copy.deepcopy(concern)
     assert context_window('原文', concern)['marked'] == '原文'
     assert concern == original
+
+
+@pytest.mark.parametrize('snapshot,marked', [
+    ('中文语境' * 100 + '需确认' + '后面的中文' * 100, '需确认'),
+    ('English words before ' * 100 + 'uncertain' + ' words after' * 100, 'uncertain'),
+    ('家庭👨‍👩‍👧‍👦组合e\u0301字符' * 100 + '疑点' + '旗帜🇹🇼结束' * 100, '疑点'),
+])
+def test_context_request_cache_preserves_exact_window(snapshot, marked):
+    from knowledge_distiller.v1.confirmation_display import context_window
+    start = snapshot.index(marked)
+    concern = {'start': start, 'end': start + len(marked), 'text': marked}
+    cache = {}
+    expected = context_window(snapshot, concern, full_context_ref='/synthetic')
+    assert context_window(snapshot, concern, full_context_ref='/synthetic', _cache=cache) == expected
+    assert context_window(snapshot, concern, full_context_ref='/synthetic', _cache=cache) == expected

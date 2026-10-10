@@ -182,12 +182,13 @@ def test_browser_reports_a_concern_audio_that_cannot_play(waiting):
     thread.start()
     try:
         with sync_playwright() as playwright:
-            if not Path(playwright.chromium.executable_path).exists():
-                pytest.skip('Browser regression requires playwright install chromium')
-            browser = playwright.chromium.launch()
+            if not Path(playwright.webkit.executable_path).exists():
+                pytest.skip('Browser regression requires playwright install webkit')
+            browser = playwright.webkit.launch()
             page = browser.new_page()
+            page.goto(f'http://127.0.0.1:{server.server_port}/?item={item}')
             with page.expect_request(lambda request: request.url.endswith('/confirmation-audio/diagnostic')):
-                page.goto(f'http://127.0.0.1:{server.server_port}/?item={item}')
+                page.locator('[data-card-toggle]').click()
             page.wait_for_timeout(300)
             recovery_entries = page.locator('form[data-recover-audio]').count()
             browser.close()

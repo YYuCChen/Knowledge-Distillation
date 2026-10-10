@@ -624,17 +624,26 @@ def _home_context(
     queue.sort(key=lambda entry: entry['enqueue_seq'])
     row_by_id = {row['item_id']: row for row in rows}
     todo_cards = []
+    # One normalized review and context index per item in this response. A long
+    # recording can have dozens of cards sharing the same full audio timeline.
+    pending_by_item = {}
+    context_cache = {}
     for entry in queue:
         row = row_by_id.get(entry['item_id'])
         if row is None or row['state'] != 'waiting_user':
             continue
-        pending = store.confirmation_view(row['item_id'])
+        if row['item_id'] not in pending_by_item:
+            pending_by_item[row['item_id']] = store.confirmation_view(row['item_id'])
+        pending = pending_by_item[row['item_id']]
+        if pending is None:
+            continue
         group = next((g for g in pending.get('groups', []) if g['group_id'] == entry['group_id']), None)
         if group is None:
             continue
         members = set(group['member_uids'])
-        projected = {**pending, 'concerns': [c for c in pending.get('concerns', []) if c['concern_uid'] in members][:1]}
-        view = _item_view({**dict(row), 'confirmation_json': json.dumps(projected)}, vault_path, store.path.parent)
+        projected = {**pending, 'concerns': [dict(c) for c in pending.get('concerns', []) if c['concern_uid'] in members][:1]}
+        view = _item_view(row, vault_path, store.path.parent,
+                          confirmation_override=projected, context_cache=context_cache)
         view['group'] = group
         view['enqueue_seq'] = entry['enqueue_seq']
         todo_cards.append(view)
@@ -652,7 +661,7 @@ def _home_context(
         "collection_processing": sum(c['state']=='working' for c in collection_cards),
         "collection_waiting": sum(c['counts']['queued'] for c in collection_cards if c['state']=='queued'),
         "selected": (
-            _item_view(selected_row, vault_path, store.path.parent)
+            _item_view(selected_row, vault_path, store.path.parent, context_cache=context_cache)
             if selected_row is not None
             else None
         ),
@@ -694,10 +703,11 @@ def _pending_captures(store):
     return views
 
 
-def _item_view(row, vault_path: str | None, data_root=None) -> dict[str, object]:
+def _item_view(row, vault_path: str | None, data_root=None, *,
+               confirmation_override=None, context_cache=None) -> dict[str, object]:
     payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
     metadata = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
-    confirmation = (
+    confirmation = confirmation_override if confirmation_override is not None else (
         json.loads(row["confirmation_json"]) if row["confirmation_json"] else None
     )
     if confirmation is not None:
@@ -707,7 +717,8 @@ def _item_view(row, vault_path: str | None, data_root=None) -> dict[str, object]
             from .confirmation_display import context_window
             try:
                 concern['context'] = context_window(confirmation.get('snapshot', ''), concern,
-                    full_context_ref=f"/items/{row['item_id']}/confirmation-context/{concern.get('concern_uid') or concern.get('audio_name', '')}")
+                    full_context_ref=f"/items/{row['item_id']}/confirmation-context/{concern.get('concern_uid') or concern.get('audio_name', '')}",
+                    _cache=context_cache)
             except ValueError:
                 concern['context'] = None
         confirmation.setdefault("review_required", True)

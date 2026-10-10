@@ -278,7 +278,7 @@
                           <button type="submit" class="secondary-small" data-suggest-candidates>结合上下文补充候选</button>
                         </form>
                         {% endif %}
-                        <audio data-audio-identity="{{ key }}" data-audio-revision="{{ concern.audio_revision|default(concern.audio_name) }}" controls preload="metadata" aria-label="疑点 {{ loop.index }} 原音" src="{{ url_for('confirmation_audio', item_id=item.id, concern_id=concern.audio_name) }}"></audio>
+                        <audio data-audio-identity="{{ key }}" data-audio-revision="{{ concern.audio_revision|default(concern.audio_name) }}" controls preload="none" aria-label="疑点 {{ loop.index }} 原音" data-audio-src="{{ url_for('confirmation_audio', item_id=item.id, concern_id=concern.audio_name) }}"></audio>
                         {% if concern.audio_recovery_required|default(false) %}
                         <form action="{{ url_for('recover_confirmation_audio', item_id=item.id) }}" method="post" data-recover-audio>
                           <input type="hidden" name="token" value="{{ item.confirmation.token }}">
