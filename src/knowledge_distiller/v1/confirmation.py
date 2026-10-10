@@ -5,7 +5,9 @@ import os
 import re
 import threading
 import wave
+from bisect import bisect_left
 from difflib import Match, SequenceMatcher
+from functools import lru_cache
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,7 +16,71 @@ from knowledge_distiller.media import CommandRunner, SubprocessCommandRunner
 from knowledge_distiller.primary import PrimaryRecovery, StandardAudio
 
 
+def _token_matches(left, right):
+    """Bound expensive matching to small gaps between unique context anchors.
+
+    Repeated Chinese characters make unbounded autojunk=False quadratic. Use
+    exact eight-token contexts unique on BOTH sides, in monotone order. Large
+    gaps without trustworthy context stay unmatched; replay must remain
+    unavailable rather than guess an occurrence in a rewritten passage.
+    """
+    limit, width = 512, 8
+    if max(len(left), len(right)) <= limit:
+        return SequenceMatcher(None, left, right, autojunk=False).get_matching_blocks()
+
+    def unique_windows(words):
+        positions = {}
+        for i in range(len(words) - width + 1):
+            key = tuple(words[i:i + width])
+            positions[key] = i if key not in positions else None
+        return positions
+
+    a_windows, b_windows = unique_windows(left), unique_windows(right)
+    pairs = sorted((a, b_windows[key]) for key, a in a_windows.items()
+                   if a is not None and b_windows.get(key) is not None)
+    # Longest increasing subsequence prevents crossing anchors after deletions
+    # or reordered passages. Overlapping windows are consumed only once.
+    tails, indices, previous = [], [], []
+    for index, (_, b) in enumerate(pairs):
+        slot = bisect_left(tails, b)
+        previous.append(indices[slot - 1] if slot else -1)
+        if slot == len(tails):
+            tails.append(b)
+            indices.append(index)
+        else:
+            tails[slot], indices[slot] = b, index
+    anchors = []
+    index = indices[-1] if indices else -1
+    while index >= 0:
+        anchors.append(pairs[index])
+        index = previous[index]
+    anchors.reverse()
+    matches = []
+    a_end = b_end = 0
+    for a, b in [*anchors, (len(left), len(right))]:
+        if a < a_end or b < b_end:
+            continue
+        if left[a_end:a] == right[b_end:b]:
+            if a > a_end:
+                matches.append(Match(a_end, b_end, a - a_end))
+        elif max(a - a_end, b - b_end) <= limit:
+            matches.extend(Match(m.a + a_end, m.b + b_end, m.size) for m in
+                           SequenceMatcher(None, left[a_end:a], right[b_end:b],
+                                           autojunk=False).get_matching_blocks() if m.size)
+        if a < len(left) and b < len(right):
+            matches.append(Match(a, b, width))
+            a_end, b_end = a + width, b + width
+    return matches
+
+
 def alignment_blocks(original, candidate):
+    # Bound retained transcripts and return a fresh list so callers cannot
+    # mutate the cached anchors. A group's members share the same snapshot.
+    return list(_cached_alignment_blocks(original, candidate))
+
+
+@lru_cache(maxsize=2)
+def _cached_alignment_blocks(original, candidate):
     """Align words, retaining exact character anchors for replay positions.
 
     Character matching makes repeated spaces/letters in long English recordings
@@ -22,7 +88,7 @@ def alignment_blocks(original, candidate):
     Chinese characters and punctuation remain individual anchors.
     """
     if original == candidate:
-        return [Match(0, 0, len(original)), Match(len(original), len(candidate), 0)]
+        return (Match(0, 0, len(original)), Match(len(original), len(candidate), 0))
     pattern = r"[A-Za-z0-9]+|[^\s]"
     left = list(re.finditer(pattern, original))
     right = list(re.finditer(pattern, candidate))
@@ -36,8 +102,7 @@ def alignment_blocks(original, candidate):
     left_end, right_end = len(left) - suffix, len(right) - suffix
     matches = [Match(0, 0, prefix)]
     matches += [Match(b.a + prefix, b.b + prefix, b.size) for b in
-                SequenceMatcher(None, left_words[prefix:left_end], right_words[prefix:right_end],
-                                autojunk=False).get_matching_blocks()]
+                _token_matches(left_words[prefix:left_end], right_words[prefix:right_end])]
     matches.append(Match(left_end, right_end, suffix))
     result = []
     for block in matches:
@@ -53,7 +118,7 @@ def alignment_blocks(original, candidate):
                     continue
             result.append(current)
     result.append(Match(len(original), len(candidate), 0))
-    return result
+    return tuple(result)
 
 
 class ConfirmationAudioError(RuntimeError):

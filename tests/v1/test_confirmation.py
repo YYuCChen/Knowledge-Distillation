@@ -210,3 +210,53 @@ def test_unchanged_transcript_needs_no_alignment_search(monkeypatch):
     text = 'A long unchanged recording. ' * 1000
     blocks = module.alignment_blocks(text, text)
     assert blocks[0] == (0, 0, len(text))
+
+
+def long_chinese_transcript():
+    # Independent synthetic recording, with edits throughout rather than one
+    # insertion hidden by prefix/suffix trimming. Numbers identify occurrences.
+    paragraphs = [''.join(f'第{i}节第{j}段讨论。我们反复说明这个问题，原词需要确认。'
+                          for j in range(3)) for i in range(1000)]
+    original = ''.join(paragraphs)
+    candidate = ''.join(p.replace('这个问题', '这一问题', 1) for p in paragraphs)
+    return paragraphs, original, candidate
+
+
+def test_long_chinese_distributed_edits_bound_search_and_keep_occurrences(monkeypatch):
+    import knowledge_distiller.v1.confirmation as module
+    paragraphs, original, candidate = long_chinese_transcript()
+    real = module.SequenceMatcher
+    def bounded(junk, a, b, **kwargs):
+        assert max(len(a), len(b)) <= 512, 'unbounded full-transcript comparison'
+        return real(junk, a, b, **kwargs)
+    monkeypatch.setattr(module, 'SequenceMatcher', bounded)
+    blocks = module.alignment_blocks(original, candidate)
+    assert all(original[b.a:b.a+b.size] == candidate[b.b:b.b+b.size] for b in blocks)
+    assert sum(b.size for b in blocks) > len(original) * .90
+    # The same reading occurs three times per chapter. Check all occurrences
+    # rather than accepting a matching string from the wrong chapter.
+    offset = 0
+    for paragraph in paragraphs:
+        start = paragraph.index('原词') + offset
+        assert any(b.b <= start and start + 2 <= b.b + b.size
+                   and b.a + start - b.b == start for b in blocks)
+        offset += len(paragraph)
+
+
+def test_long_repeated_rewrite_has_no_guessed_replay(tmp_path):
+    import knowledge_distiller.v1.confirmation as module
+    raw = '重复原文。' * 3000
+    candidate = '重复改文。' * 3000
+    path = tmp_path / 'synthetic.wav'
+    path.write_bytes(b'audio')
+    recovery = PrimaryRecovery(raw, 'zh', (PrimaryChunk(raw, 0, 300),))
+    assert locate_concern_audio(StandardAudio(path, 300), recovery, candidate,
+        ReviewConcern(7000, 7005, candidate[7000:7005], '回听', True)) is None
+
+
+def test_alignment_cache_cannot_be_poisoned_by_a_caller():
+    import knowledge_distiller.v1.confirmation as module
+    blocks = module.alignment_blocks('独立原文', '独立改文')
+    expected = list(blocks)
+    blocks.clear()
+    assert module.alignment_blocks('独立原文', '独立改文') == expected
