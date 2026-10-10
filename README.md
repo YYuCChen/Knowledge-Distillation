@@ -30,7 +30,7 @@
 
 ### 下载与开始使用
 
-- **当前公开版：V2.0.1**（构建 `2026.10.10.2`，macOS）。[发行与验收说明](docs/releases/v2.0.1.md)。
+- **当前公开版：V2.0.1**（构建 `2026.10.10.4`，macOS）。[发行与验收说明](docs/releases/v2.0.1.md)。
 - **Mac**：[下载 Apple Silicon 安装器](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.10.10.2/KnowledgeDistillerInstaller-2026.10.10.2-Mac-arm64.zip)，约 33 MB，要求 macOS 14+。解压并打开安装器，选择应用和数据目录；不支持 Intel Mac。
 - **Windows（保留 V1.3）**：[下载 x64 安装器](https://github.com/YYuCChen/Knowledge-Distillation/releases/download/v2026.09.15.6/KnowledgeDistillerInstaller-windows-x86_64.exe)，约 46 MB。运行安装器并选择可写的程序与数据目录。已验证 Windows 10 22H2，Windows 11 与 ARM64 尚未验证。
 - **首次安全提示**：Mac 当前未公证，Windows 未作发行者代码签名。请核对下载来源，按系统提示处理，不关闭整体安全防护；Mac 可参考 [Apple 官方说明](https://support.apple.com/zh-cn/102445)。GitHub 的 `Source code` 压缩包不是应用安装包。
