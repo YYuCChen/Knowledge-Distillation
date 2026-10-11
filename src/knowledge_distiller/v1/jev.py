@@ -91,6 +91,13 @@ class JevClient:
                 raise JevError('jev_request_invalid')
             if status in {429, 529}:
                 raise JevError('jev_busy')
+            if status == 400:
+                try:
+                    detail = response.json().get('detail')
+                except (ValueError, AttributeError):
+                    detail = None
+                if isinstance(detail, dict) and detail.get('error_type') == 'max_tokens_exceeded':
+                    raise JevError('jev_context_exceeded')
             if status >= 400:
                 raise JevError('jev_request_failed')
             try:

@@ -36,6 +36,7 @@ jobs:
           tests/v1/test_mac_signing.py tests/v1/test_confirmation_concurrency.py
           tests/v1/test_local_secrets.py tests/v1/test_feishu_images.py
           tests/v1/test_feishu_actions.py tests/v1/test_ocr_review_policy.py
+          tests/v1/test_jev_recall_batches.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
